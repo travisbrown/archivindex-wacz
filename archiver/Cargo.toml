@@ -1,0 +1,29 @@
+[package]
+name = "archivindex-archiver"
+description = "Archiving web pages over HTTP into the WACZ format"
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/crate/archivindex-archiver/"
+keywords = ["warc", "wacz", "web", "archive", "http"]
+edition.workspace = true
+readme.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+archivindex-wacz = { version = "0.4.0", path = "../wacz/" }
+archivindex-warc.workspace = true
+chrono.workspace = true
+fluent-uri.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+# Integration tests inspect the raw WARC member to check the recorded index offsets, decoding the
+# gzip members framed by those offsets independently of the writer.
+flate2.workspace = true
+zip.workspace = true

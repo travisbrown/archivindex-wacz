@@ -1,0 +1,37 @@
+[workspace]
+members = ["archiver", "archiver-cli", "wacz"]
+resolver = "3"
+
+[workspace.package]
+authors = ["Travis Brown <travisrobertbrown@gmail.com>"]
+repository = "https://github.com/travisbrown/archivindex"
+keywords = ["warc", "web", "archive"]
+edition = "2024"
+readme = "README.md"
+license = "MIT"
+version = "0.4.0"
+
+[workspace.dependencies]
+# The archiver captures with the byte-exact HTTP client and identifies response payloads.
+archivindex-warc = { git = "https://github.com/travisbrown/archivindex-warc", features = [
+    "payload-identification",
+    "recorder",
+] }
+chrono = "0.4"
+cli-helpers = "0.1"
+data-encoding = "2"
+flate2 = "1"
+# The WARC crate takes and returns URI-valued header fields as `fluent_uri::Uri<String>`.
+fluent-uri = "0.4"
+# The WARC crate's recorder takes its request parts (method, target, headers) as `http` types.
+http = "1"
+indicatif = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+url = "2"
+# Only the DEFLATE codec is needed: WARC and CDX members are stored, and gzip payloads are handled
+# by `flate2` so that compressed members can be read as streams.
+zip = { version = "8", default-features = false, features = ["deflate"] }
