@@ -1,0 +1,34 @@
+[package]
+name = "archivindex-wordpress"
+description = "Capturing and reading WordPress REST API resources as WARC records"
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/crate/archivindex-wordpress/"
+keywords = ["warc", "web", "archive", "http", "wordpress"]
+edition.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+archivindex-archiver.workspace = true
+archivindex-warc = { workspace = true, features = ["gzip", "http"] }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+proptest.workspace = true
+test-strategy.workspace = true

@@ -1,0 +1,41 @@
+# The dependency policy, checked in continuous integration by `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# A path dependency on a package that is never published cannot carry a version requirement.
+allow-wildcard-paths = true
+
+[licenses]
+version = 2
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  # The core source dependencies.
+  "GPL-3.0-only",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The core, WARC, and archiver libraries are consumed from their repositories until they are
+# published.
+allow-git = [
+  "https://github.com/travisbrown/archivindex-core",
+  "https://github.com/travisbrown/archivindex-warc",
+]

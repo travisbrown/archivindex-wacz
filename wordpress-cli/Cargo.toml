@@ -1,0 +1,40 @@
+[package]
+name = "archivindex-wordpress-cli"
+authors.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "archivindex-wordpress"
+path = "src/main.rs"
+# Avoid a rustdoc output-filename collision with the `archivindex-wordpress` library crate.
+doc = false
+
+[features]
+# Compile SQLite from source rather than linking the system library.
+bundled = ["archivindex-archiver/bundled"]
+
+[dependencies]
+archivindex-archiver.workspace = true
+archivindex-cli-support.workspace = true
+archivindex-wordpress = { version = "0.1.0", path = "../wordpress/" }
+chrono.workspace = true
+clap.workspace = true
+humantime = "2"
+log.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+archivindex-test-support.workspace = true
+archivindex-warc.workspace = true
+flate2.workspace = true
+tempfile.workspace = true
