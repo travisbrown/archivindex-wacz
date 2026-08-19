@@ -6,7 +6,7 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
-use archivindex_archiver::client::Error;
+use archivindex_archiver::client::{Archiver, Error};
 use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
@@ -23,6 +23,10 @@ fn operator() -> Operator {
         name: "Test Operator".to_owned(),
         email: Some("operator@example.com".to_owned()),
     }
+}
+
+fn archiver(config: Config) -> Archiver {
+    Archiver::new(config).expect("test archiver configuration should be valid")
 }
 
 /// A simple HTTP/1.1 response with a text body.
@@ -199,10 +203,10 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     let path = directory.path().join("session.wacz");
 
     let summary = Session::new(
-        Config {
+        archiver(Config {
             user_agent: "session-test/1.0".to_owned(),
             ..Config::default()
-        },
+        }),
         "crawl-2026.08",
         operator(),
         &seeds,
@@ -387,7 +391,7 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
     let path = directory.path().join("session.wacz");
 
     let summary = Session::new(
-        Config::default(),
+        archiver(Config::default()),
         "dedup",
         Operator {
             name: "Solo".to_owned(),
@@ -450,10 +454,16 @@ fn session_limit_stops_with_discoveries_still_queued() -> Result<(), Box<dyn std
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("limited.wacz");
 
-    let summary = Session::new(Config::default(), "limited", operator(), [&url], &path)?
-        .processor(SiteProcessor { port })
-        .limit(1)
-        .run()?;
+    let summary = Session::new(
+        archiver(Config::default()),
+        "limited",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .processor(SiteProcessor { port })
+    .limit(1)
+    .run()?;
     let request_paths = server.join().expect("server thread should not panic");
 
     assert_eq!(request_paths, ["/"]);
@@ -478,7 +488,7 @@ fn session_rejects_an_unwritable_operator_before_writing() -> Result<(), Box<dyn
     let path = directory.path().join("session.wacz");
 
     let result = Session::new(
-        Config::default(),
+        archiver(Config::default()),
         "bad-operator",
         Operator {
             name: "Line\r\nBreak".to_owned(),
@@ -533,10 +543,10 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
     let path = directory.path().join("session.wacz");
 
     let summary = Session::new(
-        Config {
+        archiver(Config {
             timeout: Duration::from_millis(100),
             ..Config::default()
-        },
+        }),
         "retry",
         operator(),
         [&url],
@@ -578,13 +588,19 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("session.wacz");
 
-    let summary = Session::new(Config::default(), "unreachable", operator(), [&url], &path)?
-        .retry(RetryConfig {
-            attempts: 2,
-            initial_backoff: Duration::from_millis(10),
-            max_backoff: Duration::from_millis(10),
-        })
-        .run()?;
+    let summary = Session::new(
+        archiver(Config::default()),
+        "unreachable",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .retry(RetryConfig {
+        attempts: 2,
+        initial_backoff: Duration::from_millis(10),
+        max_backoff: Duration::from_millis(10),
+    })
+    .run()?;
 
     assert!(!summary.is_complete());
     assert!(summary.fatal_error.is_none());
@@ -607,7 +623,7 @@ fn session_does_not_retry_permanent_failures() -> Result<(), Box<dyn std::error:
     let path = directory.path().join("session.wacz");
 
     let summary = Session::new(
-        Config::default(),
+        archiver(Config::default()),
         "no-retry",
         operator(),
         ["data:text/plain,hi"],
@@ -633,7 +649,13 @@ fn session_rejects_invalid_identifiers() {
     for id in ["", "has space", "sl/ash", "qu?ery", "ünïcode"] {
         assert!(
             matches!(
-                Session::new(Config::default(), id, operator(), seeds, "out.wacz"),
+                Session::new(
+                    archiver(Config::default()),
+                    id,
+                    operator(),
+                    seeds,
+                    "out.wacz"
+                ),
                 Err(Error::InvalidSessionId(_))
             ),
             "identifier {id:?} should be rejected"
@@ -642,7 +664,7 @@ fn session_rejects_invalid_identifiers() {
 
     assert!(
         Session::new(
-            Config::default(),
+            archiver(Config::default()),
             "ok-id_1.2~3",
             operator(),
             seeds,
@@ -659,7 +681,14 @@ fn session_refuses_an_existing_output() -> Result<(), Box<dyn std::error::Error>
     std::fs::write(&path, b"existing")?;
 
     let seeds: [&str; 0] = [];
-    let result = Session::new(Config::default(), "existing", operator(), seeds, &path)?.run();
+    let result = Session::new(
+        archiver(Config::default()),
+        "existing",
+        operator(),
+        seeds,
+        &path,
+    )?
+    .run();
 
     assert!(result.is_err());
 
@@ -672,7 +701,14 @@ fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std:
     let path = directory.path().join("session.wacz");
 
     let seeds: [&str; 0] = [];
-    let summary = Session::new(Config::default(), "empty", operator(), seeds, &path)?.run()?;
+    let summary = Session::new(
+        archiver(Config::default()),
+        "empty",
+        operator(),
+        seeds,
+        &path,
+    )?
+    .run()?;
 
     assert!(summary.is_complete());
     assert!(summary.seed_captures.is_empty());
@@ -697,11 +733,17 @@ fn session_processor_sees_the_final_response_of_a_chain() -> Result<(), Box<dyn 
     let path = directory.path().join("session.wacz");
 
     let mut observed = Vec::new();
-    let summary = Session::new(Config::default(), "final-hop", operator(), [&url], &path)?
-        .processor(ObservingProcessor {
-            observed: &mut observed,
-        })
-        .run()?;
+    let summary = Session::new(
+        archiver(Config::default()),
+        "final-hop",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .processor(ObservingProcessor {
+        observed: &mut observed,
+    })
+    .run()?;
     server.join().expect("server thread should not panic");
 
     assert!(summary.is_complete());
@@ -731,9 +773,15 @@ fn session_seed_set_is_by_requested_url() -> Result<(), Box<dyn std::error::Erro
     let about = seeds[1].clone();
     let missing = format!("http://127.0.0.1:{port}/missing");
     let discovered = vec![about, missing.clone()];
-    let summary = Session::new(Config::default(), "seed-set", operator(), &seeds, &path)?
-        .processor(FixedLinksProcessor { links: discovered })
-        .run()?;
+    let summary = Session::new(
+        archiver(Config::default()),
+        "seed-set",
+        operator(),
+        &seeds,
+        &path,
+    )?
+    .processor(FixedLinksProcessor { links: discovered })
+    .run()?;
     server.join().expect("server thread should not panic");
 
     assert!(

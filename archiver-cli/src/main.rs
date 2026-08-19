@@ -70,12 +70,13 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
             .map_or(retry_defaults.max_backoff, Duration::from_secs),
     };
     let config = options.config.into_config(None);
+    let archiver = Archiver::new(config)?;
     let operator = Operator {
         name: options.operator,
         email: options.operator_email,
     };
     let mut session = Session::new(
-        config,
+        archiver,
         &options.session_name,
         operator,
         [first_url],

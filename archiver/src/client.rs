@@ -388,7 +388,7 @@ fn extra_page_list_header() -> PageListHeader<'static> {
 pub struct Archiver {
     recorder: Recorder,
     headers: HeaderMap,
-    pub(crate) config: Config,
+    config: Config,
 }
 
 impl Archiver {
@@ -444,6 +444,39 @@ impl Archiver {
         writer: W,
     ) -> Result<ArchiveSummary, Error> {
         self.archive_into(urls, WaczWriter::with_config(writer, self.writer_config()))
+    }
+
+    /// Start the collection used by a crawl session.
+    ///
+    /// Keeping this construction here makes the archiver the single owner of capture and archive
+    /// format configuration. A session supplies only the crawl metadata that is unique to it.
+    pub(crate) fn session_collection(
+        &self,
+        id: &str,
+        software: (&str, &str),
+        operator: (&str, Option<&str>),
+    ) -> Result<Collection, Error> {
+        let gzip = self.config.gzip_warc;
+        let suffix = if gzip { ".warc.gz" } else { ".warc" };
+
+        Collection::new(
+            format!("{id}{suffix}"),
+            gzip,
+            &WarcinfoOptions {
+                user_agent: &self.config.user_agent,
+                software: Some(software),
+                operator: Some(operator),
+                session_id: Some(id),
+            },
+        )
+    }
+
+    /// Create a WACZ writer using this archiver's output configuration.
+    pub(crate) fn wacz_to_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<WaczWriter<BufWriter<File>>, Error> {
+        Ok(WaczWriter::create_with_config(path, self.writer_config())?)
     }
 
     /// The WACZ writer configuration derived from this client's configuration.

@@ -27,13 +27,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use archivindex_wacz::writer::WaczWriter;
 use archivindex_warc::record::payload;
 
-use crate::client::{
-    Archiver, CaptureSummary, Collection, Error, Exchange, Failure, WarcinfoOptions,
-};
-use crate::config::Config;
+use crate::client::{Archiver, CaptureSummary, Error, Exchange, Failure};
 use crate::response;
 
 /// The operator running a crawl session, named in the `warcinfo` record's `operator` field (as
@@ -148,6 +144,7 @@ impl SessionSummary {
 /// # Examples
 ///
 /// ```no_run
+/// use archivindex_archiver::client::Archiver;
 /// use archivindex_archiver::config::Config;
 /// use archivindex_archiver::session::{
 ///     Capture, CaptureProcessor, Inspection, Operator, Session,
@@ -166,7 +163,7 @@ impl SessionSummary {
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let summary = Session::new(
-///     Config::default(),
+///     Archiver::new(Config::default())?,
 ///     "example-crawl",
 ///     Operator {
 ///         name: "A. Archivist".to_owned(),
@@ -195,15 +192,16 @@ pub struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
-    /// Create a session capturing the given seed URLs into a WACZ file at the given path, run by
-    /// the given operator.
+    /// Create a session using the given archiver to capture seed URLs into a WACZ file at the given
+    /// path, run by the given operator.
     ///
     /// The identifier must be non-empty and hold only URI unreserved characters (ASCII letters,
     /// digits, `-`, `.`, `_`, and `~`), so that it can appear verbatim in the WARC file name and
-    /// the `warcinfo` record. The configuration's `concurrency` is ignored: a session captures one
-    /// URL at a time, so that processing can grow the queue between captures.
+    /// the `warcinfo` record. A session captures one URL at a time so that processing can grow the
+    /// queue between captures; the archiver's concurrency setting therefore applies only to its
+    /// one-shot [`Archiver::archive`](crate::client::Archiver::archive) methods.
     pub fn new<I: IntoIterator<Item = S>, S: AsRef<str>, P: Into<PathBuf>>(
-        config: Config,
+        archiver: Archiver,
         id: &str,
         operator: Operator,
         seeds: I,
@@ -218,7 +216,7 @@ impl<'a> Session<'a> {
         }
 
         Ok(Self {
-            archiver: Archiver::new(config)?,
+            archiver,
             id: id.to_owned(),
             operator,
             software: (
@@ -288,26 +286,14 @@ impl<'a> Session<'a> {
     /// instead reports the cause in the summary's [`fatal_error`](SessionSummary::fatal_error),
     /// with the archive holding everything captured before the error.
     pub fn run(mut self) -> Result<SessionSummary, Error> {
-        let gzip = self.archiver.config.gzip_warc;
-        let warc_name = if gzip {
-            format!("{}.warc.gz", self.id)
-        } else {
-            format!("{}.warc", self.id)
-        };
-
         // The collection is opened first so that a `warcinfo` value the field grammar rejects fails
         // the session before the output file is created.
-        let mut collection = Collection::new(
-            warc_name,
-            gzip,
-            &WarcinfoOptions {
-                user_agent: &self.archiver.config.user_agent,
-                software: Some((&self.software.0, &self.software.1)),
-                operator: Some((&self.operator.name, self.operator.email.as_deref())),
-                session_id: Some(&self.id),
-            },
+        let mut collection = self.archiver.session_collection(
+            &self.id,
+            (&self.software.0, &self.software.1),
+            (&self.operator.name, self.operator.email.as_deref()),
         )?;
-        let wacz = WaczWriter::create_with_config(&self.output, self.archiver.writer_config())?;
+        let wacz = self.archiver.wacz_to_path(&self.output)?;
 
         // The seen set covers everything ever queued, so a URL is captured at most once even when
         // the processor rediscovers it. A seed snapshot lets the summary separate seed and

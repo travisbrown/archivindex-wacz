@@ -28,6 +28,7 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// # Examples
 ///
 /// ```no_run
+/// use archivindex_archiver::client::Archiver;
 /// use archivindex_archiver::config::Config;
 /// use archivindex_archiver::session::{Operator, Session};
 /// use archivindex_archiver::wordpress::CommentCaptureProcessor;
@@ -37,7 +38,7 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// let first = processor.first_comment_url();
 ///
 /// let summary = Session::new(
-///     Config::default(),
+///     Archiver::new(Config::default())?,
 ///     "wordpress-comments",
 ///     Operator {
 ///         name: "A. Archivist".to_owned(),

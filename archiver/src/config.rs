@@ -1,4 +1,4 @@
-//! Configuration for the archiving client.
+//! Configuration owned by the archiving client.
 
 use std::time::Duration;
 
