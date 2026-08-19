@@ -1,12 +1,13 @@
 //! CDXJ index lines mapping searchable URL keys to WARC records.
 //!
 //! A CDXJ index is a line-oriented text format. Each line pairs a searchable URL key (a
-//! [SURT](http://crawler.archive.org/articles/user_manual/glossary.html#surt)) and a 14-digit
-//! timestamp with a JSON block locating a capture within a WARC file. Lines are sorted
+//! [SURT](http://crawler.archive.org/articles/user_manual/glossary.html#surt)) and a 14- or
+//! 17-digit timestamp with a JSON block locating a capture within a WARC file. Lines are sorted
 //! lexicographically for binary search.
 
 use std::borrow::Cow;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 use std::str::FromStr;
 
@@ -18,8 +19,14 @@ use crate::ExtraProperties;
 use crate::digest::Sha256Digest;
 use crate::lines::Lines;
 
-/// The timestamp format used in CDXJ lines.
-const TIMESTAMP_FORMAT: &str = "%Y%m%d%H%M%S";
+/// The whole-second portion of a timestamp used in CDXJ lines.
+const SECONDS_FORMAT: &str = "%Y%m%d%H%M%S";
+
+/// The length of a whole-second CDXJ timestamp.
+const SECONDS_LENGTH: usize = 14;
+
+/// The length of a millisecond-precision CDXJ timestamp.
+const MILLISECONDS_LENGTH: usize = 17;
 
 /// An error type for CDXJ parsing and key generation.
 #[derive(Debug, thiserror::Error)]
@@ -30,7 +37,8 @@ pub enum Error {
     /// The line does not contain the three space-separated parts of a CDXJ item.
     #[error("truncated CDXJ line: {0}")]
     Truncated(String),
-    /// The timestamp is not a 14-digit `YYYYmmddHHMMSS` value.
+    /// The timestamp is not a 14-digit `YYYYmmddHHMMSS` or 17-digit
+    /// `YYYYmmddHHMMSSsss` value.
     #[error("invalid CDX timestamp: {0}")]
     InvalidTimestamp(String),
     /// The JSON block could not be parsed.
@@ -44,31 +52,59 @@ pub enum Error {
     MissingHost(String),
 }
 
-/// A 14-digit CDX timestamp (`YYYYmmddHHMMSS`, always UTC).
+/// A 14- or 17-digit CDX timestamp (`YYYYmmddHHMMSS[sss]`, always UTC).
 ///
-/// Values are truncated to whole-second precision on construction, since the encoding cannot
-/// represent fractional seconds; equality and ordering therefore always agree with the encoded
-/// form.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, ToStatic)]
-pub struct Timestamp(DateTime<Utc>);
+/// The shorter form has whole-second precision; the longer form appends three millisecond digits.
+/// Parsing and display preserve which form was used. Equality, hashing, and ordering compare the
+/// represented instant, so the two encodings of an exact whole second are equal and timestamps of
+/// either precision order chronologically.
+#[derive(Clone, Copy, Debug, ToStatic)]
+pub struct Timestamp {
+    instant: DateTime<Utc>,
+    milliseconds: bool,
+}
 
 impl Timestamp {
     /// Create a timestamp, truncating the instant to whole-second precision.
     #[must_use]
     pub fn new(instant: DateTime<Utc>) -> Self {
-        Self(instant.trunc_subsecs(0))
+        Self {
+            instant: instant.trunc_subsecs(0),
+            milliseconds: false,
+        }
+    }
+
+    /// Create a 17-digit timestamp, truncating the instant to millisecond precision.
+    #[must_use]
+    pub fn with_milliseconds(instant: DateTime<Utc>) -> Self {
+        Self {
+            instant: instant.trunc_subsecs(3),
+            milliseconds: true,
+        }
     }
 
     /// The underlying instant.
     #[must_use]
     pub const fn datetime(self) -> DateTime<Utc> {
-        self.0
+        self.instant
+    }
+
+    /// Whether this timestamp is displayed with millisecond precision.
+    #[must_use]
+    pub const fn has_milliseconds(self) -> bool {
+        self.milliseconds
     }
 }
 
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.format(TIMESTAMP_FORMAT))
+        write!(f, "{}", self.instant.format(SECONDS_FORMAT))?;
+
+        if self.milliseconds {
+            write!(f, "{:03}", self.instant.timestamp_subsec_millis())?;
+        }
+
+        Ok(())
     }
 }
 
@@ -78,13 +114,53 @@ impl FromStr for Timestamp {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // The length and digit checks reject values that chrono would accept through its flexible
         // handling of variable-width fields (such as five-digit years).
-        if s.len() != 14 || !s.bytes().all(|byte| byte.is_ascii_digit()) {
+        if !matches!(s.len(), SECONDS_LENGTH | MILLISECONDS_LENGTH)
+            || !s.bytes().all(|byte| byte.is_ascii_digit())
+        {
             return Err(Error::InvalidTimestamp(s.to_owned()));
         }
 
-        NaiveDateTime::parse_from_str(s, TIMESTAMP_FORMAT)
-            .map(|value| Self(value.and_utc()))
-            .map_err(|_| Error::InvalidTimestamp(s.to_owned()))
+        let seconds = NaiveDateTime::parse_from_str(&s[..SECONDS_LENGTH], SECONDS_FORMAT)
+            .map_err(|_| Error::InvalidTimestamp(s.to_owned()))?
+            .and_utc();
+
+        if s.len() == MILLISECONDS_LENGTH {
+            let milliseconds = s[SECONDS_LENGTH..]
+                .parse::<i64>()
+                .map_err(|_| Error::InvalidTimestamp(s.to_owned()))?;
+
+            Ok(Self::with_milliseconds(
+                seconds + chrono::TimeDelta::milliseconds(milliseconds),
+            ))
+        } else {
+            Ok(Self::new(seconds))
+        }
+    }
+}
+
+impl PartialEq for Timestamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.instant == other.instant
+    }
+}
+
+impl Eq for Timestamp {}
+
+impl PartialOrd for Timestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Timestamp {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.instant.cmp(&other.instant)
+    }
+}
+
+impl Hash for Timestamp {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.instant.hash(state);
     }
 }
 
@@ -111,7 +187,7 @@ impl<'a> Item<'a> {
     /// # Errors
     ///
     /// Fails if the line does not have three space-separated parts, if the timestamp is not a
-    /// 14-digit value, or if the JSON block is invalid.
+    /// 14- or 17-digit value, or if the JSON block is invalid.
     pub fn parse(line: &'a str) -> Result<Self, Error> {
         let (key, rest) = line
             .split_once(' ')
@@ -352,8 +428,14 @@ mod tests {
 
     #[test]
     fn parse_rejects_invalid_timestamps() {
-        // Too short, and the right length with a non-digit.
-        for timestamp in ["2020100721223", "2020100721223a"] {
+        // Unsupported lengths, and supported lengths with a non-digit.
+        for timestamp in [
+            "2020100721223",
+            "2020100721223a",
+            "2020100721223600",
+            "20201007212236a00",
+            "202010072122360000",
+        ] {
             assert!(matches!(
                 Item::parse(&format!(
                     "com,example)/ {timestamp} {{\"url\": \"https://example.com/\"}}"
@@ -394,13 +476,51 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_truncates_fractional_seconds() -> Result<(), Box<dyn std::error::Error>> {
+    fn timestamp_constructors_use_the_requested_precision() -> Result<(), Box<dyn std::error::Error>>
+    {
         let instant = DateTime::parse_from_rfc3339("2020-10-07T21:22:36.750Z")?.to_utc();
-        let timestamp = Timestamp::from(instant);
+        let seconds = Timestamp::from(instant);
+        let milliseconds = Timestamp::with_milliseconds(instant);
 
-        // The encoded form cannot represent the fraction, so equality follows the whole second.
-        assert_eq!(timestamp, timestamp.to_string().parse()?);
-        assert_eq!(timestamp.datetime().timestamp_subsec_nanos(), 0);
+        assert_eq!(seconds.to_string(), "20201007212236");
+        assert!(!seconds.has_milliseconds());
+        assert_eq!(seconds.datetime().timestamp_subsec_nanos(), 0);
+
+        assert_eq!(milliseconds.to_string(), "20201007212236750");
+        assert!(milliseconds.has_milliseconds());
+        assert_eq!(milliseconds.datetime().timestamp_subsec_millis(), 750);
+        assert_eq!(milliseconds, milliseconds.to_string().parse()?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn timestamp_parsing_preserves_both_supported_forms() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let seconds = "20201007212236".parse::<Timestamp>()?;
+        let milliseconds = "20201007212236123".parse::<Timestamp>()?;
+
+        assert_eq!(seconds.to_string(), "20201007212236");
+        assert!(!seconds.has_milliseconds());
+        assert_eq!(milliseconds.to_string(), "20201007212236123");
+        assert!(milliseconds.has_milliseconds());
+        assert_eq!(milliseconds.datetime().timestamp_subsec_millis(), 123);
+
+        Ok(())
+    }
+
+    #[test]
+    fn timestamps_of_both_precisions_order_chronologically()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let previous = "20201007212235999".parse::<Timestamp>()?;
+        let seconds = "20201007212236".parse::<Timestamp>()?;
+        let zero_milliseconds = "20201007212236000".parse::<Timestamp>()?;
+        let later = "20201007212236001".parse::<Timestamp>()?;
+
+        assert!(previous < seconds);
+        assert_eq!(seconds, zero_milliseconds);
+        assert_eq!(seconds.cmp(&zero_milliseconds), std::cmp::Ordering::Equal);
+        assert!(zero_milliseconds < later);
 
         Ok(())
     }

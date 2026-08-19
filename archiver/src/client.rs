@@ -837,7 +837,9 @@ fn write_exchange<W: Write>(
 
     Ok(cdxj::Item {
         key: Cow::Owned(exchange.key),
-        timestamp: exchange.date.date_time().into(),
+        // CDXJ permits millisecond precision. Preserve it by default so captures within one second
+        // remain chronologically distinguishable while the WARC records retain microseconds.
+        timestamp: cdxj::Timestamp::with_milliseconds(exchange.date.date_time()),
         fields: cdxj::Fields {
             url: Cow::Owned(exchange.captured.target_uri.into_string()),
             digest: exchange

@@ -17,6 +17,7 @@ use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::DigestAlgorithm;
 use archivindex_warc::value::WarcDatePrecision;
 use archivindex_warc::version::WarcVersion;
+use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
 use fluent_uri::Uri;
 
@@ -377,6 +378,19 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(items.len(), 4);
     assert!(items.is_sorted_by_key(|item| item.key.clone()));
+    assert!(items.iter().all(|item| item.timestamp.has_milliseconds()));
+    assert!(
+        items
+            .iter()
+            .all(|item| item.timestamp.to_string().len() == 17)
+    );
+    assert_eq!(
+        items
+            .iter()
+            .find(|item| item.fields.url == urls[0])
+            .map(|item| item.timestamp.datetime()),
+        Some(response.core().date.date_time().trunc_subsecs(3))
+    );
     assert_eq!(
         items
             .iter()
