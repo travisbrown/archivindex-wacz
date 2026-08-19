@@ -57,6 +57,16 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, cdxj::Error> {
     })
 }
 
+/// Build a searchable item at a particular time without requiring a corresponding WARC record.
+fn item_at(
+    url: &str,
+    timestamp: chrono::DateTime<Utc>,
+) -> Result<cdxj::Item<'static>, cdxj::Error> {
+    let mut item = item_for(url)?;
+    item.timestamp = timestamp.into();
+    Ok(item)
+}
+
 /// Build a ZIP file from `(path, contents)` pairs.
 fn zip_of(members: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -202,6 +212,109 @@ fn round_trip_with_gzip_warc_member() -> Result<(), Box<dyn std::error::Error>> 
     assert_round_trip("data.warc.gz", &compressed)
 }
 
+/// Public member APIs distinguish stored, raw ZIP, and content-level decoded representations and
+/// permit bounded random access only where offsets are meaningful.
+#[test]
+fn member_access_apis() -> Result<(), Box<dyn std::error::Error>> {
+    let warc = warc_bytes()?;
+    let wacz = build_wacz("data.warc", &warc)?;
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+
+    let metadata = reader.member_metadata("archive/data.warc")?;
+    assert_eq!(metadata.compression, zip::CompressionMethod::Stored);
+    assert_eq!(metadata.size, warc.len() as u64);
+    assert_eq!(reader.member_bytes("archive/data.warc")?, warc);
+    assert_eq!(reader.decoded_member_bytes("archive/data.warc")?, warc);
+    assert_eq!(reader.member_range("archive/data.warc", 5, 7)?, warc[5..12]);
+    assert!(matches!(
+        reader.member_range("archive/data.warc", warc.len() as u64, 1),
+        Err(reader::Error::RangeOutOfBounds { .. })
+    ));
+
+    // The manifest is DEFLATE-compressed in the ZIP, so logical byte-range access is rejected.
+    assert!(matches!(
+        reader.member_range("datapackage.json", 0, 1),
+        Err(reader::Error::CompressedMember(_))
+    ));
+    assert!(reader.raw_member("datapackage.json")?.compressed_size() > 0);
+
+    Ok(())
+}
+
+/// Manifest resources can be retrieved generically with their declared size and digest checked.
+#[test]
+fn arbitrary_resource_read_is_verified() -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    writer.add_resource("extras/metadata.txt", b"custom metadata".as_slice())?;
+    let wacz = writer.finish(PackageMetadata::default())?.into_inner();
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+
+    assert_eq!(
+        reader.resource_bytes("extras/metadata.txt")?,
+        b"custom metadata"
+    );
+    assert!(matches!(
+        reader.resource_bytes("not-listed.txt"),
+        Err(reader::Error::UnlistedResource(_))
+    ));
+
+    Ok(())
+}
+
+/// Plain-index lookup uses the SURT key, honors time bounds, and resolves the descriptor to a WARC
+/// record through the same range API.
+#[test]
+fn plain_lookup_and_capture_resolution() -> Result<(), Box<dyn std::error::Error>> {
+    let warc = warc_bytes()?;
+    let wacz = build_wacz("data.warc", &warc)?;
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+    let timestamp: cdxj::Timestamp = capture_time().into();
+
+    assert!(reader.lookup(URL, ..timestamp)?.is_empty());
+
+    let captures = reader.lookup(URL, timestamp..=timestamp)?;
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].index_path, "indexes/index.cdx");
+    assert_eq!(reader.capture_bytes(&captures[0].item.fields)?, warc);
+
+    let raw = reader.read_capture_raw(&captures[0].item.fields)?;
+    assert_eq!(raw.body, BODY);
+    let record = reader.read_capture(&captures[0].item.fields)?;
+    assert_eq!(record.body_bytes().as_ref(), BODY);
+
+    let mut mismatched = captures[0].item.fields.clone();
+    mismatched.record_digest = Some(Sha256Digest::compute(b"different"));
+    assert!(matches!(
+        reader.capture_bytes(&mismatched),
+        Err(reader::Error::DigestMismatch { .. })
+    ));
+
+    Ok(())
+}
+
+/// Gzip capture ranges are verified while compressed and decoded as one member for WARC parsing.
+#[test]
+fn gzip_capture_resolution() -> Result<(), Box<dyn std::error::Error>> {
+    let warc = warc_bytes()?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&warc)?;
+    let compressed = encoder.finish()?;
+    let wacz = build_wacz("data.warc.gz", &compressed)?;
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+    let capture = reader.lookup(URL, ..)?.into_iter().next().expect("capture");
+
+    assert_eq!(reader.capture_bytes(&capture.item.fields)?, compressed);
+    assert_eq!(
+        reader
+            .read_capture(&capture.item.fields)?
+            .body_bytes()
+            .as_ref(),
+        BODY
+    );
+
+    Ok(())
+}
+
 /// Pages written without an identifier receive a synthetic one of the configured length; explicitly
 /// supplied identifiers are preserved.
 #[test]
@@ -334,7 +447,56 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(read_items.len(), items.len());
     assert!(read_items.is_sorted_by_key(|item| item.key.clone()));
+
+    let parsed_summary = reader.zipnum_summary("indexes/index.idx")?;
+    assert_eq!(parsed_summary.data_path, "indexes/index.cdx.gz");
+    assert_eq!(parsed_summary.blocks.len(), 3);
+    let first_block = reader.zipnum_block(&parsed_summary.blocks[0])?;
+    assert_eq!(std::str::from_utf8(&first_block)?.lines().count(), 2);
+    let mut bad_block = parsed_summary.blocks[0].clone();
+    bad_block.digest = Sha256Digest::compute(b"not this block");
+    assert!(matches!(
+        reader.zipnum_block(&bad_block),
+        Err(reader::Error::DigestMismatch { .. })
+    ));
+
+    let captures = reader.lookup("https://www.example.com/page3", ..)?;
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].index_path, "indexes/index.idx");
+    assert_eq!(captures[0].item.fields.url, "https://www.example.com/page3");
     assert!(reader.verify()?.is_success());
+
+    Ok(())
+}
+
+/// Lookup results are chronological even when index input is not, and range bounds use timestamp
+/// semantics rather than the textual precision of a CDXJ value.
+#[test]
+fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn std::error::Error>> {
+    let first = capture_time();
+    let second = first + chrono::TimeDelta::milliseconds(500);
+    let third = first + chrono::TimeDelta::seconds(1);
+    let mut items = [
+        item_at(URL, third)?,
+        item_at(URL, first)?,
+        item_at(URL, second)?,
+    ];
+    items[1].timestamp = cdxj::Timestamp::new(first);
+    items[2].timestamp = cdxj::Timestamp::with_milliseconds(second);
+
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    writer.add_index("index.cdx", &items)?;
+    let wacz = writer.finish(PackageMetadata::default())?.into_inner();
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+
+    let captures = reader.lookup(
+        URL,
+        cdxj::Timestamp::new(first)..cdxj::Timestamp::new(third),
+    )?;
+    assert_eq!(captures.len(), 2);
+    assert!(captures.is_sorted_by_key(|capture| capture.item.timestamp));
+    assert_eq!(captures[0].item.timestamp.datetime(), first);
+    assert_eq!(captures[1].item.timestamp.datetime(), second);
 
     Ok(())
 }
@@ -543,7 +705,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
     writer.add_index("index.cdx", [&item])?;
     let wacz = writer.finish(PackageMetadata::default())?.into_inner();
 
-    let mut archive = zip::ZipArchive::new(Cursor::new(wacz))?;
+    let mut archive = zip::ZipArchive::new(Cursor::new(&wacz))?;
     let mut summary = String::new();
     archive
         .by_name("indexes/index.idx")?
@@ -553,6 +715,12 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
 
     assert_eq!(summary_lines.len(), 2);
     assert!(summary_lines[1].starts_with("com,example)/?a={b} 20201007212236 {\"offset\": "));
+
+    drop(archive);
+    let mut reader = WaczReader::new(Cursor::new(&wacz))?;
+    let captures = reader.lookup("https://example.com/?a={b}", ..)?;
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].item.key, "com,example)/?a={b}");
 
     Ok(())
 }

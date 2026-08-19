@@ -20,6 +20,10 @@ use crate::{
     PAGES_PATH,
 };
 
+mod random;
+
+pub use random::{Capture, ZipNumBlock, ZipNumSummary};
+
 /// An error type for WACZ reading.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -41,10 +45,88 @@ pub enum Error {
     /// A page list could not be read.
     #[error(transparent)]
     Pages(#[from] crate::pages::Error),
+    /// A CDXJ index entry or search key is invalid.
+    #[error(transparent)]
+    Cdxj(#[from] crate::cdxj::Error),
+    /// A WARC record could not be parsed.
+    #[error(transparent)]
+    Warc(#[from] archivindex_warc::io::read::Error),
+    /// A text index is not UTF-8.
+    #[error("index is not UTF-8: {0}")]
+    InvalidIndexEncoding(String),
+    /// A `ZipNum` summary is malformed or names an unsupported format.
+    #[error("invalid ZipNum summary: {0}")]
+    InvalidZipNum(String),
+    /// A byte range cannot be read because the ZIP member is compressed.
+    #[error("random access requires a stored ZIP member: {0}")]
+    CompressedMember(String),
+    /// A byte range falls outside its member or overflows.
+    #[error("range {offset}..{end} is outside member {path} ({size} bytes)")]
+    RangeOutOfBounds {
+        /// The member path.
+        path: String,
+        /// The requested starting offset.
+        offset: u64,
+        /// The requested exclusive end offset.
+        end: u64,
+        /// The member's uncompressed size.
+        size: u64,
+    },
+    /// A required CDXJ capture field is absent.
+    #[error("capture is missing CDXJ field `{0}`")]
+    MissingCaptureField(&'static str),
+    /// Bytes located by an index do not match their declared digest.
+    #[error("digest mismatch for {path}: expected {expected}, computed {actual}")]
+    DigestMismatch {
+        /// The member or range being checked.
+        path: String,
+        /// The declared digest.
+        expected: Sha256Digest,
+        /// The computed digest.
+        actual: Sha256Digest,
+    },
+    /// A manifest resource does not match its declared size or digest.
+    #[error(
+        "resource mismatch for {path}: expected {expected_size} bytes and {expected_hash}, \
+         found {actual_size} bytes and {actual_hash}"
+    )]
+    ResourceMismatch {
+        /// The resource path.
+        path: String,
+        /// The declared size.
+        expected_size: u64,
+        /// The observed size.
+        actual_size: u64,
+        /// The declared digest.
+        expected_hash: Sha256Digest,
+        /// The observed digest.
+        actual_hash: Sha256Digest,
+    },
+    /// A capture range does not contain exactly one WARC record.
+    #[error("capture range contains {0} WARC records; expected exactly one")]
+    CaptureRecordCount(usize),
+    /// A requested resource is not listed in the data package manifest.
+    #[error("path is not a manifest resource: {0}")]
+    UnlistedResource(String),
 }
 
 /// A buffered stream over one file in a WACZ, with gzip data decompressed.
 pub type MemberReader<'a> = BufReader<Box<dyn Read + 'a>>;
+
+/// Metadata needed to choose between sequential and random member access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberMetadata {
+    /// The member path.
+    pub path: String,
+    /// The ZIP compression method applied to the member.
+    pub compression: zip::CompressionMethod,
+    /// The number of bytes stored in the ZIP container.
+    pub compressed_size: u64,
+    /// The size after ZIP decompression. For stored members this equals `compressed_size`.
+    pub size: u64,
+    /// The member's ZIP CRC-32.
+    pub crc32: u32,
+}
 
 /// The outcome of verifying the files in a WACZ against its manifest.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
@@ -123,16 +205,23 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// The paths of the WARC files, in unspecified order.
     pub fn warc_paths(&self) -> impl Iterator<Item = &str> {
-        self.member_paths(ARCHIVE_PREFIX)
+        self.paths_under(ARCHIVE_PREFIX)
     }
 
     /// The paths of the index files, in unspecified order.
     pub fn index_paths(&self) -> impl Iterator<Item = &str> {
-        self.member_paths(INDEXES_PREFIX)
+        self.paths_under(INDEXES_PREFIX)
+    }
+
+    /// All file paths in the WACZ, in unspecified order and excluding ZIP directory entries.
+    pub fn member_paths(&self) -> impl Iterator<Item = &str> {
+        self.archive
+            .file_names()
+            .filter(|name| !name.ends_with('/'))
     }
 
     /// File paths under a directory prefix, excluding ZIP directory entries.
-    fn member_paths<'s>(&'s self, prefix: &'s str) -> impl Iterator<Item = &'s str> {
+    fn paths_under<'s>(&'s self, prefix: &'s str) -> impl Iterator<Item = &'s str> {
         self.archive
             .file_names()
             .filter(move |name| name.starts_with(prefix) && !name.ends_with('/'))
@@ -200,15 +289,42 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 
     /// Open a ZIP entry by path, mapping the ZIP crate's not-found error to a dedicated variant.
-    fn member(&mut self, path: &str) -> Result<zip::read::ZipFile<'_, R>, Error> {
+    /// Open a member's content without interpreting a `.gz` suffix.
+    ///
+    /// ZIP compression is decoded by the ZIP layer; gzip content remains compressed. This is the
+    /// byte representation whose offsets and lengths are used by WACZ indexes.
+    pub fn member(&mut self, path: &str) -> Result<zip::read::ZipFile<'_, R>, Error> {
         match self.archive.by_name(path) {
             Err(ZipError::FileNotFound) => Err(Error::MissingMember(path.to_owned())),
             result => Ok(result?),
         }
     }
 
+    /// Return metadata for a member without reading its content.
+    pub fn member_metadata(&mut self, path: &str) -> Result<MemberMetadata, Error> {
+        let member = self.member(path)?;
+
+        Ok(MemberMetadata {
+            path: path.to_owned(),
+            compression: member.compression(),
+            compressed_size: member.compressed_size(),
+            size: member.size(),
+            crc32: member.crc32(),
+        })
+    }
+
+    /// Open the bytes physically stored for a ZIP member, without ZIP or gzip decompression.
+    pub fn raw_member(&mut self, path: &str) -> Result<zip::read::ZipFile<'_, R>, Error> {
+        let index = self
+            .archive
+            .index_for_name(path)
+            .ok_or_else(|| Error::MissingMember(path.to_owned()))?;
+
+        Ok(self.archive.by_index_raw(index)?)
+    }
+
     /// Open a file by path as a buffered stream, decompressing files with a `.gz` extension.
-    fn member_stream(&mut self, path: &str) -> Result<MemberReader<'_>, Error> {
+    pub fn member_stream(&mut self, path: &str) -> Result<MemberReader<'_>, Error> {
         let is_gzip = path.ends_with(GZIP_EXTENSION);
         let member = self.member(path)?;
 
@@ -225,8 +341,15 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(BufReader::new(stream))
     }
 
+    /// Open a member as a stream, decoding both ZIP compression and gzip content.
+    ///
+    /// This is an explicit-name alias for [`member_stream`](Self::member_stream).
+    pub fn decoded_member(&mut self, path: &str) -> Result<MemberReader<'_>, Error> {
+        self.member_stream(path)
+    }
+
     /// Read the full contents of a file by path.
-    fn member_bytes(&mut self, path: &str) -> Result<Vec<u8>, Error> {
+    pub fn member_bytes(&mut self, path: &str) -> Result<Vec<u8>, Error> {
         let mut member = self.member(path)?;
         // The declared size is untrusted input, so the preallocation it drives is capped.
         let capacity = usize::try_from(member.size())
@@ -234,6 +357,45 @@ impl<R: Read + Seek> WaczReader<R> {
             .min(MAX_PREALLOCATION);
         let mut bytes = Vec::with_capacity(capacity);
         member.read_to_end(&mut bytes)?;
+
+        Ok(bytes)
+    }
+
+    /// Read a complete member, additionally decoding gzip content when its name ends in `.gz`.
+    pub fn decoded_member_bytes(&mut self, path: &str) -> Result<Vec<u8>, Error> {
+        let mut member = self.member_stream(path)?;
+        let mut bytes = Vec::new();
+        member.read_to_end(&mut bytes)?;
+
+        Ok(bytes)
+    }
+
+    /// Read and verify an arbitrary resource listed in `datapackage.json`.
+    ///
+    /// The returned bytes have ZIP compression removed but retain any content-level compression,
+    /// such as gzip. Both the manifest size and SHA-256 digest are checked.
+    pub fn resource_bytes(&mut self, path: &str) -> Result<Vec<u8>, Error> {
+        let package = self.data_package()?;
+        let resource = package
+            .resources
+            .iter()
+            .find(|resource| resource.path == path)
+            .ok_or_else(|| Error::UnlistedResource(path.to_owned()))?;
+        let expected_hash = resource.hash;
+        let expected_size = resource.bytes;
+        let bytes = self.member_bytes(path)?;
+        let actual_hash = Sha256Digest::compute(&bytes);
+        let actual_size = bytes.len() as u64;
+
+        if actual_hash != expected_hash || actual_size != expected_size {
+            return Err(Error::ResourceMismatch {
+                path: path.to_owned(),
+                expected_size,
+                actual_size,
+                expected_hash,
+                actual_hash,
+            });
+        }
 
         Ok(bytes)
     }
