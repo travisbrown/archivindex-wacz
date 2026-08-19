@@ -871,13 +871,15 @@ fn warcinfo_record(warc_name: &str, options: &WarcinfoOptions<'_>) -> Result<Rec
     let mut builder = Record::warcinfo(record_date())
         .filename(warc_name)
         .expect("well-formed WARC file name")
-        .software(software_name, software_version)?
-        .http_header_user_agent(options.user_agent)
-        .map_err(|_| Error::InvalidUserAgent(options.user_agent.to_owned()))?;
+        .software(software_name, software_version)?;
 
     if let Some((name, email)) = options.operator {
         builder = builder.operator(name, email)?;
     }
+
+    builder = builder
+        .http_header_user_agent(options.user_agent)
+        .map_err(|_| Error::InvalidUserAgent(options.user_agent.to_owned()))?;
 
     if let Some(session_id) = options.session_id {
         builder = builder

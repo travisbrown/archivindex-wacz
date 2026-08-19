@@ -13,6 +13,7 @@ use archivindex_archiver::session::{
 };
 use archivindex_wacz::reader::WaczReader;
 use archivindex_warc::record::extension::NoExtension;
+use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::{FieldsBlock, Record};
@@ -308,6 +309,21 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     let FieldsBlock::Fields(fields) = body else {
         panic!("the warcinfo body should parse as warc-fields");
     };
+
+    assert_eq!(
+        fields
+            .iter()
+            .map(|(field, _)| field.name())
+            .collect::<Vec<_>>(),
+        [
+            "format",
+            "conformsTo",
+            "software",
+            "operator",
+            "http-header-user-agent",
+            "isPartOf",
+        ]
+    );
 
     assert_eq!(
         header
