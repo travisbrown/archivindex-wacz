@@ -61,6 +61,33 @@ pub fn head(message: &[u8]) -> Option<Head> {
     })
 }
 
+/// Return the first readable value of a response header, matched case-insensitively.
+pub fn header<'a>(message: &'a [u8], wanted: &str) -> Option<&'a [u8]> {
+    let status_end = find_crlf(message, 0)?;
+    status_code(&message[..status_end])?;
+    let mut start = status_end + 2;
+
+    loop {
+        let end = find_crlf(message, start)?;
+        let line = &message[start..end];
+        start = end + 2;
+
+        if line.is_empty() {
+            return None;
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            continue;
+        }
+
+        let Some((name, value)) = split_field(line) else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(wanted.as_bytes()) {
+            return Some(value);
+        }
+    }
+}
+
 /// The position of the next CRLF at or after `from`, when one exists.
 fn find_crlf(message: &[u8], from: usize) -> Option<usize> {
     message
@@ -93,7 +120,7 @@ fn split_field(line: &[u8]) -> Option<(&[u8], &[u8])> {
 
 #[cfg(test)]
 mod tests {
-    use super::head;
+    use super::{head, header};
 
     #[test]
     fn head_reads_the_response_fields() {
@@ -150,5 +177,13 @@ mod tests {
         assert_eq!(head(b"not http at all"), None);
         assert_eq!(head(b"HTTP/1.1 20 OK\r\n\r\n"), None);
         assert_eq!(head(b"HTTP/1.1 200 OK\r\nunterminated: yes\r\n"), None);
+    }
+
+    #[test]
+    fn header_reads_a_named_field_case_insensitively() {
+        let message = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 17\r\nother: value\r\n\r\n";
+
+        assert_eq!(header(message, "x-wp-totalpages"), Some(&b"17"[..]));
+        assert_eq!(header(message, "missing"), None);
     }
 }

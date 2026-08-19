@@ -4,7 +4,7 @@ pub mod read;
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeDelta, Utc};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use url::Url;
 
@@ -16,11 +16,12 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// Inspect batches from the `WordPress` REST API v2 comments endpoint.
 ///
 /// The processor takes a snapshot cutoff when it is constructed. Start a crawl with
-/// [`first_comment_url`](Self::first_comment_url), which requests comments in ascending GMT date
-/// order up to that cutoff. Each successful batch is parsed as JSON and inspected for comment IDs
-/// not seen in an earlier batch. When it finds any, the processor queues one more request whose
-/// `after` cursor is one second before the latest new comment, preserving a small overlap at batch
-/// boundaries. It stops when a batch contains no new IDs.
+/// [`first_comment_url`](Self::first_comment_url), which requests comments in ascending ID order up
+/// to that cutoff. It walks every page advertised by `X-WP-TotalPages`, then repeats complete
+/// sweeps until one finds no new comment IDs. Rechecking earlier pages closes the gap left when
+/// deletions shift comments backward during a sweep; the fixed cutoff prevents ordinary additions
+/// after construction from moving the snapshot. Already captured IDs remain retained even if they
+/// are deleted during collection.
 ///
 /// Malformed JSON or a response outside the expected `WordPress` comments shape yields no title or
 /// next link, ending collection without panicking.
@@ -59,7 +60,8 @@ pub struct CommentCaptureProcessor {
     site_name: String,
     before: DateTime<Utc>,
     seen_ids: HashSet<u64>,
-    latest: Option<DateTime<Utc>>,
+    page: usize,
+    new_in_sweep: usize,
 }
 
 impl CommentCaptureProcessor {
@@ -74,10 +76,10 @@ impl CommentCaptureProcessor {
 
     /// Produce the first comments URL for this processor's saved snapshot cutoff.
     ///
-    /// The request has no lower cursor and asks for the oldest comments first.
+    /// The request asks for the first page in ascending comment-ID order.
     #[must_use]
     pub fn first_comment_url(&self) -> String {
-        self.comment_url(None)
+        self.comment_url(1)
     }
 
     /// Construct a processor with an explicit snapshot cutoff.
@@ -97,32 +99,33 @@ impl CommentCaptureProcessor {
             site_name,
             before,
             seen_ids: HashSet::new(),
-            latest: None,
+            page: 1,
+            new_in_sweep: 0,
         })
     }
 
-    /// Build a comments URL, retaining the snapshot cutoff on cursor requests.
-    fn comment_url(&self, after: Option<DateTime<Utc>>) -> String {
+    /// Build one page URL, retaining the snapshot cutoff on every request.
+    fn comment_url(&self, page: usize) -> String {
         let before = format_timestamp(self.before);
-        let query = after.map_or_else(
-            || {
-                format!(
-                    "before={before}&orderby=date_gmt&order=asc&per_page={COMMENTS_PER_PAGE}"
-                )
-            },
-            |after| {
-                let after = format_timestamp(after);
-
-                format!(
-                    "after={after}&before={before}&orderby=date_gmt&order=asc&per_page={COMMENTS_PER_PAGE}"
-                )
-            },
+        let query = format!(
+            "before={before}&orderby=id&order=asc&page={page}&per_page={COMMENTS_PER_PAGE}"
         );
 
         let mut url = self.endpoint.clone();
         url.set_query(Some(&query));
 
         url.into()
+    }
+
+    /// Finish a sweep, restarting from page one only when the sweep found unseen IDs.
+    fn finish_sweep(&mut self) -> Vec<String> {
+        self.page = 1;
+
+        if std::mem::take(&mut self.new_in_sweep) == 0 {
+            Vec::new()
+        } else {
+            vec![self.comment_url(1)]
+        }
     }
 
     /// Title a parsed comment batch by its ID and GMT date ranges.
@@ -149,31 +152,44 @@ impl CommentCaptureProcessor {
 
 impl CaptureProcessor for CommentCaptureProcessor {
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        // A page can disappear between requests when deletions reduce the page count. WordPress
+        // reports that as a 400 `rest_post_invalid_page_number`; treat it as the end of this sweep
+        // and validate again from page one when the sweep found anything new.
+        if capture.status == 400 && self.page > 1 {
+            return Inspection {
+                recaptures: self.finish_sweep(),
+                ..Inspection::default()
+            };
+        }
+
         let Ok(comments) = serde_json::from_slice::<Vec<Comment>>(capture.payload) else {
             return Inspection::default();
         };
 
         let title = self.title(&comments);
-        let latest_new = comments
+        self.new_in_sweep += comments
             .iter()
             .filter(|comment| self.seen_ids.insert(comment.id))
-            .filter_map(Comment::date)
-            .max();
+            .count();
 
-        let links = latest_new.map_or_else(Vec::new, |latest_new| {
-            let latest = self
-                .latest
-                .map_or(latest_new, |latest| latest.max(latest_new));
-            self.latest = Some(latest);
-
-            let after = latest
-                .checked_sub_signed(TimeDelta::seconds(1))
-                .unwrap_or(latest);
-
-            vec![self.comment_url(Some(after))]
+        let total_pages = capture
+            .header("x-wp-totalpages")
+            .and_then(|value| value.parse::<usize>().ok());
+        let has_next = total_pages.map_or(comments.len() == COMMENTS_PER_PAGE, |total| {
+            self.page < total
         });
+        let recaptures = if has_next {
+            self.page += 1;
+            vec![self.comment_url(self.page)]
+        } else {
+            self.finish_sweep()
+        };
 
-        Inspection { links, title }
+        Inspection {
+            recaptures,
+            title,
+            ..Inspection::default()
+        }
     }
 }
 
@@ -206,6 +222,7 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use serde_json::json;
 
     use super::CommentCaptureProcessor;
     use crate::session::{Capture, CaptureProcessor};
@@ -218,12 +235,17 @@ mod tests {
             .expect("a test timestamp")
     }
 
-    fn capture(payload: &[u8]) -> Capture<'_> {
+    const ONE_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
+    const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 2\r\n\r\n";
+    const INVALID_PAGE: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
+
+    fn capture<'a>(payload: &'a [u8], status: u16, response: &'a [u8]) -> Capture<'a> {
         Capture {
             url: "https://jihadwatch.org/wp-json/wp/v2/comments",
             final_url: "https://jihadwatch.org/wp-json/wp/v2/comments",
-            status: 200,
+            status,
             payload,
+            response,
         }
     }
 
@@ -233,14 +255,14 @@ mod tests {
             CommentCaptureProcessor::with_before("https://jihadwatch.org/", timestamp(BEFORE))
                 .expect("a processor");
         let expected = "https://jihadwatch.org/wp-json/wp/v2/comments?\
-            before=2026-08-20T00:00:00Z&orderby=date_gmt&order=asc&per_page=100";
+            before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=1&per_page=100";
 
         assert_eq!(processor.first_comment_url(), expected);
         assert_eq!(processor.first_comment_url(), expected);
     }
 
     #[test]
-    fn inspection_titles_a_batch_and_advances_with_an_overlapping_cursor() {
+    fn inspection_titles_a_batch_and_advances_by_page() {
         let mut processor =
             CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
                 .expect("a processor");
@@ -249,46 +271,113 @@ mod tests {
             {"id": 211420, "date_gmt": "2020-11-30T12:30:00"}
         ]"#;
 
-        let inspection = processor.inspect(&capture(payload));
+        let inspection = processor.inspect(&capture(payload, 200, TWO_PAGES));
 
         assert_eq!(
             inspection.title.as_deref(),
             Some("jihadwatch.org comments 211416-211420 (2020-11-28 to 2020-11-30)")
         );
         assert_eq!(
-            inspection.links,
+            inspection.recaptures,
             ["https://jihadwatch.org/wp-json/wp/v2/comments?\
-                after=2020-11-30T12:29:59Z&before=2026-08-20T00:00:00Z&\
-                orderby=date_gmt&order=asc&per_page=100"]
+                before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
     }
 
     #[test]
-    fn collection_stops_when_an_overlapping_batch_has_no_new_ids() {
+    fn more_than_one_page_at_one_timestamp_is_collected_and_validated()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut processor =
             CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
                 .expect("a processor");
-        let first = br#"[
-            {"id": 1, "date_gmt": "2020-11-30T12:30:00"},
-            {"id": 2, "date_gmt": "2020-11-30T12:30:01"}
-        ]"#;
-        let overlap_with_new = br#"[
-            {"id": 2, "date_gmt": "2020-11-30T12:30:01"},
-            {"id": 3, "date_gmt": "2020-11-30T12:31:00Z"}
-        ]"#;
-        let overlap_without_new = br#"[{"id": 3, "date_gmt": "2020-11-30T12:31:00Z"}]"#;
+        let page_one = serde_json::to_vec(
+            &(1..=100)
+                .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
+                .collect::<Vec<_>>(),
+        )?;
+        let page_two =
+            serde_json::to_vec(&[json!({"id": 101, "date_gmt": "2020-11-30T12:30:00"})])?;
 
-        assert_eq!(processor.inspect(&capture(first)).links.len(), 1);
         assert_eq!(
-            processor.inspect(&capture(overlap_with_new)).links,
+            processor
+                .inspect(&capture(&page_one, 200, TWO_PAGES))
+                .recaptures,
             ["https://jihadwatch.org/wp-json/wp/v2/comments?\
-                after=2020-11-30T12:30:59Z&before=2026-08-20T00:00:00Z&\
-                orderby=date_gmt&order=asc&per_page=100"]
+                before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
+        );
+        // Finding ID 101 at the end of the first sweep starts a validation sweep.
+        assert_eq!(
+            processor
+                .inspect(&capture(&page_two, 200, TWO_PAGES))
+                .recaptures,
+            [processor.first_comment_url()]
+        );
+        assert_eq!(processor.seen_ids.len(), 101);
+
+        assert_eq!(
+            processor
+                .inspect(&capture(&page_one, 200, TWO_PAGES))
+                .recaptures
+                .len(),
+            1
         );
         assert_eq!(
-            processor.inspect(&capture(overlap_without_new)).links,
+            processor
+                .inspect(&capture(&page_two, 200, TWO_PAGES))
+                .recaptures,
             Vec::<String>::new()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn deletion_that_removes_a_page_cannot_hide_the_shifted_comment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+                .expect("a processor");
+        let original_page = serde_json::to_vec(
+            &(1..=100)
+                .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
+                .collect::<Vec<_>>(),
+        )?;
+        let shifted_page = serde_json::to_vec(
+            &(2..=101)
+                .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
+                .collect::<Vec<_>>(),
+        )?;
+
+        assert_eq!(
+            processor
+                .inspect(&capture(&original_page, 200, TWO_PAGES))
+                .recaptures
+                .len(),
+            1
+        );
+        // ID 1 is deleted before page 2 is requested, reducing the collection to one page.
+        assert_eq!(
+            processor
+                .inspect(&capture(b"{}", 400, INVALID_PAGE))
+                .recaptures,
+            [processor.first_comment_url()]
+        );
+        // The repeated first page now exposes ID 101, which shifted backward.
+        assert_eq!(
+            processor
+                .inspect(&capture(&shifted_page, 200, ONE_PAGE))
+                .recaptures,
+            [processor.first_comment_url()]
+        );
+        assert_eq!(processor.seen_ids.len(), 101);
+        assert!(
+            processor
+                .inspect(&capture(&shifted_page, 200, ONE_PAGE))
+                .recaptures
+                .is_empty()
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -298,10 +387,11 @@ mod tests {
                 .expect("a processor");
 
         for payload in [&b"not json"[..], &b"[]"[..]] {
-            let inspection = processor.inspect(&capture(payload));
+            let inspection = processor.inspect(&capture(payload, 200, ONE_PAGE));
 
             assert_eq!(inspection.title, None);
             assert_eq!(inspection.links, Vec::<String>::new());
+            assert_eq!(inspection.recaptures, Vec::<String>::new());
         }
     }
 

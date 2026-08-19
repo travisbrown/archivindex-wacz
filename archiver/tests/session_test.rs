@@ -135,6 +135,7 @@ impl CaptureProcessor for SiteProcessor {
         Inspection {
             links: extract_links(capture.payload, self.port),
             title,
+            ..Inspection::default()
         }
     }
 }
@@ -153,6 +154,7 @@ impl CaptureProcessor for DeduplicationProcessor {
                 format!("http://127.0.0.1:{}/about", self.port),
             ],
             title: None,
+            ..Inspection::default()
         }
     }
 }
@@ -185,8 +187,52 @@ impl CaptureProcessor for FixedLinksProcessor {
         Inspection {
             links: self.links.clone(),
             title: None,
+            ..Inspection::default()
         }
     }
+}
+
+/// Ask for the first successful URL one additional time.
+#[derive(Default)]
+struct RecaptureOnceProcessor {
+    requested: bool,
+}
+
+impl CaptureProcessor for RecaptureOnceProcessor {
+    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        if std::mem::replace(&mut self.requested, true) {
+            Inspection::default()
+        } else {
+            Inspection {
+                recaptures: vec![capture.url.to_owned()],
+                ..Inspection::default()
+            }
+        }
+    }
+}
+
+#[test]
+fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve(2)?;
+    let url = format!("http://127.0.0.1:{port}/about");
+    let directory = tempfile::tempdir()?;
+    let output = directory.path().join("recapture.wacz");
+
+    let summary = Session::new(
+        archiver(Config::default()),
+        "recapture",
+        operator(),
+        [&url],
+        output,
+    )?
+    .processor(RecaptureOnceProcessor::default())
+    .run()?;
+
+    assert_eq!(server.join().expect("server thread"), ["/about", "/about"]);
+    assert_eq!(summary.seed_captures.len(), 2);
+    assert!(summary.is_complete());
+
+    Ok(())
 }
 
 #[test]

@@ -61,6 +61,17 @@ pub struct Capture<'a> {
     pub status: u16,
     /// The payload of the final response.
     pub payload: &'a [u8],
+    /// The complete recorded HTTP response, including its status line and headers.
+    pub response: &'a [u8],
+}
+
+impl Capture<'_> {
+    /// Return the first value of a response header as readable text.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        crate::response::header(self.response, name)
+            .and_then(|value| std::str::from_utf8(value).ok())
+    }
 }
 
 /// The discoveries and page title produced by inspecting a successful capture.
@@ -69,15 +80,23 @@ pub struct Inspection {
     /// The URLs discovered in the capture, appended to the session queue in this order after URLs
     /// already captured or queued are removed.
     pub links: Vec<String>,
+    /// URLs that must be captured again even if they were captured or queued earlier.
+    ///
+    /// Recaptures are useful for validating a changing paginated collection. Unlike `links`, they
+    /// deliberately bypass session URL deduplication and can therefore create an infinite crawl if
+    /// a processor keeps returning them.
+    pub recaptures: Vec<String>,
     /// The title written into the capture's page list entry, when present.
     pub title: Option<String>,
 }
 
-/// Inspect successful captures to discover links and supply page titles.
+/// Inspect successful captures to discover links, request deliberate recaptures, and supply page
+/// titles.
 ///
 /// A processor is called once for every successfully captured requested URL, with the final
-/// response in its redirect chain. Returning links grows the session queue; returning a title adds
-/// it to that capture's page list entry. The processor may keep mutable state across calls.
+/// response in its redirect chain. Returning links grows the deduplicated session queue; returning
+/// recaptures appends URLs without deduplication; returning a title adds it to that capture's page
+/// list entry. The processor may keep mutable state across calls.
 pub trait CaptureProcessor {
     /// Inspect a successful capture.
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection;
@@ -138,8 +157,8 @@ impl SessionSummary {
 /// A crawl session that captures a seeded, dynamically grown queue of URLs in one WACZ.
 ///
 /// URLs are captured strictly in queue order, one at a time: the seeds first, then discovered URLs
-/// in the order the capture processor returned them. A URL is captured at most once; a discovered
-/// URL that repeats a seed or an earlier discovery is dropped rather than requeued.
+/// in the order the capture processor returned them. A discovered URL is captured at most once;
+/// processors may separately request explicit recaptures for validation workflows.
 ///
 /// # Examples
 ///
@@ -157,6 +176,7 @@ impl SessionSummary {
 ///         Inspection {
 ///             links: Vec::new(), // parse links here
 ///             title: capture.payload.is_empty().then(|| "Empty".to_owned()),
+///             ..Inspection::default()
 ///         }
 ///     }
 /// }
@@ -390,14 +410,23 @@ impl<'a> Session<'a> {
             final_url: last.captured.target_uri.as_str(),
             status: last.status,
             payload: &payload,
+            response: &last.captured.response,
         };
 
-        let Inspection { links, title } = processor.inspect(&capture);
+        let Inspection {
+            links,
+            recaptures,
+            title,
+        } = processor.inspect(&capture);
 
         for discovered in links {
             if seen.insert(discovered.clone()) {
                 queue.push_back((discovered, Some(capture.final_url.to_owned())));
             }
+        }
+
+        for recapture in recaptures {
+            queue.push_back((recapture, Some(capture.final_url.to_owned())));
         }
 
         title

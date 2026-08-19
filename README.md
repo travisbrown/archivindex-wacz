@@ -28,7 +28,9 @@ echo https://example.com/ \
 ```
 
 The `archive-wp-comments` command captures comment batches from a WordPress REST API into a crawl
-session. `--limit` can stop after a fixed number of successful batches:
+session. It fixes a creation-time cutoff, pages by comment ID, and repeats complete sweeps until no
+new IDs appear, so comments shifted between pages by concurrent deletions are not missed. `--limit`
+can stop after a fixed number of successful batches (including validation recaptures):
 
 ```bash
 cargo run --bin archivindex-archiver -- archive-wp-comments \
