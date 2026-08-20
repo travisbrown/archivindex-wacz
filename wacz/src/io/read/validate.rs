@@ -94,6 +94,12 @@ pub enum LayoutProblem {
     /// More than one ZIP central-directory entry has the same file name.
     #[error("duplicate ZIP member name: {0}")]
     DuplicateMember(String),
+    /// A member under `archive/` is not a direct WARC path.
+    #[error("invalid WARC member path: {0}")]
+    InvalidWarcMember(String),
+    /// A member under `indexes/` is neither a plain CDXJ index nor part of a complete `ZipNum` pair.
+    #[error("invalid index member path or incomplete ZipNum pair: {0}")]
+    InvalidIndexMember(String),
     /// There is no `datapackage.json` manifest.
     #[error("missing required member: datapackage.json")]
     MissingDataPackage,
@@ -126,6 +132,9 @@ pub enum ManifestProblem {
     /// A resource name is empty or uses characters outside lowercase `a-z0-9._-`.
     #[error("invalid resource name: {0}")]
     InvalidResourceName(String),
+    /// A resource path is not safely relative.
+    #[error("unsafe resource path: {0}")]
+    InvalidResourcePath(String),
     /// Two resources share a name.
     #[error("duplicate resource name: {0}")]
     DuplicateResourceName(String),
@@ -348,10 +357,34 @@ impl<R: Read + Seek> WaczReader<R> {
         if self.archive.index_for_name(PAGES_PATH).is_none() {
             problems.push(LayoutProblem::MissingPages);
         }
-        if self.warc_paths().next().is_none() {
+        let paths = self.member_paths().collect::<HashSet<_>>();
+        let mut has_warc = false;
+        let mut has_index = false;
+        for path in &paths {
+            if path.starts_with(crate::ARCHIVE_PREFIX) {
+                if crate::paths::is_warc(path) {
+                    has_warc = true;
+                } else {
+                    problems.push(LayoutProblem::InvalidWarcMember((*path).to_owned()));
+                }
+            }
+            if path.starts_with(crate::INDEXES_PREFIX) {
+                if crate::paths::is_plain_index(path)
+                    || ((crate::paths::is_zipnum_data(path)
+                        || crate::paths::is_zipnum_summary(path))
+                        && crate::paths::zipnum_partner(path)
+                            .is_some_and(|partner| paths.contains(partner.as_str())))
+                {
+                    has_index = true;
+                } else {
+                    problems.push(LayoutProblem::InvalidIndexMember((*path).to_owned()));
+                }
+            }
+        }
+        if !has_warc {
             problems.push(LayoutProblem::NoWarcMembers);
         }
-        if self.index_paths().next().is_none() {
+        if !has_index {
             problems.push(LayoutProblem::NoIndexMembers);
         }
 
@@ -384,6 +417,11 @@ impl<R: Read + Seek> WaczReader<R> {
             if !names.insert(resource.name.as_ref()) {
                 problems.push(ManifestProblem::DuplicateResourceName(
                     resource.name.to_string(),
+                ));
+            }
+            if !crate::paths::is_safe(&resource.path) {
+                problems.push(ManifestProblem::InvalidResourcePath(
+                    resource.path.to_string(),
                 ));
             }
             if !paths.insert(resource.path.as_ref()) {

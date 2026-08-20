@@ -15,7 +15,6 @@ use fluent_uri::Uri;
 use super::capture::labelled_digest;
 use super::warc_fields::{MetadataValues, metadata_record};
 use super::{Error, Exchange};
-use crate::response;
 
 /// Optional fields added to the metadata record accompanying an exchange.
 #[derive(Clone, Copy)]
@@ -123,6 +122,7 @@ fn full_records(
         date: _,
         fetch_time,
         truncated,
+        response_metadata: _,
     } = captured;
     let mut event = CaptureEvent::new(target_uri.clone(), date)
         .warcinfo_id(warcinfo_id.clone())
@@ -164,6 +164,7 @@ fn revisit_records(
     profile: RevisitProfile,
     metadata_options: MetadataOptions<'_>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
+    let body_offset = captured.response_metadata.body_offset;
     let CapturedExchange {
         request,
         mut response,
@@ -172,6 +173,7 @@ fn revisit_records(
         date: _,
         fetch_time,
         truncated: _,
+        response_metadata: _,
     } = captured;
     let request = Record::request(target_uri.as_str(), date)
         .expect("invariant violation: a parsed URI failed to reparse")
@@ -191,10 +193,8 @@ fn revisit_records(
         .refers_to(original.record_id.clone())
         .refers_to_target_uri(original.target_uri.clone())
         .refers_to_date(original.warc_date);
-    let head = response::head(&response)
-        .expect("invariant violation: the recorder stores a well-formed response head");
-    if head.body_offset < response.len() {
-        response.truncate(head.body_offset);
+    if body_offset < response.len() {
+        response.truncate(body_offset);
         revisit = revisit.truncated(TruncatedType::Length);
     }
     let revisit = revisit.body(response)?;

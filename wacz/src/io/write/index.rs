@@ -16,20 +16,30 @@ const ZIPNUM_FORMAT: &str = "cdxj-gzip-1.0";
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write a sorted CDXJ index in the configured plain or `ZipNum` format.
-    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
+    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
         &mut self,
         name: &str,
         items: I,
     ) -> Result<(), Error> {
-        let items = items.into_iter().collect::<Vec<_>>();
-        for item in &items {
-            cdxj::ConformingFields::try_from(&item.fields)?;
+        if !crate::paths::valid_index_name(name) {
+            return Err(Error::InvalidIndexName(name.to_owned()));
         }
-        self.add_index_lenient(name, items)
+        self.write_index(name, items)
     }
 
     /// Write an index while explicitly allowing entries that omit normative CDXJ fields.
     pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
+        &mut self,
+        name: &str,
+        items: I,
+    ) -> Result<(), Error> {
+        if !crate::paths::valid_index_name(name) {
+            return Err(Error::InvalidIndexName(name.to_owned()));
+        }
+        self.write_index(name, items)
+    }
+
+    fn write_index<'a, F: serde::Serialize + 'a, I: IntoIterator<Item = &'a cdxj::Item<'a, F>>>(
         &mut self,
         name: &str,
         items: I,

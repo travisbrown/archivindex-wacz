@@ -178,16 +178,16 @@ impl From<DateTime<Utc>> for Timestamp {
 
 /// A single CDXJ index line.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic)]
-pub struct Item<'a> {
+pub struct Item<'a, F = ParsedFields<'a>> {
     /// The searchable URL key the line is sorted by.
     pub key: Cow<'a, str>,
     /// The capture timestamp.
     pub timestamp: Timestamp,
     /// The JSON block locating the capture.
-    pub fields: ParsedFields<'a>,
+    pub fields: F,
 }
 
-impl<'a> Item<'a> {
+impl<'a> Item<'a, ParsedFields<'a>> {
     /// Parse a CDXJ line (without its trailing newline).
     ///
     /// # Errors
@@ -210,13 +210,28 @@ impl<'a> Item<'a> {
     }
 }
 
-impl fmt::Display for Item<'_> {
+impl<F: serde::Serialize> fmt::Display for Item<'_, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Serialization of the field block only fails on conditions that `Fields` values cannot
         // represent (such as non-string map keys), so the error is safely mapped to `fmt::Error`.
         let fields = serde_json::to_string(&self.fields).map_err(|_| fmt::Error)?;
 
         write!(f, "{} {} {}", self.key, self.timestamp, fields)
+    }
+}
+
+/// A CDXJ item whose normative fields are present by construction.
+pub type ConformingItem<'a> = Item<'a, ConformingFields<'a>>;
+
+impl<'a> TryFrom<&Item<'a>> for ConformingItem<'a> {
+    type Error = MissingFields;
+
+    fn try_from(item: &Item<'a>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            key: item.key.clone(),
+            timestamp: item.timestamp,
+            fields: ConformingFields::try_from(&item.fields)?,
+        })
     }
 }
 

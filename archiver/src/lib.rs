@@ -42,6 +42,5 @@
 
 pub mod client;
 pub mod config;
-mod response;
 pub mod session;
 pub mod wordpress;

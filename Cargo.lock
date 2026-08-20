@@ -147,7 +147,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#f8ca98d782737c48d2376114dcfaf831f44ae1b4"
+source = "git+https://github.com/travisbrown/archivindex-warc#68f682b1387ef1eb4f13c2cf255a65e84be400f0"
 dependencies = [
  "chrono",
  "file-format",

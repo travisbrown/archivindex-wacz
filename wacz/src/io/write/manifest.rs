@@ -23,14 +23,22 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !self
             .resources
             .iter()
-            .any(|resource| resource.path.starts_with(crate::ARCHIVE_PREFIX))
+            .any(|resource| crate::paths::is_warc(&resource.path))
         {
             missing.push("archive/*.warc[.gz]");
         }
         if !self
             .resources
             .iter()
-            .any(|resource| resource.path.starts_with(crate::INDEXES_PREFIX))
+            .any(|resource| crate::paths::is_plain_index(&resource.path))
+            && !self.resources.iter().any(|resource| {
+                crate::paths::is_zipnum_data(&resource.path)
+                    && crate::paths::zipnum_partner(&resource.path).is_some_and(|partner| {
+                        self.resources
+                            .iter()
+                            .any(|candidate| candidate.path == partner)
+                    })
+            })
         {
             missing.push("indexes/*");
         }

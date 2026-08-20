@@ -62,6 +62,12 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, cdxj::Error> {
     })
 }
 
+fn conforming_items(
+    items: &[cdxj::Item<'static>],
+) -> Result<Vec<cdxj::ConformingItem<'static>>, cdxj::MissingFields> {
+    items.iter().map(cdxj::ConformingItem::try_from).collect()
+}
+
 /// Build a searchable item at a particular time without requiring a corresponding WARC record.
 fn item_at(
     url: &str,
@@ -154,7 +160,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
         },
     };
 
-    writer.add_index("index.cdx", [&item])?;
+    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
 
     let page = Page {
         url: Cow::Borrowed(URL),
@@ -484,7 +490,8 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
-    writer.add_index("index.cdx", &items)?;
+    let conforming = conforming_items(&items)?;
+    writer.add_index("index.cdx", &conforming)?;
     let wacz = writer
         .finish_unchecked(PackageMetadata::default())?
         .into_inner();
@@ -593,7 +600,8 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
     items[2].timestamp = cdxj::Timestamp::with_milliseconds(second);
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-    writer.add_index("index.cdx", &items)?;
+    let conforming = conforming_items(&items)?;
+    writer.add_index("index.cdx", &conforming)?;
     let wacz = writer
         .finish_unchecked(PackageMetadata::default())?
         .into_inner();
@@ -757,7 +765,8 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
         .collect::<Result<Vec<_>, cdxj::Error>>()?;
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-    writer.add_index("index.cdx", &items)?;
+    let conforming = conforming_items(&items)?;
+    writer.add_index("index.cdx", &conforming)?;
     let wacz = writer
         .finish_unchecked(PackageMetadata::default())?
         .into_inner();
@@ -786,7 +795,7 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
 /// only its `!meta` line.
 #[test]
 fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let no_items = std::iter::empty::<&cdxj::Item<'static>>();
+    let no_items = std::iter::empty::<&cdxj::ConformingItem<'static>>();
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_index("index.cdx", no_items.clone())?;
@@ -846,7 +855,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
-    writer.add_index("index.cdx", [&item])?;
+    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
     let wacz = writer
         .finish_unchecked(PackageMetadata::default())?
         .into_inner();
@@ -987,6 +996,7 @@ fn add_warc_from_path_requires_a_usable_file_name() {
 fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_warc("data.warc", &b""[..])?;
+    let item = item_for(URL)?;
 
     assert!(matches!(
         writer.add_warc("data.warc", &b""[..]),
@@ -1000,6 +1010,15 @@ fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
         writer.add_warc("../evil.warc", &b""[..]),
         Err(writer::Error::InvalidMemberPath(path)) if path == "archive/../evil.warc"
     ));
+    for name in ["nested/index.cdx", "index.cdx.gz", "index.idx", "index"] {
+        assert!(
+            matches!(
+                writer.add_index_lenient(name, [&item]),
+                Err(writer::Error::InvalidIndexName(value)) if value == name
+            ),
+            "{name:?} should be rejected"
+        );
+    }
 
     for path in ["/absolute.txt", "dir\\file.txt", "trailing/", "", "./x.txt"] {
         assert!(
@@ -1010,6 +1029,53 @@ fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
             "{path:?} should be rejected"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = zip_of(&[
+        ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+        ("pages/pages.jsonl", b"{}\n"),
+        ("archive/not-a-warc.txt", b""),
+        ("indexes/not-an-index.txt", b""),
+        ("indexes/orphan.cdx.gz", b""),
+    ])?;
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions::default())?;
+
+    assert!(
+        report
+            .layout
+            .contains(&reader::LayoutProblem::InvalidWarcMember(
+                "archive/not-a-warc.txt".to_owned()
+            ))
+    );
+    assert!(
+        report
+            .layout
+            .contains(&reader::LayoutProblem::InvalidIndexMember(
+                "indexes/not-an-index.txt".to_owned()
+            ))
+    );
+    assert!(
+        report
+            .layout
+            .contains(&reader::LayoutProblem::InvalidIndexMember(
+                "indexes/orphan.cdx.gz".to_owned()
+            ))
+    );
+    assert!(
+        report
+            .layout
+            .contains(&reader::LayoutProblem::NoWarcMembers)
+    );
+    assert!(
+        report
+            .layout
+            .contains(&reader::LayoutProblem::NoIndexMembers)
+    );
 
     Ok(())
 }
@@ -1048,10 +1114,7 @@ fn normal_index_writing_requires_normative_fields() -> Result<(), Box<dyn std::e
     item.fields.digest = None;
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
 
-    assert!(matches!(
-        writer.add_index("index.cdx", [&item]),
-        Err(writer::Error::NonconformingIndex(_))
-    ));
+    assert!(cdxj::ConformingItem::try_from(&item).is_err());
     writer.add_index_lenient("index.cdx", [&item])?;
     Ok(())
 }
@@ -1269,11 +1332,12 @@ fn validate_reports_manifest_problems() -> Result<(), Box<dyn std::error::Error>
         format!(r#"{{"name": "{name}", "path": "{path}", "hash": "{EMPTY_HASH}", "bytes": 0}}"#)
     };
     let manifest = format!(
-        r#"{{"profile": "wacz", "wacz_version": "1.2.0", "resources": [{}, {}, {}, {}]}}"#,
+        r#"{{"profile": "wacz", "wacz_version": "1.2.0", "resources": [{}, {}, {}, {}, {}]}}"#,
         resource("Pages.JSONL", "pages/pages.jsonl"),
         resource("pages.jsonl", "pages/pages.jsonl"),
         resource("pages.jsonl", "archive/missing.warc"),
         resource("datapackage.json", "datapackage.json"),
+        resource("escape", "../escape"),
     );
     let bytes = zip_of(&[
         ("datapackage.json", manifest.as_bytes()),
@@ -1294,6 +1358,8 @@ fn validate_reports_manifest_problems() -> Result<(), Box<dyn std::error::Error>
             reader::ManifestProblem::DuplicateResourceName("pages.jsonl".to_owned()),
             reader::ManifestProblem::MissingResourceMember("archive/missing.warc".to_owned()),
             reader::ManifestProblem::ReservedResourcePath("datapackage.json".to_owned()),
+            reader::ManifestProblem::InvalidResourcePath("../escape".to_owned()),
+            reader::ManifestProblem::MissingResourceMember("../escape".to_owned()),
             reader::ManifestProblem::UnlistedMember("extra/notes.txt".to_owned()),
         ]
     );
@@ -1498,7 +1564,8 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
-    writer.add_index("index.cdx", &items)?;
+    let conforming = conforming_items(&items)?;
+    writer.add_index("index.cdx", &conforming)?;
     writer.add_warc("data.warc", warc.as_slice())?;
     let mut wacz = writer
         .finish_unchecked(PackageMetadata::default())?

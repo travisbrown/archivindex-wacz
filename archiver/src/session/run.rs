@@ -1,16 +1,13 @@
 //! Queue execution, processor dispatch, and retry policy.
 
-use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::thread;
 use std::time::Duration;
 
-use archivindex_warc::record::payload;
 use archivindex_warc_revisit_index::Index as RevisitIndex;
 
 use super::{Capture, Inspection, Session, SessionSummary};
 use crate::client::{CaptureControl, CaptureEvent, Collection, Error, Exchange};
-use crate::response;
 
 impl Session<'_> {
     /// Run the crawl to the end of its queue and atomically publish its WARC file.
@@ -125,18 +122,14 @@ impl Session<'_> {
         let last = exchanges
             .last()
             .expect("a capture without an error has at least one exchange");
-        let payload = payload::entity_body(&last.captured.response).unwrap_or_else(|_| {
-            let body_offset = response::head(&last.captured.response)
-                .expect("invariant violation: the recorder stores a well-formed response head")
-                .body_offset;
-            Cow::Borrowed(&last.captured.response[body_offset..])
-        });
+        let payload = last.payload();
         let capture = Capture {
             url,
             final_url: last.captured.target_uri.as_str(),
             status: last.status,
             payload: &payload,
             response: &last.captured.response,
+            response_metadata: last.captured.response_metadata.clone(),
         };
         let Inspection {
             links,

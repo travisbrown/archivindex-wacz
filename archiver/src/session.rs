@@ -25,7 +25,7 @@ pub struct Operator {
 }
 
 /// A successfully captured page shown to a [`CaptureProcessor`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Capture<'a> {
     /// The seed or discovered URL as requested.
     pub url: &'a str,
@@ -39,13 +39,15 @@ pub struct Capture<'a> {
     pub payload: &'a [u8],
     /// The complete recorded HTTP response.
     pub response: &'a [u8],
+    pub(crate) response_metadata: archivindex_warc::record::http::ResponseMetadata,
 }
 
 impl Capture<'_> {
     /// Return the first value of a response header as readable text.
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
-        crate::response::header(self.response, name)
+        self.response_metadata
+            .header(name)
             .and_then(|value| std::str::from_utf8(value).ok())
     }
 }

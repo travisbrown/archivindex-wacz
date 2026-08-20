@@ -104,6 +104,9 @@ pub enum Error {
     /// A WARC member name does not have a conforming suffix.
     #[error("WARC member must end in .warc or .warc.gz: {0}")]
     InvalidWarcName(String),
+    /// An index name is not a direct `.cdx` member name.
+    #[error("index name must be a direct .cdx file name: {0}")]
+    InvalidIndexName(String),
     /// A gzip-named WARC is not a valid gzip stream.
     #[error("invalid gzip WARC: {0}")]
     InvalidGzip(#[source] std::io::Error),

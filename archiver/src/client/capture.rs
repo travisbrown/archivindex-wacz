@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 
-use archivindex_warc::record::payload;
 use archivindex_warc::recorder::CapturedExchange;
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate, WarcDatePrecision};
 use archivindex_warc_revisit_index::{ResourceKey, ResourceState, RevisitTarget};
@@ -12,7 +11,6 @@ use sha2::{Digest, Sha256};
 use url::{Position, Url};
 
 use super::{Archiver, Collection, Error};
-use crate::response;
 
 /// The precision at which `WARC-Date` fields are recorded.
 const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
@@ -57,9 +55,17 @@ impl Exchange {
 
     /// Return a readable response validator exactly as received.
     pub(crate) fn validator(&self, name: &str) -> Option<String> {
-        response::header(&self.captured.response, name)
+        self.captured
+            .response_metadata
+            .header(name)
             .and_then(|value| std::str::from_utf8(value).ok())
             .map(str::to_owned)
+    }
+
+    pub(crate) fn payload(&self) -> Cow<'_, [u8]> {
+        self.captured
+            .entity_body()
+            .unwrap_or_else(|_| Cow::Borrowed(self.captured.stored_body()))
     }
 }
 
@@ -184,21 +190,24 @@ impl Archiver {
         let captured = self
             .recorder
             .fetch(&http::Method::GET, &target, &headers, None)?;
-        let head = response::head(&captured.response)
-            .expect("invariant violation: the recorder stores a well-formed response head");
-        let location = next_location(url, head.status, head.location.as_deref());
+        let status = captured.response_metadata.status;
+        let location = captured
+            .response_metadata
+            .header("location")
+            .and_then(|value| std::str::from_utf8(value).ok());
+        let location = next_location(url, status, location);
         let revalidated = original
-            .filter(|_| head.status == StatusCode::NOT_MODIFIED.as_u16())
+            .filter(|_| status == StatusCode::NOT_MODIFIED.as_u16())
             .map(|original| original.target);
-        let (payload_digest, payload_length) = match payload::entity_body(&captured.response) {
-            Ok(payload) => (Some(Sha256::digest(&payload).into()), payload.len() as u64),
-            Err(_) => (None, (captured.response.len() - head.body_offset) as u64),
-        };
+        let (payload_digest, payload_length) = captured.entity_body().map_or_else(
+            |_| (None, captured.stored_body().len() as u64),
+            |payload| (Some(Sha256::digest(&payload).into()), payload.len() as u64),
+        );
 
         Ok((
             Exchange {
                 date: WarcDate::new(captured.date, DATE_PRECISION),
-                status: head.status,
+                status,
                 payload_digest,
                 payload_length,
                 revalidated,

@@ -67,11 +67,7 @@ impl<W: Write + Seek> WaczWriter<W> {
     }
 
     fn validate_path(&self, path: &str) -> Result<(), Error> {
-        if path.contains('\\')
-            || path
-                .split('/')
-                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-        {
+        if !crate::paths::is_safe(path) {
             return Err(Error::InvalidMemberPath(path.to_owned()));
         }
         if path == DATA_PACKAGE_PATH

@@ -333,6 +333,8 @@ mod tests {
             status,
             payload,
             response,
+            response_metadata: archivindex_warc::record::http::ResponseMetadata::parse(response)
+                .expect("a complete test response"),
         }
     }
 

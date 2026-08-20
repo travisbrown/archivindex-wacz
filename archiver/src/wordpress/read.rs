@@ -128,7 +128,7 @@ fn collect_records<R: BufRead>(
             continue;
         }
 
-        let response = crate::response::head(&body)
+        let response = archivindex_warc::record::http::ResponseMetadata::parse(&body)
             .ok_or_else(|| Error::InvalidResponse { url: url.clone() })?;
 
         if !(200..300).contains(&response.status) {

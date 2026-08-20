@@ -25,6 +25,7 @@ use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
+use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
 use url::Url;
@@ -503,7 +504,7 @@ fn capture_info_from_http(
         return None;
     }
     let key = cdxj::search_key(target_uri).ok()?;
-    let head = response_head(message);
+    let head = ResponseMetadata::parse(message);
     let status = head.as_ref().map(|head| head.status);
     let entity: Cow<'_, [u8]> = if revisit {
         Cow::Borrowed(&[])
@@ -598,25 +599,4 @@ fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {
     let mut file = std::fs::File::open(path)?;
     let mut magic = [0; 2];
     Ok(file.read(&mut magic)? == magic.len() && magic == [0x1f, 0x8b])
-}
-
-struct ResponseHead {
-    status: u16,
-    body_offset: usize,
-}
-
-fn response_head(message: &[u8]) -> Option<ResponseHead> {
-    let first_line_end = message.windows(2).position(|bytes| bytes == b"\r\n")?;
-    let first_line = std::str::from_utf8(&message[..first_line_end]).ok()?;
-    let mut parts = first_line.split_ascii_whitespace();
-    let version = parts.next()?;
-    let status = parts.next()?.parse().ok()?;
-    if !version.starts_with("HTTP/") {
-        return None;
-    }
-    let body_offset = message.windows(4).position(|bytes| bytes == b"\r\n\r\n")? + 4;
-    Some(ResponseHead {
-        status,
-        body_offset,
-    })
 }
