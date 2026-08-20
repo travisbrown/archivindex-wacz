@@ -8,6 +8,7 @@ use archivindex_wacz::cdxj;
 use archivindex_wacz::writer::{WaczWriter, WriterConfig};
 use archivindex_warc::record::BlockError;
 use archivindex_warc::recorder::Recorder;
+use archivindex_warc_revisit_index::Index as RevisitIndex;
 use chrono::{DateTime, Utc};
 use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
@@ -62,6 +63,9 @@ pub enum Error {
     /// A CDXJ search key could not be derived for a URL.
     #[error(transparent)]
     Index(#[from] cdxj::Error),
+    /// A revisit index could not be opened, queried, or updated.
+    #[error(transparent)]
+    RevisitIndex(#[from] archivindex_warc_revisit_index::Error),
     /// A WARC content block could not be attached to its record.
     #[error(transparent)]
     WarcBlock(#[from] BlockError),
@@ -196,6 +200,7 @@ impl Archiver {
         id: &str,
         software: (&str, &str),
         operator: (&str, Option<&str>),
+        revisit_index: RevisitIndex,
     ) -> Result<Collection, Error> {
         let gzip = self.config.gzip_warc;
         let suffix = if gzip { ".warc.gz" } else { ".warc" };
@@ -209,6 +214,7 @@ impl Archiver {
                 operator: Some(operator),
                 session_id: Some(id),
             },
+            revisit_index,
         )
     }
 
@@ -239,6 +245,7 @@ impl Archiver {
             warc_name.to_owned(),
             gzip,
             &WarcinfoOptions::archiver(&self.config.user_agent),
+            RevisitIndex::open_in_memory()?,
         )?;
 
         let concurrency = self.config.concurrency.max(1);

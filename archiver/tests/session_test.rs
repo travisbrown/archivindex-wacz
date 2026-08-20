@@ -11,6 +11,7 @@ use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
+use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::reader::{ValidationOptions, WaczReader};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::Field;
@@ -19,7 +20,10 @@ use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
-use archivindex_warc::value::MediaType;
+use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
+use archivindex_warc::version::WarcVersion;
+use archivindex_warc_revisit_index::{Index, ResourceKey, ResourceStateUpdate, RevisitTarget};
+use fluent_uri::Uri;
 
 /// The operator most tests run their sessions as.
 fn operator() -> Operator {
@@ -133,6 +137,20 @@ fn request_header(head: &str, name: &str) -> Option<String> {
 }
 
 const LAST_MODIFIED: &str = "Wed, 01 Jan 2025 00:00:00 GMT";
+const EXTERNAL_RECORD_ID: &str = "urn:uuid:00000000-0000-4000-8000-000000000001";
+
+fn uri(value: &str) -> Uri<String> {
+    Uri::parse(value).expect("test URI").to_owned()
+}
+
+fn warc_date(value: &str) -> WarcDate {
+    WarcDate::parse(value, WarcVersion::V1_1).expect("test WARC date")
+}
+
+fn sha256(payload: &[u8]) -> LabelledDigest {
+    let digest = Sha256Digest::compute(payload);
+    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest.0)
+}
 
 /// Answer a request for a versioned page, whose `ETag` advances once: an unconditional request or
 /// one for a stale version gets the current page in full, while one for the current version gets
@@ -272,6 +290,190 @@ impl CaptureProcessor for RecaptureProcessor<'_> {
             ..Inspection::default()
         }
     }
+}
+
+#[test]
+fn persistent_index_supplies_historical_and_same_session_revisit_targets()
+-> Result<(), Box<dyn std::error::Error>> {
+    const HISTORICAL: &str = "historical payload";
+    const NEW: &str = "new shared payload";
+
+    let (port, server) = serve_with(3, |head| {
+        let path = request_path(head);
+        let body = if path == "/historical" {
+            HISTORICAL
+        } else {
+            NEW
+        };
+        (
+            plain("200 OK", "content-type: text/plain", body),
+            path.to_owned(),
+        )
+    })?;
+    let historical_url = format!("http://127.0.0.1:{port}/historical");
+    let new_a_url = format!("http://127.0.0.1:{port}/new-a");
+    let new_b_url = format!("http://127.0.0.1:{port}/new-b");
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("revisits.sqlite3");
+    let output = directory.path().join("persistent-revisits.wacz");
+    let historical_target = RevisitTarget {
+        payload_digest: sha256(HISTORICAL.as_bytes()),
+        payload_length: Some(HISTORICAL.len() as u64),
+        record_id: uri(EXTERNAL_RECORD_ID),
+        target_uri: uri("https://archive.example/historical"),
+        warc_date: warc_date("2025-01-01T00:00:00Z"),
+    };
+    Index::open(&database)?.insert_payload(&historical_target)?;
+
+    let summary = Session::new(
+        archiver(Config::default()),
+        "persistent-revisits",
+        operator(),
+        [&historical_url, &new_a_url, &new_b_url],
+        &output,
+    )?
+    .revisit_index(&database)
+    .run()?;
+
+    assert_eq!(
+        server.join().expect("server thread"),
+        ["/historical", "/new-a", "/new-b"]
+    );
+    assert!(summary.is_complete());
+
+    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let records = reader
+        .warc("archive/persistent-revisits.warc.gz")?
+        .iter_records::<NoExtension>()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        records.iter().map(Record::type_name).collect::<Vec<_>>(),
+        [
+            "warcinfo", "request", "revisit", "metadata", "request", "response", "metadata",
+            "request", "revisit", "metadata",
+        ]
+    );
+
+    let Record::Revisit {
+        header: historical, ..
+    } = &records[2]
+    else {
+        panic!("the historical duplicate should be a revisit");
+    };
+    assert_eq!(historical.profile, RevisitProfile::IDENTICAL_PAYLOAD_DIGEST);
+    assert_eq!(
+        historical.refers_to.as_ref(),
+        Some(&uri(EXTERNAL_RECORD_ID))
+    );
+    assert_eq!(
+        historical.refers_to_target_uri.as_ref().map(Uri::as_str),
+        Some("https://archive.example/historical")
+    );
+
+    let Record::Response {
+        header: new_original,
+        ..
+    } = &records[5]
+    else {
+        panic!("the first new payload should be stored in full");
+    };
+    let Record::Revisit {
+        header: new_revisit,
+        ..
+    } = &records[8]
+    else {
+        panic!("the second new payload should be a revisit");
+    };
+    assert_eq!(
+        new_revisit.refers_to.as_ref(),
+        Some(&new_original.core.record_id)
+    );
+    assert_eq!(
+        new_revisit.refers_to_target_uri.as_ref().map(Uri::as_str),
+        Some(new_a_url.as_str())
+    );
+
+    let persisted = Index::open(&database)?
+        .lookup_payload(&sha256(NEW.as_bytes()))?
+        .expect("new payload should be persisted");
+    assert_eq!(persisted.record_id, new_original.core.record_id);
+    assert_eq!(persisted.target_uri.as_str(), new_a_url);
+
+    Ok(())
+}
+
+#[test]
+fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve_with(1, |head| (respond_versioned(head, 1), head.to_owned()))?;
+    let url = format!("http://127.0.0.1:{port}/page");
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("resource-state.sqlite3");
+    let output = directory.path().join("persistent-revalidation.wacz");
+    let digest = sha256(b"<html>version 1</html>");
+    let original_date = warc_date("2025-01-01T00:00:00Z");
+    let index = Index::open(&database)?;
+    index.insert_payload(&RevisitTarget {
+        payload_digest: digest.clone(),
+        payload_length: Some(22),
+        record_id: uri(EXTERNAL_RECORD_ID),
+        target_uri: uri(&url),
+        warc_date: original_date,
+    })?;
+    index.update_resource(
+        &ResourceKey::new(uri(&url)),
+        ResourceStateUpdate::representation(
+            Some("\"1\"".to_owned()),
+            Some(LAST_MODIFIED.to_owned()),
+            Some(digest.clone()),
+            Some(uri(EXTERNAL_RECORD_ID)),
+            Some(original_date),
+        ),
+    )?;
+    drop(index);
+
+    let summary = Session::new(
+        archiver(Config::default()),
+        "persistent-revalidation",
+        operator(),
+        [&url],
+        &output,
+    )?
+    .revisit_index(&database)
+    .run()?;
+
+    let requests = server.join().expect("server thread");
+    assert_eq!(
+        request_header(&requests[0], "if-none-match").as_deref(),
+        Some("\"1\"")
+    );
+    assert_eq!(
+        request_header(&requests[0], "if-modified-since").as_deref(),
+        Some(LAST_MODIFIED.to_ascii_lowercase().as_str())
+    );
+    assert_eq!(summary.seed_captures[0].status, 304);
+
+    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let records = reader
+        .warc("archive/persistent-revalidation.warc.gz")?
+        .iter_records::<NoExtension>()
+        .collect::<Result<Vec<_>, _>>()?;
+    let Record::Revisit { header, .. } = &records[2] else {
+        panic!("the persisted original should produce a revisit");
+    };
+    assert_eq!(header.profile, RevisitProfile::SERVER_NOT_MODIFIED);
+    assert_eq!(header.refers_to.as_ref(), Some(&uri(EXTERNAL_RECORD_ID)));
+    assert_eq!(header.refers_to_date, Some(original_date));
+    assert_eq!(header.payload.payload_digest.as_ref(), Some(&digest));
+
+    let state = Index::open(&database)?
+        .lookup_resource(&ResourceKey::new(uri(&url)))?
+        .expect("resource state should remain indexed");
+    assert_eq!(state.payload_digest, Some(digest));
+    assert_eq!(state.record_id, Some(uri(EXTERNAL_RECORD_ID)));
+    assert_eq!(state.warc_date, Some(original_date));
+
+    Ok(())
 }
 
 #[test]

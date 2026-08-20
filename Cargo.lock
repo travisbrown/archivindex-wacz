@@ -85,6 +85,7 @@ version = "0.4.0"
 dependencies = [
  "archivindex-wacz",
  "archivindex-warc",
+ "archivindex-warc-revisit-index",
  "chrono",
  "flate2",
  "fluent-uri",

@@ -122,6 +122,7 @@ pub struct Session<'a> {
     processor: Option<Box<dyn CaptureProcessor + 'a>>,
     retry: RetryConfig,
     limit: Option<usize>,
+    revisit_index: Option<PathBuf>,
 }
 
 impl<'a> Session<'a> {
@@ -157,6 +158,7 @@ impl<'a> Session<'a> {
             processor: None,
             retry: RetryConfig::default(),
             limit: None,
+            revisit_index: None,
         })
     }
 
@@ -185,6 +187,18 @@ impl<'a> Session<'a> {
     #[must_use]
     pub const fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// Use the persistent revisit and resource-state database at `path`.
+    ///
+    /// Existing payload entries make matching responses revisits, and existing resource state
+    /// supplies conditional request headers. Successful captures update the database immediately,
+    /// so later captures in this session also benefit from both indexes. Without this option, the
+    /// session uses an in-memory index that lasts only for the run.
+    #[must_use]
+    pub fn revisit_index(mut self, path: impl Into<PathBuf>) -> Self {
+        self.revisit_index = Some(path.into());
         self
     }
 }

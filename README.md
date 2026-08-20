@@ -14,6 +14,7 @@ Tools for capturing web pages and packaging them as web archive collections.
 | [`archivindex-wacz`](wacz/) | Reading and writing web archive collections in the [WACZ][wacz-spec] format |
 | [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into the WACZ format |
 | [`archivindex-archiver-cli`](archiver-cli/) | An `archivindex-archiver` command-line front end |
+| [`archivindex-warc-revisit-index`](warc-revisit-index/) | Persistent WARC payload-revisit and HTTP resource state |
 
 The WARC reading and writing core these crates are built on lives in a separate repository,
 [`archivindex-warc`][archivindex-warc], and is used here as a source dependency.
@@ -39,6 +40,7 @@ cargo run --bin archivindex-archiver -- archive-wp-comments \
   --session-name comments-2026 \
   --operator "A. Archivist" \
   --operator-email archivist@example.com \
+  --revisit-index comments-state.sqlite3 \
   --limit 10
 ```
 

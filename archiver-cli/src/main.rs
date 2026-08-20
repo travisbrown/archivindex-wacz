@@ -87,6 +87,9 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     .processor(processor)
     .retry(retry);
 
+    if let Some(revisit_index) = options.revisit_index {
+        session = session.revisit_index(revisit_index);
+    }
     if let Some(limit) = options.limit {
         session = session.limit(limit);
     }
@@ -231,6 +234,9 @@ struct ArchiveWpCommentsOptions {
     /// Email address of the operator running the crawl, recorded in `warcinfo`.
     #[clap(long)]
     operator_email: Option<String>,
+    /// Persistent payload-revisit and conditional-request state database.
+    #[clap(long)]
+    revisit_index: Option<PathBuf>,
     /// Stop successfully after capturing this many comment batches.
     #[clap(long)]
     limit: Option<usize>,
@@ -328,6 +334,8 @@ mod tests {
             "comments-2026",
             "--operator",
             "A. Archivist",
+            "--revisit-index",
+            "crawl-state.sqlite3",
             "--limit",
             "12",
         ])
@@ -341,6 +349,10 @@ mod tests {
         assert_eq!(options.output, PathBuf::from("comments.wacz"));
         assert_eq!(options.session_name, "comments-2026");
         assert_eq!(options.operator, "A. Archivist");
+        assert_eq!(
+            options.revisit_index,
+            Some(PathBuf::from("crawl-state.sqlite3"))
+        );
         assert_eq!(options.limit, Some(12));
     }
 

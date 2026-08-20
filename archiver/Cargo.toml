@@ -11,6 +11,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+archivindex-warc-revisit-index = { version = "0.4.0", path = "../warc-revisit-index/" }
 archivindex-wacz = { version = "0.4.0", path = "../wacz/" }
 archivindex-warc.workspace = true
 chrono.workspace = true

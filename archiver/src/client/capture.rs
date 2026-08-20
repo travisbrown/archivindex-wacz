@@ -6,7 +6,8 @@ use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_warc::record::payload;
 use archivindex_warc::recorder::CapturedExchange;
-use archivindex_warc::value::{WarcDate, WarcDatePrecision};
+use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate, WarcDatePrecision};
+use archivindex_warc_revisit_index::{ResourceKey, ResourceState, RevisitTarget};
 use http::StatusCode;
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use url::{Position, Url};
@@ -26,9 +27,9 @@ pub struct Exchange {
     /// The response entity-body digest, absent when transfer decoding fails.
     pub(super) payload_digest: Option<Sha256Digest>,
     pub(super) payload_length: u64,
-    /// The digest of the earlier payload that this `304 Not Modified` response, answering a
-    /// conditional request, confirms unchanged.
-    pub(super) revalidated: Option<Sha256Digest>,
+    /// The earlier capture that this `304 Not Modified` response, answering a conditional request,
+    /// confirms unchanged.
+    pub(super) revalidated: Option<RevisitTarget>,
     pub(crate) captured: CapturedExchange,
 }
 
@@ -40,34 +41,27 @@ impl Exchange {
     /// Exchanges without a decodable payload, with an empty payload, or with a truncated response
     /// never revisit by their own payload: the first two save nothing, and a truncated capture's
     /// digest does not describe the complete payload.
-    pub(super) fn revisit_key(&self) -> Option<Sha256Digest> {
-        self.revalidated.or_else(|| {
-            self.payload_digest
-                .filter(|_| self.payload_length > 0 && self.captured.truncated.is_none())
-        })
+    pub(super) fn revisit_key(&self) -> Option<LabelledDigest> {
+        self.revalidated
+            .as_ref()
+            .map(|target| target.payload_digest.clone())
+            .or_else(|| {
+                self.payload_digest
+                    .filter(|_| self.payload_length > 0 && self.captured.truncated.is_none())
+                    .map(labelled_digest)
+            })
     }
 
-    /// The validators a later capture of this exchange's URL sends to ask whether the stored
-    /// payload is still current, if the response carries any.
-    ///
-    /// A redirect is never revalidated: a `304` in place of its `Location` would end the chain.
-    pub(super) fn original(&self) -> Option<Original> {
-        if is_redirect(self.status) {
-            return None;
-        }
-        let payload_digest = self.revisit_key()?;
-        let validator = |name| {
-            response::header(&self.captured.response, name)
-                .and_then(|value| HeaderValue::from_bytes(value).ok())
-        };
-        let etag = validator("etag");
-        let last_modified = validator("last-modified");
+    /// The resource key for the recorded target URI.
+    pub(super) fn resource_key(&self) -> ResourceKey {
+        ResourceKey::new(self.captured.target_uri.clone())
+    }
 
-        (etag.is_some() || last_modified.is_some()).then_some(Original {
-            payload_digest,
-            etag,
-            last_modified,
-        })
+    /// Return a readable response validator exactly as received.
+    pub(super) fn validator(&self, name: &str) -> Option<String> {
+        response::header(&self.captured.response, name)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .map(str::to_owned)
     }
 }
 
@@ -75,12 +69,42 @@ impl Exchange {
 /// validators a later request sends to ask the server whether that payload is still current.
 #[derive(Clone, Debug)]
 pub(super) struct Original {
-    payload_digest: Sha256Digest,
+    target: RevisitTarget,
     etag: Option<HeaderValue>,
     last_modified: Option<HeaderValue>,
 }
 
 impl Original {
+    /// Build a conditionally usable original from complete persisted representation state.
+    pub(super) fn from_state(
+        state: ResourceState,
+        canonical: Option<RevisitTarget>,
+    ) -> Option<Self> {
+        let payload_digest = state.payload_digest?;
+        let target = match canonical {
+            Some(target) => target,
+            None => RevisitTarget {
+                payload_digest,
+                payload_length: None,
+                record_id: state.record_id?,
+                target_uri: state.key.target_uri().clone(),
+                warc_date: state.warc_date?,
+            },
+        };
+        let etag = state
+            .etag
+            .and_then(|value| HeaderValue::from_str(&value).ok());
+        let last_modified = state
+            .last_modified
+            .and_then(|value| HeaderValue::from_str(&value).ok());
+
+        (etag.is_some() || last_modified.is_some()).then_some(Self {
+            target,
+            etag,
+            last_modified,
+        })
+    }
+
     /// The request headers extended with the preconditions under which the server may answer
     /// `304 Not Modified` instead of repeating the payload.
     fn conditional_headers(&self, headers: &HeaderMap) -> HeaderMap {
@@ -151,11 +175,15 @@ impl Archiver {
                 source,
             })?;
         // The collection keys captures by the recorded target URI, which carries no fragment.
-        let original =
-            revalidate.and_then(|collection| collection.original(&url[..Position::AfterQuery]));
-        let headers = original.map_or(Cow::Borrowed(&self.headers), |original| {
-            Cow::Owned(original.conditional_headers(&self.headers))
-        });
+        let original = revalidate
+            .map(|collection| collection.original(&url[..Position::AfterQuery]))
+            .transpose()?
+            .flatten();
+        let headers = original
+            .as_ref()
+            .map_or(Cow::Borrowed(&self.headers), |original| {
+                Cow::Owned(original.conditional_headers(&self.headers))
+            });
         let captured = self
             .recorder
             .fetch(&http::Method::GET, &target, &headers, None)?;
@@ -164,7 +192,7 @@ impl Archiver {
         let location = next_location(url, head.status, head.location.as_deref());
         let revalidated = original
             .filter(|_| head.status == StatusCode::NOT_MODIFIED.as_u16())
-            .map(|original| original.payload_digest);
+            .map(|original| original.target);
         let (payload_digest, payload_length) = match payload::entity_body(&captured.response) {
             Ok(payload) => (Some(Sha256Digest::compute(&payload)), payload.len() as u64),
             Err(_) => (None, (captured.response.len() - head.body_offset) as u64),
@@ -183,6 +211,11 @@ impl Archiver {
             location,
         ))
     }
+}
+
+/// Express the archiver's fixed SHA-256 payload digest in WARC's labelled representation.
+pub(super) fn labelled_digest(digest: Sha256Digest) -> LabelledDigest {
+    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest.0)
 }
 
 /// Whether a status redirects to the response's `Location`.

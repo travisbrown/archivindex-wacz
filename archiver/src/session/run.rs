@@ -5,6 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use std::thread;
 
 use archivindex_warc::record::payload;
+use archivindex_warc_revisit_index::Index as RevisitIndex;
 
 use super::{Capture, Inspection, Session, SessionSummary};
 use crate::client::{Collection, Error, Exchange};
@@ -13,10 +14,15 @@ use crate::response;
 impl Session<'_> {
     /// Run the crawl to the end of its queue and write the WACZ file.
     pub fn run(mut self) -> Result<SessionSummary, Error> {
+        let revisit_index = self
+            .revisit_index
+            .as_ref()
+            .map_or_else(RevisitIndex::open_in_memory, RevisitIndex::open)?;
         let mut collection = self.archiver.session_collection(
             &self.id,
             (&self.software.0, &self.software.1),
             (&self.operator.name, self.operator.email.as_deref()),
+            revisit_index,
         )?;
         let wacz = self.archiver.wacz_to_path(&self.output)?;
         let mut seen = HashSet::new();

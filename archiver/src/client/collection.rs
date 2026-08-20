@@ -1,21 +1,20 @@
 //! WARC spooling, CDX/page accumulation, and final WACZ assembly.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
-use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_wacz::writer::{PackageMetadata, WaczWriter};
 use archivindex_warc::io::write::WarcWriter;
+use archivindex_warc_revisit_index::{Index, ResourceKey, ResourceStateUpdate};
 use fluent_uri::Uri;
 
 use super::capture::Original;
 use super::warc_fields::{WarcinfoOptions, warcinfo_record};
-use super::warc_mapping::{RevisitTarget, write_exchange, write_record};
+use super::warc_mapping::{write_exchange, write_record};
 use super::{ArchiveSummary, CaptureSummary, Error, Exchange, Failure};
 use crate::config::DEFAULT_USER_AGENT;
 
@@ -32,11 +31,8 @@ pub struct Collection {
     items: Vec<cdxj::Item<'static>>,
     page_list: Vec<Page<'static>>,
     extra_page_list: Vec<Page<'static>>,
-    /// Stored `response` records eligible as revisit originals, by payload digest.
-    revisits: HashMap<Sha256Digest, RevisitTarget>,
-    /// The latest complete capture carrying validators for each target URI, which a later capture
-    /// of the URI asks the server to revalidate.
-    originals: HashMap<String, Original>,
+    /// Payload and conditional-request state, persistent when configured by a session.
+    revisit_index: Index,
 }
 
 impl Collection {
@@ -45,6 +41,7 @@ impl Collection {
         warc_name: String,
         gzip: bool,
         warcinfo: &WarcinfoOptions<'_>,
+        revisit_index: Index,
     ) -> Result<Self, Error> {
         let mut warc = WarcWriter::new(BufWriter::new(tempfile::tempfile()?)).with_digests();
         let warcinfo = warcinfo_record(&warc_name, warcinfo)?;
@@ -60,14 +57,28 @@ impl Collection {
             items: Vec::new(),
             page_list: Vec::new(),
             extra_page_list: Vec::new(),
-            revisits: HashMap::new(),
-            originals: HashMap::new(),
+            revisit_index,
         })
     }
 
     /// The earlier capture of a target URI that a new capture may ask the server to revalidate.
-    pub(super) fn original(&self, url: &str) -> Option<&Original> {
-        self.originals.get(url)
+    pub(super) fn original(&self, url: &str) -> Result<Option<Original>, Error> {
+        let target_uri = Uri::parse(url)
+            .expect("invariant violation: a parsed URL failed to reparse as a URI")
+            .to_owned();
+        let key = ResourceKey::new(target_uri);
+
+        let Some(state) = self.revisit_index.lookup_resource(&key)? else {
+            return Ok(None);
+        };
+        let canonical = state
+            .payload_digest
+            .as_ref()
+            .map(|digest| self.revisit_index.lookup_payload(digest))
+            .transpose()?
+            .flatten();
+
+        Ok(Original::from_state(state, canonical))
     }
 
     /// Record every captured hop and add either a page summary or failure.
@@ -94,7 +105,19 @@ impl Collection {
                 exchange.payload_length,
             ));
             let key = exchange.revisit_key();
-            let original = exchange.original();
+            let resource_key = exchange.resource_key();
+            let etag = exchange.validator("etag");
+            let last_modified = exchange.validator("last-modified");
+            let status = exchange.status;
+            let revalidated = exchange.revalidated.clone();
+            let revisit_of = match &revalidated {
+                Some(target) => Some(target.clone()),
+                None => key
+                    .as_ref()
+                    .map(|digest| self.revisit_index.lookup_payload(digest))
+                    .transpose()?
+                    .flatten(),
+            };
             let (item, target) = write_exchange(
                 &mut self.warc,
                 exchange,
@@ -102,14 +125,35 @@ impl Collection {
                 &self.warc_name,
                 self.gzip,
                 via.filter(|_| hop == 0),
-                key.and_then(|key| self.revisits.get(&key)),
+                revisit_of.as_ref(),
             )?;
-            if let Some(original) = original {
-                self.originals.insert(item.fields.url.to_string(), original);
-            }
             self.items.push(item);
-            if let (Some(key), Some(target)) = (key, target) {
-                self.revisits.insert(key, target);
+
+            if key.is_some()
+                && let Some(target) = &target
+            {
+                self.revisit_index.insert_payload(target)?;
+            }
+
+            if status == 304 && revalidated.is_some() {
+                self.revisit_index.update_resource(
+                    &resource_key,
+                    ResourceStateUpdate::not_modified(etag, last_modified),
+                )?;
+            } else if status == 200
+                && key.is_some()
+                && let Some(original) = revisit_of.as_ref().or(target.as_ref())
+            {
+                self.revisit_index.update_resource(
+                    &resource_key,
+                    ResourceStateUpdate::representation(
+                        etag,
+                        last_modified,
+                        Some(original.payload_digest.clone()),
+                        Some(original.record_id.clone()),
+                        Some(original.warc_date),
+                    ),
+                )?;
             }
         }
 

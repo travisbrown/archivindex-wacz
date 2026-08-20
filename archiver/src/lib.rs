@@ -27,7 +27,9 @@
 //! and titled by a user-supplied capture processor inspecting each response, captured (with retries
 //! for transient network failures) into a single WARC file named after the session identifier. A
 //! session recapturing a URL asks the server to revalidate the earlier response, storing a `304 Not
-//! Modified` answer as a `revisit` record under the `server-not-modified` profile.
+//! Modified` answer as a `revisit` record under the `server-not-modified` profile. A session may
+//! use a persistent revisit index to deduplicate against earlier WARC captures and reuse their HTTP
+//! validators across runs.
 //!
 //! # Modules
 //!

@@ -13,27 +13,16 @@ use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::recorder::CapturedExchange;
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
+use archivindex_warc_revisit_index::RevisitTarget;
 use fluent_uri::Uri;
 
+use super::capture::labelled_digest;
 use super::warc_fields::metadata_record;
 use super::{Error, Exchange};
 use crate::response;
 
 /// The conventional CDXJ media type for an entry backed by a `revisit` record.
 const REVISIT_MIME: &str = "warc/revisit";
-
-/// The identity of a stored `response` record that later revisits of its payload reference.
-#[derive(Clone, Debug)]
-pub(super) struct RevisitTarget {
-    /// The original record's `WARC-Record-ID`.
-    record_id: Uri<String>,
-    /// The original capture's target URI.
-    target_uri: Uri<String>,
-    /// The original record's `WARC-Date`.
-    date: WarcDate,
-    /// The original record's payload digest, which every revisit of it shares.
-    payload_digest: Sha256Digest,
-}
 
 /// Write a record, optionally as an independent gzip member.
 pub(super) fn write_record<W: Write>(
@@ -72,7 +61,7 @@ pub(super) fn write_exchange<W: Write>(
         date,
         status,
         payload_digest,
-        payload_length: _,
+        payload_length,
         revalidated,
         captured,
     } = exchange;
@@ -99,16 +88,19 @@ pub(super) fn write_exchange<W: Write>(
             .map(|media_type| Cow::Owned(media_type.to_string()))
     };
     // A revisit's payload is the original's, whatever the revisiting response itself carried.
-    let digest = revisit_of.map_or(payload_digest, |original| Some(original.payload_digest));
+    let digest = revisit_of
+        .map(|original| original.payload_digest.clone())
+        .or_else(|| payload_digest.map(labelled_digest));
     let target = revisit_of
         .is_none()
-        .then_some(payload_digest)
+        .then_some(digest.clone())
         .flatten()
         .map(|payload_digest| RevisitTarget {
             record_id: records.response.core().record_id.clone(),
             target_uri: target_uri.clone(),
-            date,
+            warc_date: date,
             payload_digest,
+            payload_length: Some(payload_length),
         });
     write_record(writer, records.request, gzip)?;
     let written = write_record(writer, records.response, gzip)?;
@@ -213,15 +205,12 @@ fn revisit_records(
         .expect("invariant violation: a parsed URI failed to reparse")
         .concurrent_to(request.core().record_id.clone())
         .content_type(MediaType::HTTP_RESPONSE)
-        .payload_digest(LabelledDigest::from_digest(
-            DigestAlgorithm::Sha256,
-            &original.payload_digest.0,
-        ))
+        .payload_digest(original.payload_digest.clone())
         .warcinfo_id(warcinfo_id.clone())
         .ip_address(ip_address)
         .refers_to(original.record_id.clone())
         .refers_to_target_uri(original.target_uri.clone())
-        .refers_to_date(original.date);
+        .refers_to_date(original.warc_date);
     let head = response::head(&response)
         .expect("invariant violation: the recorder stores a well-formed response head");
     if head.body_offset < response.len() {
