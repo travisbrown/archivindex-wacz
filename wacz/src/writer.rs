@@ -19,6 +19,10 @@ use resource::options_for;
 
 const DEFAULT_PAGE_ID_LENGTH: usize = 24;
 const DEFAULT_ZIPNUM_LINES: usize = 1024;
+/// Least ZIP DEFLATE compression level supported by the enabled encoders.
+pub const MIN_ZIP_COMPRESSION_LEVEL: u32 = 1;
+/// Greatest ZIP DEFLATE compression level supported by the enabled encoders.
+pub const MAX_ZIP_COMPRESSION_LEVEL: u32 = 264;
 
 /// The format of the CDXJ index written by [`WaczWriter::add_index`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +53,11 @@ pub struct WriterConfig {
     pub page_id_length: usize,
     /// CDXJ index representation.
     pub index_format: IndexFormat,
+    /// ZIP DEFLATE compression level, or `None` for the encoder default (currently 6).
+    ///
+    /// Levels 1 through 9 use `miniz_oxide`; levels 10 through 264 use Zopfli. This setting does
+    /// not affect members stored with ZIP `STORE`, including WARC and gzip-compressed members.
+    pub zip_compression_level: Option<u32>,
 }
 
 impl Default for WriterConfig {
@@ -56,6 +65,7 @@ impl Default for WriterConfig {
         Self {
             page_id_length: DEFAULT_PAGE_ID_LENGTH,
             index_format: IndexFormat::Plain,
+            zip_compression_level: None,
         }
     }
 }
@@ -84,6 +94,9 @@ pub enum Error {
     /// A member path was already written or is reserved for a generated manifest.
     #[error("duplicate member path: {0}")]
     DuplicateMemberPath(String),
+    /// The requested ZIP DEFLATE compression level is outside the supported range.
+    #[error("ZIP compression level must be between 1 and 264, got {0}")]
+    InvalidZipCompressionLevel(u32),
 }
 
 /// Contextual manifest properties supplied when finishing a WACZ.
@@ -179,8 +192,9 @@ impl<W: Write + Seek> WaczWriter<W> {
         pages: I,
     ) -> Result<(), Error> {
         let id_length = self.config.page_id_length;
+        let compression_level = self.config.zip_compression_level;
         let path = format!("{PAGES_PREFIX}{name}");
-        self.add_member(&path, options_for(&path), |writer| {
+        self.add_member(&path, options_for(&path, compression_level)?, |writer| {
             Ok(pages::write_page_list_with_synthetic_ids(
                 writer, header, pages, id_length,
             )?)

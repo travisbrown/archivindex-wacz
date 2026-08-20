@@ -16,7 +16,7 @@ use archivindex_warc::record::extension::NoExtension;
 use chrono::{TimeZone, Utc};
 use flate2::Compression;
 use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use flate2::write::{DeflateEncoder, GzEncoder};
 use fluent_uri::Uri;
 
 const URL: &str = "https://www.example.com/page";
@@ -387,6 +387,59 @@ fn synthetic_page_ids() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// A configured ZIP level is passed to the DEFLATE encoder for compressible WACZ members.
+#[test]
+fn zip_compression_level_controls_deflated_members() -> Result<(), Box<dyn std::error::Error>> {
+    let contents = [b'a'; 8192];
+
+    for level in [1, 6, 9] {
+        let config = WriterConfig {
+            zip_compression_level: Some(level),
+            ..WriterConfig::default()
+        };
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+        writer.add_resource("extras/content.txt", contents.as_slice())?;
+        let wacz = writer.finish(PackageMetadata::default())?.into_inner();
+        let mut reader = WaczReader::new(Cursor::new(wacz))?;
+        let mut compressed = Vec::new();
+        reader
+            .raw_member("extras/content.txt")?
+            .read_to_end(&mut compressed)?;
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
+        encoder.write_all(&contents)?;
+        assert_eq!(compressed, encoder.finish()?);
+    }
+
+    let config = WriterConfig {
+        zip_compression_level: Some(10),
+        ..WriterConfig::default()
+    };
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+    writer.add_resource("extras/content.txt", contents.as_slice())?;
+    let wacz = writer.finish(PackageMetadata::default())?.into_inner();
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+    assert_eq!(reader.resource_bytes("extras/content.txt")?, contents);
+
+    Ok(())
+}
+
+#[test]
+fn invalid_zip_compression_level_is_rejected() {
+    for level in [0, 265] {
+        let config = WriterConfig {
+            zip_compression_level: Some(level),
+            ..WriterConfig::default()
+        };
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+
+        assert!(matches!(
+            writer.add_resource("extras/content.txt", &b"content"[..]),
+            Err(writer::Error::InvalidZipCompressionLevel(actual)) if actual == level
+        ));
+    }
 }
 
 /// A `ZipNum` index following the `py-wacz` layout: `index.cdx.gz` holds independent gzip members

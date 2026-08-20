@@ -63,6 +63,20 @@ cargo run --bin archivindex-archiver -- warc-to-wacz capture.warc.gz \
   --output capture.wacz
 ```
 
+For a plain input WARC, pass `--gzip-warc` to store it as `archive/data.warc.gz`. Each record is
+written as an independent gzip member so indexed captures remain directly addressable:
+
+```bash
+cargo run --bin archivindex-archiver -- warc-to-wacz capture.warc \
+  --output capture.wacz \
+  --gzip-warc \
+  --gzip-compression-level 9
+```
+
+The gzip compression level ranges from 0 through 9 and defaults to 6.
+Use `--zip-compression-level` to set the ZIP DEFLATE level for WACZ metadata and indexes; it ranges
+from 1 through 264 and defaults to 6. Levels above 9 use Zopfli and may be substantially slower.
+
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/license/mit). See

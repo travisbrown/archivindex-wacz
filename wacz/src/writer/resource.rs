@@ -14,7 +14,8 @@ use crate::{ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, GZIP_EX
 impl<W: Write + Seek> WaczWriter<W> {
     /// Add a custom resource and track its manifest digest and size.
     pub fn add_resource<R: Read>(&mut self, path: &str, mut reader: R) -> Result<(), Error> {
-        self.add_member(path, options_for(path), |writer| {
+        let options = options_for(path, self.config.zip_compression_level)?;
+        self.add_member(path, options, |writer| {
             std::io::copy(&mut reader, writer)?;
             Ok(())
         })
@@ -94,15 +95,27 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
-pub(super) fn options_for(path: &str) -> SimpleFileOptions {
+pub(super) fn options_for(
+    path: &str,
+    compression_level: Option<u32>,
+) -> Result<SimpleFileOptions, Error> {
+    if let Some(level) = compression_level
+        && !(super::MIN_ZIP_COMPRESSION_LEVEL..=super::MAX_ZIP_COMPRESSION_LEVEL).contains(&level)
+    {
+        return Err(Error::InvalidZipCompressionLevel(level));
+    }
     let method = if path.starts_with(ARCHIVE_PREFIX) || path.ends_with(GZIP_EXTENSION) {
         CompressionMethod::Stored
     } else {
         CompressionMethod::Deflated
     };
-    SimpleFileOptions::default()
+    let mut options = SimpleFileOptions::default()
         .compression_method(method)
-        .large_file(true)
+        .large_file(true);
+    if method == CompressionMethod::Deflated {
+        options = options.compression_level(compression_level.map(i64::from));
+    }
+    Ok(options)
 }
 
 fn file_name(path: &str) -> &str {

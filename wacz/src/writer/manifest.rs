@@ -19,7 +19,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         let Self {
             mut zip,
             resources,
-            config: _,
+            config,
         } = self;
         let package = DataPackage {
             profile: Cow::Borrowed(PROFILE),
@@ -49,7 +49,10 @@ impl<W: Write + Seek> WaczWriter<W> {
         };
 
         let manifest = serde_json::to_vec_pretty(&package).map_err(Error::Manifest)?;
-        zip.start_file(DATA_PACKAGE_PATH, options_for(DATA_PACKAGE_PATH))?;
+        zip.start_file(
+            DATA_PACKAGE_PATH,
+            options_for(DATA_PACKAGE_PATH, config.zip_compression_level)?,
+        )?;
         zip.write_all(&manifest)?;
         let digest = DataPackageDigest {
             path: Cow::Borrowed(DATA_PACKAGE_PATH),
@@ -59,7 +62,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         let digest_bytes = serde_json::to_vec_pretty(&digest).map_err(Error::Manifest)?;
         zip.start_file(
             DATA_PACKAGE_DIGEST_PATH,
-            options_for(DATA_PACKAGE_DIGEST_PATH),
+            options_for(DATA_PACKAGE_DIGEST_PATH, config.zip_compression_level)?,
         )?;
         zip.write_all(&digest_bytes)?;
         Ok(zip.finish()?)

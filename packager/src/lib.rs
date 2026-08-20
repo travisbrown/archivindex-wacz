@@ -13,9 +13,13 @@ use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::pages::{Page, PageListHeader};
-use archivindex_wacz::writer::{PackageMetadata, WaczWriter, WriterConfig};
+use archivindex_wacz::writer::{
+    MAX_ZIP_COMPRESSION_LEVEL, MIN_ZIP_COMPRESSION_LEVEL, PackageMetadata, WaczWriter, WriterConfig,
+};
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
-use archivindex_warc::io::write::{WarcWriter, Written};
+use archivindex_warc::io::write::{
+    DEFAULT_GZIP_COMPRESSION_LEVEL, MAX_GZIP_COMPRESSION_LEVEL, WarcWriter, Written,
+};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
@@ -67,6 +71,12 @@ pub enum Error {
     /// The WACZ package could not be written.
     #[error(transparent)]
     Wacz(#[from] archivindex_wacz::writer::Error),
+    /// The requested gzip compression level is outside the supported range.
+    #[error("gzip compression level must be between 0 and 9, got {0}")]
+    InvalidGzipCompressionLevel(u32),
+    /// The requested WACZ ZIP compression level is outside the supported range.
+    #[error("ZIP compression level must be between 1 and 264, got {0}")]
+    InvalidZipCompressionLevel(u32),
 }
 
 /// A non-fatal condition encountered while converting a WARC file.
@@ -126,6 +136,9 @@ pub struct WarcToWacz<'a> {
     output: PathBuf,
     title_generator: Option<Box<dyn PageTitleGenerator + 'a>>,
     index_format: IndexFormat,
+    gzip_warc: bool,
+    gzip_compression_level: u32,
+    zip_compression_level: Option<u32>,
 }
 
 impl<'a> WarcToWacz<'a> {
@@ -137,6 +150,9 @@ impl<'a> WarcToWacz<'a> {
             output: output.into(),
             title_generator: None,
             index_format: IndexFormat::Plain,
+            gzip_warc: false,
+            gzip_compression_level: DEFAULT_GZIP_COMPRESSION_LEVEL,
+            zip_compression_level: None,
         }
     }
 
@@ -156,17 +172,63 @@ impl<'a> WarcToWacz<'a> {
         self
     }
 
+    /// Gzip the packaged WARC, writing every record as an independently compressed member.
+    ///
+    /// This option affects plain WARC input. Gzip-compressed input is always normalized to
+    /// record-at-a-time compression for random access, regardless of this setting.
+    #[must_use]
+    pub const fn gzip_warc(mut self, gzip_warc: bool) -> Self {
+        self.gzip_warc = gzip_warc;
+        self
+    }
+
+    /// Set the gzip compression level used for packaged WARC records.
+    ///
+    /// Levels range from 0 (no compression) through 9 (best compression), and default to 6. This
+    /// setting applies whenever the output WARC is gzip-compressed, including when the input is
+    /// already gzip-compressed.
+    #[must_use]
+    pub const fn gzip_compression_level(mut self, level: u32) -> Self {
+        self.gzip_compression_level = level;
+        self
+    }
+
+    /// Set the ZIP DEFLATE compression level used for compressible WACZ members.
+    ///
+    /// Levels range from 1 through 264. Levels up to 9 use `miniz_oxide`, while higher levels use
+    /// Zopfli. WARC and gzip-compressed members use ZIP `STORE` and are not affected.
+    #[must_use]
+    pub const fn zip_compression_level(mut self, level: u32) -> Self {
+        self.zip_compression_level = Some(level);
+        self
+    }
+
     /// Parse the WARC and write the completed WACZ, refusing to overwrite `output`.
     pub fn run(mut self) -> Result<ConversionSummary, Error> {
-        let gzip = is_gzip_file(&self.input)?;
-        let warc_name = if gzip { "data.warc.gz" } else { "data.warc" };
+        let input_gzip = is_gzip_file(&self.input)?;
+        let output_gzip = input_gzip || self.gzip_warc;
+        if output_gzip && self.gzip_compression_level > MAX_GZIP_COMPRESSION_LEVEL {
+            return Err(Error::InvalidGzipCompressionLevel(
+                self.gzip_compression_level,
+            ));
+        }
+        if let Some(level) = self.zip_compression_level
+            && !(MIN_ZIP_COMPRESSION_LEVEL..=MAX_ZIP_COMPRESSION_LEVEL).contains(&level)
+        {
+            return Err(Error::InvalidZipCompressionLevel(level));
+        }
+        let warc_name = if output_gzip {
+            "data.warc.gz"
+        } else {
+            "data.warc"
+        };
 
-        if gzip {
+        if input_gzip {
             let reader = WarcReader::from_path_gzip(&self.input)?;
-            self.convert(reader, warc_name, true)
+            self.convert(reader, warc_name, output_gzip)
         } else {
             let reader = WarcReader::from_path(&self.input)?;
-            self.convert(reader, warc_name, false)
+            self.convert(reader, warc_name, output_gzip)
         }
     }
 
@@ -174,7 +236,7 @@ impl<'a> WarcToWacz<'a> {
         &mut self,
         reader: WarcReader<R>,
         warc_name: &str,
-        gzip: bool,
+        output_gzip: bool,
     ) -> Result<ConversionSummary, Error> {
         let mut warc = WarcWriter::new(BufWriter::new(tempfile::tempfile()?)).with_digests();
         let mut items = Vec::new();
@@ -189,8 +251,8 @@ impl<'a> WarcToWacz<'a> {
             collect_metadata(&record, &mut annotations);
             let capture = capture_info(&record, self.title_generator.as_deref_mut());
             let raw = record.into_raw()?;
-            let written = if gzip {
-                warc.write_gzip(&raw)?
+            let written = if output_gzip {
+                warc.write_gzip_with_level(&raw, self.gzip_compression_level)?
             } else {
                 warc.write(&raw)?
             };
@@ -225,6 +287,7 @@ impl<'a> WarcToWacz<'a> {
         file.rewind()?;
         let writer_config = WriterConfig {
             index_format: self.index_format,
+            zip_compression_level: self.zip_compression_level,
             ..WriterConfig::default()
         };
         let mut wacz = WaczWriter::create_with_config(&self.output, writer_config)?;

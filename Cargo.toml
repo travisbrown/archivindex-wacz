@@ -14,14 +14,14 @@ version = "0.1.0"
 [workspace.dependencies]
 # The archiver captures with the byte-exact HTTP client and identifies response payloads.
 archivindex-warc = { git = "https://github.com/travisbrown/archivindex-warc", features = [
-    "payload-identification",
-    "recorder",
-    "serde",
+  "payload-identification",
+  "recorder",
+  "serde",
 ] }
 chrono = "0.4"
 cli-helpers = "0.1"
 data-encoding = "2"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
 # The WARC crate takes and returns URI-valued header fields as `fluent_uri::Uri<String>`.
 fluent-uri = "0.4"
 # The WARC crate's recorder takes its request parts (method, target, headers) as `http` types.
@@ -36,4 +36,7 @@ thiserror = "2"
 url = "2"
 # Only the DEFLATE codec is needed: WARC and CDX members are stored, and gzip payloads are handled
 # by `flate2` so that compressed members can be read as streams.
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = [
+  "deflate-flate2",
+  "deflate-zopfli",
+] }

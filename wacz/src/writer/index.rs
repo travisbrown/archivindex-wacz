@@ -31,7 +31,8 @@ impl<W: Write + Seek> WaczWriter<W> {
         match self.config.index_format {
             IndexFormat::Plain => {
                 let path = format!("{INDEXES_PREFIX}{name}");
-                self.add_member(&path, options_for(&path), |writer| {
+                let options = options_for(&path, self.config.zip_compression_level)?;
+                self.add_member(&path, options, |writer| {
                     for line in &rendered {
                         writer.write_all(line.as_bytes())?;
                     }
@@ -61,7 +62,8 @@ impl<W: Write + Seek> WaczWriter<W> {
         )
         .expect("writing to a String cannot fail");
 
-        self.add_member(&data_path, options_for(&data_path), |writer| {
+        let data_options = options_for(&data_path, self.config.zip_compression_level)?;
+        self.add_member(&data_path, data_options, |writer| {
             let mut offset = 0_u64;
             for block in rendered.chunks(lines.max(1)) {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -88,7 +90,8 @@ impl<W: Write + Seek> WaczWriter<W> {
             Ok(())
         })?;
 
-        self.add_member(&idx_path, options_for(&idx_path), |writer| {
+        let idx_options = options_for(&idx_path, self.config.zip_compression_level)?;
+        self.add_member(&idx_path, idx_options, |writer| {
             writer.write_all(summary.as_bytes())?;
             Ok(())
         })

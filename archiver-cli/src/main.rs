@@ -124,6 +124,9 @@ fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
     };
     let summary = WarcToWacz::new(&options.warc, &options.output)
         .index_format(index_format)
+        .gzip_warc(options.gzip_warc)
+        .gzip_compression_level(options.gzip_compression_level)
+        .zip_compression_level(options.zip_compression_level)
         .run()?;
 
     for warning in &summary.warnings {
@@ -292,6 +295,15 @@ struct WarcToWaczOptions {
     /// Write the index as a compressed `ZipNum` pair instead of plain CDXJ.
     #[clap(long)]
     compressed_index: bool,
+    /// Gzip a plain input WARC, compressing each record independently for random access.
+    #[clap(long)]
+    gzip_warc: bool,
+    /// Gzip compression level for packaged WARC records (0-9; defaults to 6).
+    #[clap(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=9))]
+    gzip_compression_level: u32,
+    /// ZIP DEFLATE level for compressible WACZ members (1-264; defaults to 6).
+    #[clap(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=264))]
+    zip_compression_level: u32,
 }
 
 /// Options for reading comments from a WARC file.
@@ -415,6 +427,11 @@ mod tests {
             "--output",
             "capture.wacz",
             "--compressed-index",
+            "--gzip-warc",
+            "--gzip-compression-level",
+            "9",
+            "--zip-compression-level",
+            "264",
         ])
         .expect("valid options");
 
@@ -424,5 +441,39 @@ mod tests {
         assert_eq!(options.warc, PathBuf::from("capture.warc.gz"));
         assert_eq!(options.output, PathBuf::from("capture.wacz"));
         assert!(options.compressed_index);
+        assert!(options.gzip_warc);
+        assert_eq!(options.gzip_compression_level, 9);
+        assert_eq!(options.zip_compression_level, 264);
+    }
+
+    #[test]
+    fn warc_conversion_command_rejects_invalid_gzip_compression_levels() {
+        let result = Opts::try_parse_from([
+            "archivindex-archiver",
+            "warc-to-wacz",
+            "capture.warc",
+            "--output",
+            "capture.wacz",
+            "--gzip-warc",
+            "--gzip-compression-level",
+            "10",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn warc_conversion_command_rejects_invalid_zip_compression_levels() {
+        let result = Opts::try_parse_from([
+            "archivindex-archiver",
+            "warc-to-wacz",
+            "capture.warc",
+            "--output",
+            "capture.wacz",
+            "--zip-compression-level",
+            "265",
+        ]);
+
+        assert!(result.is_err());
     }
 }

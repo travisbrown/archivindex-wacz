@@ -1,8 +1,8 @@
 //! End-to-end conversion of plain and continuously gzip-compressed WARC files.
 
-use std::io::Write;
+use std::io::{Read, Write};
 
-use archivindex_packager::{Capture, ConversionWarning, PageTitleGenerator, WarcToWacz};
+use archivindex_packager::{Capture, ConversionWarning, Error, PageTitleGenerator, WarcToWacz};
 use archivindex_wacz::reader::{ValidationOptions, WaczReader};
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::extension::NoExtension;
@@ -81,9 +81,18 @@ fn write_source(path: &std::path::Path, records: Vec<Record>, gzip: bool) -> std
     Ok(())
 }
 
-fn conversion_fixture(gzip: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn conversion_fixture(
+    input_gzip: bool,
+    gzip_warc: bool,
+    gzip_compression_level: Option<u32>,
+    expected_xfl: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let input_name = if gzip { "input.warc.gz" } else { "input.warc" };
+    let input_name = if input_gzip {
+        "input.warc.gz"
+    } else {
+        "input.warc"
+    };
     let input = directory.path().join(input_name);
     let output = directory.path().join("output.wacz");
     let date = WarcDate::from(Utc::now());
@@ -113,12 +122,16 @@ fn conversion_fixture(gzip: bool) -> Result<(), Box<dyn std::error::Error>> {
             extra,
             extra_metadata,
         ],
-        gzip,
+        input_gzip,
     )?;
 
-    let summary = WarcToWacz::new(&input, &output)
+    let mut conversion = WarcToWacz::new(&input, &output)
         .title_generator(PayloadTitle)
-        .run()?;
+        .gzip_warc(gzip_warc);
+    if let Some(level) = gzip_compression_level {
+        conversion = conversion.gzip_compression_level(level);
+    }
+    let summary = conversion.run()?;
     assert_eq!(summary.records, 7);
     assert_eq!(summary.captures, 2);
     assert_eq!(summary.pages, 2);
@@ -135,12 +148,15 @@ fn conversion_fixture(gzip: bool) -> Result<(), Box<dyn std::error::Error>> {
     assert!(validation.is_conformant(), "{validation:#?}");
     assert_eq!(
         reader.warc_paths().collect::<Vec<_>>(),
-        [if gzip {
+        [if input_gzip || gzip_warc {
             "archive/data.warc.gz"
         } else {
             "archive/data.warc"
         }]
     );
+    if input_gzip || gzip_warc {
+        assert_independent_gzip_members(&mut reader, summary.records, expected_xfl)?;
+    }
     let package = reader.data_package()?;
     assert_eq!(package.title.as_deref(), Some("First collection"));
     assert_eq!(package.description.as_deref(), Some("First description"));
@@ -168,14 +184,106 @@ fn conversion_fixture(gzip: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn assert_independent_gzip_members(
+    reader: &mut WaczReader<std::io::BufReader<std::fs::File>>,
+    expected: usize,
+    expected_xfl: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = reader.member_bytes("archive/data.warc.gz")?;
+    let mut remaining = bytes.as_slice();
+    let mut members = 0;
+    let expected_header = [
+        0x1f,
+        0x8b,
+        8, // CM = DEFLATE
+        0, // FLG: FTEXT, FHCRC, FEXTRA, FNAME, and FCOMMENT are absent
+        0,
+        0,
+        0,
+        0, // MTIME = 0
+        expected_xfl,
+        255, // XFL and OS = unknown
+    ];
+
+    while !remaining.is_empty() {
+        assert!(remaining.starts_with(&expected_header));
+        let before = remaining.len();
+        let mut decoder = flate2::bufread::GzDecoder::new(remaining);
+        let mut record = Vec::new();
+        decoder.read_to_end(&mut record)?;
+        remaining = decoder.into_inner();
+        assert!(remaining.len() < before);
+        assert!(record.starts_with(b"WARC/"));
+        members += 1;
+    }
+
+    assert_eq!(members, expected);
+    Ok(())
+}
+
 #[test]
 fn converts_plain_warc_with_recorded_and_generated_titles() -> Result<(), Box<dyn std::error::Error>>
 {
-    conversion_fixture(false)
+    conversion_fixture(false, false, None, 0)
 }
 
 #[test]
 fn converts_continuous_gzip_warc_to_random_access_members() -> Result<(), Box<dyn std::error::Error>>
 {
-    conversion_fixture(true)
+    conversion_fixture(true, false, None, 0)
+}
+
+#[test]
+fn gzips_each_record_from_a_plain_warc_independently() -> Result<(), Box<dyn std::error::Error>> {
+    conversion_fixture(false, true, None, 0)
+}
+
+#[test]
+fn configured_gzip_compression_levels_are_used() -> Result<(), Box<dyn std::error::Error>> {
+    conversion_fixture(false, true, Some(0), 4)?;
+    conversion_fixture(false, true, Some(1), 4)?;
+    conversion_fixture(false, true, Some(9), 2)
+}
+
+#[test]
+fn rejects_an_invalid_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    write_source(
+        &input,
+        vec![warcinfo(b"title: Test\r\n", WarcDate::from(Utc::now()))],
+        false,
+    )?;
+
+    let error = WarcToWacz::new(&input, &output)
+        .gzip_warc(true)
+        .gzip_compression_level(10)
+        .run()
+        .expect_err("level 10 must be rejected");
+
+    assert!(matches!(error, Error::InvalidGzipCompressionLevel(10)));
+    assert!(!output.exists());
+    Ok(())
+}
+
+#[test]
+fn rejects_an_invalid_zip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    write_source(
+        &input,
+        vec![warcinfo(b"title: Test\r\n", WarcDate::from(Utc::now()))],
+        false,
+    )?;
+
+    let error = WarcToWacz::new(&input, &output)
+        .zip_compression_level(265)
+        .run()
+        .expect_err("level 265 must be rejected");
+
+    assert!(matches!(error, Error::InvalidZipCompressionLevel(265)));
+    assert!(!output.exists());
+    Ok(())
 }
