@@ -25,6 +25,19 @@ pub struct Exchange {
     pub(crate) captured: CapturedExchange,
 }
 
+impl Exchange {
+    /// The digest under which this exchange's payload may match an earlier capture, making the
+    /// later one a `revisit` record.
+    ///
+    /// Exchanges without a decodable payload, with an empty payload, or with a truncated response
+    /// are never deduplicated: the first two save nothing, and a truncated capture's digest does
+    /// not describe the complete payload.
+    pub(super) fn revisit_key(&self) -> Option<Sha256Digest> {
+        self.payload_digest
+            .filter(|_| self.payload_length > 0 && self.captured.truncated.is_none())
+    }
+}
+
 impl Archiver {
     /// Fetch a URL and every hop of its redirect chain, in order.
     pub(crate) fn capture(&self, url: &str) -> (Vec<Exchange>, Option<Error>) {

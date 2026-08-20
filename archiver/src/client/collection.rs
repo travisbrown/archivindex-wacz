@@ -1,17 +1,21 @@
 //! WARC spooling, CDX/page accumulation, and final WACZ assembly.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
+use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_wacz::writer::{PackageMetadata, WaczWriter};
 use archivindex_warc::io::write::WarcWriter;
 use fluent_uri::Uri;
 
-use super::warc_mapping::{WarcinfoOptions, warcinfo_record, write_exchange, write_record};
+use super::warc_mapping::{
+    RevisitTarget, WarcinfoOptions, warcinfo_record, write_exchange, write_record,
+};
 use super::{ArchiveSummary, CaptureSummary, Error, Exchange, Failure};
 use crate::config::DEFAULT_USER_AGENT;
 
@@ -28,6 +32,8 @@ pub struct Collection {
     items: Vec<cdxj::Item<'static>>,
     page_list: Vec<Page<'static>>,
     extra_page_list: Vec<Page<'static>>,
+    /// Stored `response` records eligible as revisit originals, by payload digest.
+    revisits: HashMap<Sha256Digest, RevisitTarget>,
 }
 
 impl Collection {
@@ -51,10 +57,14 @@ impl Collection {
             items: Vec::new(),
             page_list: Vec::new(),
             extra_page_list: Vec::new(),
+            revisits: HashMap::new(),
         })
     }
 
     /// Record every captured hop and add either a page summary or failure.
+    ///
+    /// A hop whose payload digest matches an earlier capture in this collection is stored as a
+    /// `revisit` record referencing the original, instead of repeating the payload.
     pub(crate) fn record(
         &mut self,
         url: String,
@@ -73,14 +83,20 @@ impl Collection {
                 exchange.status,
                 exchange.payload_length,
             ));
-            self.items.push(write_exchange(
+            let key = exchange.revisit_key();
+            let (item, target) = write_exchange(
                 &mut self.warc,
                 exchange,
                 &self.warcinfo_id,
                 &self.warc_name,
                 self.gzip,
                 via.filter(|_| hop == 0),
-            )?);
+                key.and_then(|key| self.revisits.get(&key)),
+            )?;
+            self.items.push(item);
+            if let (Some(key), Some(target)) = (key, target) {
+                self.revisits.insert(key, target);
+            }
         }
 
         if let Some(error) = error {

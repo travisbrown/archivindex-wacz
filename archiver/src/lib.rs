@@ -4,7 +4,9 @@
 //! [WACZ](https://specs.webrecorder.net/wacz/1.1.1/): a WARC file recording the exact wire bytes of
 //! the HTTP request and response for every exchange (including each hop of a redirect chain) along
 //! with the time each response took to collect, a CDXJ index over the responses, and a page list
-//! entry for every archived URL.
+//! entry for every archived URL. A response whose payload duplicates an earlier capture in the
+//! same WACZ is stored as a `revisit` record referencing the original instead of repeating the
+//! payload.
 //!
 //! # Examples
 //!

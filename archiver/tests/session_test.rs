@@ -11,12 +11,15 @@ use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
-use archivindex_wacz::reader::WaczReader;
+use archivindex_wacz::reader::{ValidationOptions, WaczReader};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
+use archivindex_warc::record::header::RevisitProfile;
+use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
+use archivindex_warc::value::MediaType;
 
 /// The operator most tests run their sessions as.
 fn operator() -> Operator {
@@ -223,7 +226,7 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
         "recapture",
         operator(),
         [&url],
-        output,
+        &output,
     )?
     .processor(RecaptureOnceProcessor::default())
     .run()?;
@@ -231,6 +234,84 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
     assert_eq!(server.join().expect("server thread"), ["/about", "/about"]);
     assert_eq!(summary.seed_captures.len(), 2);
     assert!(summary.is_complete());
+
+    // The second capture's payload matches the first, so it is stored as a revisit record while
+    // the collection remains fully conformant.
+    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+
+    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
+
+    let records = reader
+        .warc("archive/recapture.warc.gz")?
+        .iter_records::<NoExtension>()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.type_name())
+            .collect::<Vec<_>>(),
+        [
+            "warcinfo", "request", "response", "metadata", "request", "revisit", "metadata",
+        ]
+    );
+
+    let Record::Response {
+        header: original,
+        body: original_body,
+    } = &records[2]
+    else {
+        panic!("the first capture should store a full response record");
+    };
+    let Record::Revisit {
+        header: revisit,
+        body: revisit_body,
+    } = &records[5]
+    else {
+        panic!("the second capture should store a revisit record");
+    };
+
+    // The revisit uses the identical-payload-digest profile and points back at the original
+    // record, capture URI, and date, sharing the original's payload digest.
+    assert_eq!(revisit.profile, RevisitProfile::IDENTICAL_PAYLOAD_DIGEST);
+    assert_eq!(revisit.target_uri.as_str(), url);
+    assert_eq!(revisit.refers_to.as_ref(), Some(&original.core.record_id));
+    assert_eq!(
+        revisit
+            .refers_to_target_uri
+            .as_ref()
+            .map(|uri| uri.as_str()),
+        Some(url.as_str())
+    );
+    assert_eq!(revisit.refers_to_date, Some(original.core.date));
+    assert!(original.payload.payload_digest.is_some());
+    assert_eq!(
+        revisit.payload.payload_digest,
+        original.payload.payload_digest
+    );
+    assert_eq!(revisit.core.content_type, Some(MediaType::HTTP_RESPONSE));
+    assert_eq!(revisit.core.truncated, Some(TruncatedType::Length));
+
+    // The revisit block is exactly the head of the (identical) response it stands for.
+    assert!(revisit_body.ends_with(b"\r\n\r\n"));
+    assert!(revisit_body.len() < original_body.len());
+    assert_eq!(
+        revisit_body.as_slice(),
+        &original_body[..revisit_body.len()]
+    );
+
+    // Both captures are indexed under the shared payload digest, the revisit entry marked by the
+    // conventional media type.
+    let items = reader
+        .index("indexes/index.cdx")?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(items.len(), 2);
+    assert!(items[0].fields.digest.is_some());
+    assert_eq!(items[0].fields.digest, items[1].fields.digest);
+    assert_eq!(items[0].fields.mime.as_deref(), Some("text/html"));
+    assert_eq!(items[1].fields.mime.as_deref(), Some("warc/revisit"));
+    assert_eq!(items[1].fields.status, Some(200));
 
     Ok(())
 }
@@ -390,8 +471,16 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     );
 
     // One warcinfo record, then request, response, and metadata records for each of the five
-    // exchanges (the redirect seed contributes two hops).
+    // exchanges (the redirect seed contributes two hops). The second /about capture repeats the
+    // first's payload, so its response is stored as a revisit record.
     assert_eq!(records.len(), 16);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.type_name() == "revisit")
+            .count(),
+        1
+    );
 
     // Discovered captures carry the URI of the page they were discovered on as `via` in their
     // metadata records; seed captures (redirect hops included) carry none. Both discoveries came
