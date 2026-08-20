@@ -126,6 +126,9 @@ fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
         .index_format(index_format)
         .run()?;
 
+    for warning in &summary.warnings {
+        log::warn!("{warning}");
+    }
     println!(
         "Converted {} records and {} captures from {} to {}",
         summary.records,

@@ -15,6 +15,7 @@ use archivindex_warc::io::write::{WarcWriter, Written};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
+use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
 use url::Url;
@@ -47,8 +48,38 @@ pub enum Error {
     Wacz(#[from] archivindex_wacz::writer::Error),
 }
 
-/// Counts of records and replay captures written by a WARC conversion.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// A non-fatal condition encountered while converting a WARC file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ConversionWarning {
+    /// The WARC contains multiple `warcinfo` records; package metadata came from the first.
+    MultipleWarcinfo {
+        /// The number of `warcinfo` records encountered.
+        count: usize,
+        /// Record IDs of the ignored `warcinfo` records, in source order.
+        duplicate_record_ids: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for ConversionWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MultipleWarcinfo {
+                count,
+                duplicate_record_ids,
+            } => {
+                write!(
+                    formatter,
+                    "source WARC contains {count} warcinfo records; used the first for package metadata and ignored: {}",
+                    duplicate_record_ids.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// Counts and non-fatal warnings from a WARC conversion.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConversionSummary {
     /// All WARC records copied into the package.
     pub records: usize,
@@ -56,6 +87,8 @@ pub struct ConversionSummary {
     pub captures: usize,
     /// Capture entries added to the WACZ page list.
     pub pages: usize,
+    /// Non-fatal source conditions encountered during conversion.
+    pub warnings: Vec<ConversionWarning>,
 }
 
 /// A conversion from one existing WARC file to a new WACZ package.
@@ -125,10 +158,12 @@ impl<'a> WarcToWacz<'a> {
         let mut items = Vec::new();
         let mut pages = Vec::new();
         let mut annotations = HashMap::new();
+        let mut package_info = PackageInfo::default();
         let mut records = 0;
 
         for record in reader.iter_records::<NoExtension>() {
             let record = record?;
+            package_info.inspect(&record);
             collect_metadata(&record, &mut annotations);
             let capture = capture_info(&record, self.processor.as_deref_mut());
             let raw = record.into_raw()?;
@@ -181,7 +216,10 @@ impl<'a> WarcToWacz<'a> {
                 &extra_page_entries,
             )?;
         }
+        let warnings = package_info.warnings();
         let metadata = PackageMetadata {
+            title: package_info.title,
+            description: package_info.description,
             main_page_url: page_entries
                 .first()
                 .map(|page| page.url.clone().into_owned()),
@@ -194,7 +232,49 @@ impl<'a> WarcToWacz<'a> {
             records,
             captures: items.len(),
             pages: pages.len(),
+            warnings,
         })
+    }
+}
+
+#[derive(Default)]
+struct PackageInfo {
+    title: Option<String>,
+    description: Option<String>,
+    warcinfo_count: usize,
+    duplicate_warcinfo_record_ids: Vec<String>,
+}
+
+impl PackageInfo {
+    fn inspect(&mut self, record: &Record) {
+        let Record::Warcinfo { header, body } = record else {
+            return;
+        };
+        self.warcinfo_count += 1;
+        if self.warcinfo_count != 1 {
+            self.duplicate_warcinfo_record_ids
+                .push(header.core.record_id.as_str().to_owned());
+            return;
+        }
+        let FieldsBlock::Fields(fields) = body else {
+            return;
+        };
+        self.title = fields
+            .get(&WarcinfoField::Dcmi(DcmiTerm::Title))
+            .map(str::to_owned);
+        self.description = fields
+            .get(&WarcinfoField::Dcmi(DcmiTerm::Description))
+            .map(str::to_owned);
+    }
+
+    fn warnings(&self) -> Vec<ConversionWarning> {
+        (self.warcinfo_count > 1)
+            .then_some(ConversionWarning::MultipleWarcinfo {
+                count: self.warcinfo_count,
+                duplicate_record_ids: self.duplicate_warcinfo_record_ids.clone(),
+            })
+            .into_iter()
+            .collect()
     }
 }
 
