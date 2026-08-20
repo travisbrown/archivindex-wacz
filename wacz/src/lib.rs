@@ -11,8 +11,8 @@
 //! - [`frictionless`]: The `datapackage.json` manifest and `datapackage-digest.json` formats
 //! - [`digest`]: SHA-256 digests in the `sha256:<hex>` encoding used by WACZ manifests
 //! - [`pages`]: The `pages/pages.jsonl` page list format
-//! - [`reader`]: Reading the files in an existing WACZ
-//! - [`writer`]: Assembling a new WACZ file
+//! - [`io::read`]: Reading the files in an existing WACZ
+//! - [`io::write`]: Assembling a new WACZ file
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
@@ -22,10 +22,9 @@ mod attributes;
 pub mod cdxj;
 pub mod digest;
 pub mod frictionless;
+pub mod io;
 mod lines;
 pub mod pages;
-pub mod reader;
-pub mod writer;
 
 /// Additional JSON properties preserved verbatim for round-tripping.
 ///

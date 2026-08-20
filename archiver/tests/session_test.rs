@@ -15,7 +15,7 @@ use archivindex_archiver::session::{
 };
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::digest::Sha256Digest;
-use archivindex_wacz::reader::{ValidationOptions, WaczReader};
+use archivindex_wacz::io::read::{ValidationOptions, WaczReader};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;

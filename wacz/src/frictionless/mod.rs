@@ -146,7 +146,7 @@ pub struct DataPackage<'a> {
 
 /// Builder for the caller-controlled metadata in a WACZ data package.
 ///
-/// [`crate::writer::WaczWriter`] supplies the structural properties (`profile`, `wacz_version`,
+/// [`crate::io::write::WaczWriter`] supplies the structural properties (`profile`, `wacz_version`,
 /// and `resources`) when it finishes the archive. It also supplies defaults for `created` and
 /// `software` when those properties are not set here.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

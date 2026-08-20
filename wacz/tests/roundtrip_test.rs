@@ -7,10 +7,12 @@ use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
+use archivindex_wacz::io::read::{self as reader, WaczReader};
+use archivindex_wacz::io::write::{
+    self as writer, IndexFormat, PackageMetadata, WaczWriter, WriterConfig,
+};
 use archivindex_wacz::pages;
 use archivindex_wacz::pages::{Page, PageListHeader};
-use archivindex_wacz::reader::{self, WaczReader};
-use archivindex_wacz::writer::{self, IndexFormat, PackageMetadata, WaczWriter, WriterConfig};
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;

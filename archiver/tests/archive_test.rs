@@ -10,7 +10,7 @@ use archivindex_archiver::config::Config;
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
-use archivindex_wacz::reader::WaczReader;
+use archivindex_wacz::io::read::WaczReader;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::metadata::MetadataField;

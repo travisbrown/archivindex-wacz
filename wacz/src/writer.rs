@@ -10,8 +10,11 @@ use crate::frictionless::Resource;
 use crate::pages::{self, Page, PageListHeader};
 use crate::{ARCHIVE_PREFIX, PAGES_PREFIX};
 
+#[path = "writer/index.rs"]
 mod index;
+#[path = "writer/manifest.rs"]
 mod manifest;
+#[path = "writer/resource.rs"]
 mod resource;
 
 use resource::options_for;

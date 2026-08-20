@@ -13,10 +13,10 @@ use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
-use archivindex_wacz::pages::{Page, PageListHeader};
-use archivindex_wacz::writer::{
+use archivindex_wacz::io::write::{
     MAX_ZIP_COMPRESSION_LEVEL, MIN_ZIP_COMPRESSION_LEVEL, WaczWriter, WriterConfig,
 };
+use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::io::write::{
     DEFAULT_GZIP_COMPRESSION_LEVEL, MAX_GZIP_COMPRESSION_LEVEL, WarcWriter, Written,
@@ -29,7 +29,7 @@ use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
 use url::Url;
 
-pub use archivindex_wacz::writer::IndexFormat;
+pub use archivindex_wacz::io::write::IndexFormat;
 
 const INDEX_NAME: &str = "index.cdx";
 const EXTRA_PAGES_NAME: &str = "extraPages.jsonl";
@@ -71,7 +71,7 @@ pub enum Error {
     WarcWrite(#[from] archivindex_warc::io::write::Error),
     /// The WACZ package could not be written.
     #[error(transparent)]
-    Wacz(#[from] archivindex_wacz::writer::Error),
+    Wacz(#[from] archivindex_wacz::io::write::Error),
     /// The requested gzip compression level is outside the supported range.
     #[error("gzip compression level must be between 0 and 9, got {0}")]
     InvalidGzipCompressionLevel(u32),
