@@ -1,7 +1,6 @@
 //! End-to-end crawl session tests against a local HTTP server serving canned responses.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,6 +27,10 @@ use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDa
 use archivindex_warc::version::WarcVersion;
 use archivindex_warc_revisit_index::{Index, ResourceKey, ResourceStateUpdate, RevisitTarget};
 use fluent_uri::Uri;
+
+mod support;
+
+use support::{plain, request_header, request_path, serve_concurrently_with, serve_with};
 
 struct PackagedWarc {
     _directory: tempfile::TempDir,
@@ -78,15 +81,6 @@ fn archiver(config: Config) -> Archiver {
     Archiver::new(config).expect("test archiver configuration should be valid")
 }
 
-/// A simple HTTP/1.1 response with a text body.
-fn plain(status: &str, headers: &str, body: &str) -> Vec<u8> {
-    format!(
-        "HTTP/1.1 {status}\r\n{headers}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .into_bytes()
-}
-
 /// A canned HTTP/1.1 response for a request path: a small site whose home page links to two other
 /// pages, one of which links back to the home page.
 fn respond(path: &str) -> Vec<u8> {
@@ -116,64 +110,6 @@ fn serve(connections: usize) -> std::io::Result<(u16, thread::JoinHandle<Vec<Str
     serve_with(connections, |head| {
         let path = request_path(head);
         (respond(path), path.to_owned())
-    })
-}
-
-/// Serve the given number of connections on an ephemeral local port, answering each request head
-/// with the response `handle` chooses and returning the notes it makes, in arrival order.
-fn serve_with(
-    connections: usize,
-    handle: impl Fn(&str) -> (Vec<u8>, String) + Send + 'static,
-) -> std::io::Result<(u16, thread::JoinHandle<Vec<String>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-
-    let handle = thread::spawn(move || {
-        let mut notes = Vec::with_capacity(connections);
-
-        for _ in 0..connections {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return notes;
-            };
-
-            let (response, note) = handle(&read_request_head(&mut stream));
-            let _ = stream.write_all(&response);
-            notes.push(note);
-        }
-
-        notes
-    });
-
-    Ok((port, handle))
-}
-
-/// Read a request's header section from a stream.
-fn read_request_head(stream: &mut (impl Read + Write)) -> String {
-    let mut head = Vec::new();
-    let mut buffer = [0; 4096];
-
-    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-        match stream.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => head.extend_from_slice(&buffer[..read]),
-        }
-    }
-
-    String::from_utf8_lossy(&head).into_owned()
-}
-
-/// The target path of a request head.
-fn request_path(head: &str) -> &str {
-    head.split(' ').nth(1).unwrap_or("/")
-}
-
-/// The lowercased value of a request header, if present.
-fn request_header(head: &str, name: &str) -> Option<String> {
-    head.lines().find_map(|line| {
-        let (field, value) = line.split_once(':')?;
-        field
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_ascii_lowercase())
     })
 }
 
@@ -1218,34 +1154,12 @@ fn session_rejects_an_unwritable_operator_before_writing() -> Result<(), Box<dyn
 fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::error::Error>> {
     // The first connection stalls past the client timeout before responding; the retry is then
     // served promptly. Only the successful attempt's exchange is recorded.
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-
-    // Each connection is served on its own thread, so that the stalling first attempt cannot delay
-    // the accept (and prompt response) of the retry.
-    let server = thread::spawn(move || {
-        let mut handlers = Vec::new();
-
-        for attempt in 0..2 {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-
-            handlers.push(thread::spawn(move || {
-                let head = read_request_head(&mut stream);
-
-                if attempt == 0 {
-                    thread::sleep(Duration::from_millis(300));
-                }
-
-                let _ = stream.write_all(&respond(request_path(&head)));
-            }));
+    let (port, server) = serve_concurrently_with(2, |attempt, head| {
+        if attempt == 0 {
+            thread::sleep(Duration::from_millis(300));
         }
-
-        for handler in handlers {
-            let _ = handler.join();
-        }
-    });
+        (respond(request_path(head)), ())
+    })?;
 
     let url = format!("http://127.0.0.1:{port}/");
     let directory = tempfile::tempdir()?;

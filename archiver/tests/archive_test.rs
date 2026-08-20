@@ -1,9 +1,13 @@
 //! End-to-end archiving tests against a local HTTP server serving canned responses.
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::thread;
 use std::time::Duration;
+
+mod support;
+
+use support::{plain, request_path, serve_with};
 
 use archivindex_archiver::client::{Archiver, Error};
 use archivindex_archiver::config::Config;
@@ -65,15 +69,6 @@ fn package_path(path: &std::path::Path) -> Result<PackagedWarc, Box<dyn std::err
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
 const PNG_PAYLOAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
-
-/// A simple HTTP/1.1 response with a text body.
-fn plain(status: &str, headers: &str, body: &str) -> Vec<u8> {
-    format!(
-        "HTTP/1.1 {status}\r\n{headers}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .into_bytes()
-}
 
 /// A canned HTTP/1.1 response for a request path.
 fn respond(path: &str) -> Vec<u8> {
@@ -161,37 +156,9 @@ fn respond(path: &str) -> Vec<u8> {
 /// Serve the given number of connections on an ephemeral local port, returning the raw bytes of
 /// each request as received.
 fn serve(connections: usize) -> std::io::Result<(u16, thread::JoinHandle<Vec<Vec<u8>>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-
-    let handle = thread::spawn(move || {
-        let mut requests = Vec::with_capacity(connections);
-
-        for _ in 0..connections {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return requests;
-            };
-
-            let mut head = Vec::new();
-            let mut buffer = [0; 4096];
-
-            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => head.extend_from_slice(&buffer[..read]),
-                }
-            }
-
-            let request = String::from_utf8_lossy(&head);
-            let path = request.split(' ').nth(1).unwrap_or("/").to_owned();
-            let _ = stream.write_all(&respond(&path));
-            requests.push(head);
-        }
-
-        requests
-    });
-
-    Ok((port, handle))
+    serve_with(connections, |head| {
+        (respond(request_path(head)), head.as_bytes().to_vec())
+    })
 }
 
 #[test]
