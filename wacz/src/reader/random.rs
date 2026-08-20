@@ -411,7 +411,7 @@ fn line_key(line: &str) -> Option<&str> {
     line.split_once(' ').map(|(key, _)| key)
 }
 
-fn has_extension(path: &str, expected: &str) -> bool {
+pub(super) fn has_extension(path: &str, expected: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))

@@ -67,10 +67,36 @@ fn item_at(
     Ok(item)
 }
 
+/// Build an item whose fields resolve to a real record in a named WARC member.
+fn resolvable_item(
+    url: &str,
+    filename: &'static str,
+    length: u64,
+) -> Result<cdxj::Item<'static>, cdxj::Error> {
+    let mut item = item_for(url)?;
+    item.fields.filename = Some(Cow::Borrowed(filename));
+    item.fields.length = Some(length);
+    Ok(item)
+}
+
 /// Build a ZIP file from `(path, contents)` pairs.
 fn zip_of(members: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
+
+    for (path, contents) in members {
+        zip.start_file(*path, options)?;
+        zip.write_all(contents)?;
+    }
+
+    Ok(zip.finish()?.into_inner())
+}
+
+/// Build a ZIP file whose members all use `STORE`, as WACZ random access requires.
+fn stored_zip_of(members: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     for (path, contents) in members {
         zip.start_file(*path, options)?;
@@ -189,11 +215,11 @@ fn assert_round_trip(warc_name: &str, warc_data: &[u8]) -> Result<(), Box<dyn st
     assert_eq!(records[0].body_bytes().as_ref(), BODY);
     assert_eq!(records[0].target_uri().map(Uri::as_str), Some(URL));
 
-    let verification = reader.verify()?;
+    let fixity = reader.verify_fixity()?;
 
-    assert!(verification.is_success());
+    assert!(fixity.is_success());
     // The three resources plus the manifest itself, which is covered by the digest file.
-    assert_eq!(verification.verified.len(), 4);
+    assert_eq!(fixity.verified.len(), 4);
 
     Ok(())
 }
@@ -464,7 +490,7 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(captures.len(), 1);
     assert_eq!(captures[0].index_path, "indexes/index.idx");
     assert_eq!(captures[0].item.fields.url, "https://www.example.com/page3");
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     Ok(())
 }
@@ -563,7 +589,7 @@ fn write_and_open_from_paths() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut reader = WaczReader::open(&wacz_path)?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
     assert_eq!(
         reader.warc_paths().collect::<Vec<_>>(),
         vec!["archive/data.warc"]
@@ -573,7 +599,8 @@ fn write_and_open_from_paths() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn verify_reports_missing_and_mismatched_members() -> Result<(), Box<dyn std::error::Error>> {
+fn verify_fixity_reports_missing_and_mismatched_members() -> Result<(), Box<dyn std::error::Error>>
+{
     // The manifest lists one absent file and gives the wrong hash for another.
     let manifest = concat!(
         "{\"profile\": \"data-package\", \"wacz_version\": \"1.1.1\", \"resources\": [",
@@ -594,11 +621,11 @@ fn verify_reports_missing_and_mismatched_members() -> Result<(), Box<dyn std::er
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let verification = reader.verify()?;
+    let fixity = reader.verify_fixity()?;
 
-    assert!(!verification.is_success());
-    assert_eq!(verification.mismatched, vec!["pages/pages.jsonl"]);
-    assert_eq!(verification.missing, vec!["archive/missing.warc"]);
+    assert!(!fixity.is_success());
+    assert_eq!(fixity.mismatched, vec!["pages/pages.jsonl"]);
+    assert_eq!(fixity.missing, vec!["archive/missing.warc"]);
 
     Ok(())
 }
@@ -659,7 +686,7 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Result<Vec<_>, _>>()?
             .is_empty()
     );
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     let config = WriterConfig {
         index_format: IndexFormat::ZipNum { lines: 2 },
@@ -686,7 +713,7 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Result<Vec<_>, _>>()?
             .is_empty()
     );
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     Ok(())
 }
@@ -814,7 +841,7 @@ fn custom_resources_are_recorded_and_verified() -> Result<(), Box<dyn std::error
     assert_eq!(package.resources[0].path, "extra/notes.txt");
     assert_eq!(package.resources[0].name, "notes.txt");
     assert_eq!(package.resources[0].bytes, 5);
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     Ok(())
 }
@@ -883,7 +910,7 @@ fn absent_digest_files_read_as_none() -> Result<(), Box<dyn std::error::Error>> 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
 
     assert!(reader.data_package_digest()?.is_none());
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     Ok(())
 }
@@ -891,7 +918,7 @@ fn absent_digest_files_read_as_none() -> Result<(), Box<dyn std::error::Error>> 
 /// A corrupt stored file (whose bytes no longer match the ZIP checksum) is reported as mismatched
 /// rather than failing verification with an error.
 #[test]
-fn verify_reports_corrupt_members() -> Result<(), Box<dyn std::error::Error>> {
+fn verify_fixity_reports_corrupt_members() -> Result<(), Box<dyn std::error::Error>> {
     let mut wacz = build_wacz("data.warc", &warc_bytes()?)?;
 
     // The WARC file uses STORE, so its contents appear literally in the ZIP exactly once; every
@@ -904,11 +931,11 @@ fn verify_reports_corrupt_members() -> Result<(), Box<dyn std::error::Error>> {
     wacz[position] ^= 0x01;
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let verification = reader.verify()?;
+    let fixity = reader.verify_fixity()?;
 
-    assert!(!verification.is_success());
-    assert_eq!(verification.mismatched, vec!["archive/data.warc"]);
-    assert!(verification.missing.is_empty());
+    assert!(!fixity.is_success());
+    assert_eq!(fixity.mismatched, vec!["archive/data.warc"]);
+    assert!(fixity.missing.is_empty());
 
     Ok(())
 }
@@ -916,17 +943,17 @@ fn verify_reports_corrupt_members() -> Result<(), Box<dyn std::error::Error>> {
 /// A digest file that cannot be parsed cannot corroborate the manifest, so the manifest is reported
 /// as mismatched.
 #[test]
-fn verify_reports_unparseable_digest_files() -> Result<(), Box<dyn std::error::Error>> {
+fn verify_fixity_reports_unparseable_digest_files() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = zip_of(&[
         ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
         ("datapackage-digest.json", b"not json".as_slice()),
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let verification = reader.verify()?;
+    let fixity = reader.verify_fixity()?;
 
-    assert!(!verification.is_success());
-    assert_eq!(verification.mismatched, vec!["datapackage.json"]);
+    assert!(!fixity.is_success());
+    assert_eq!(fixity.mismatched, vec!["datapackage.json"]);
 
     Ok(())
 }
@@ -934,7 +961,7 @@ fn verify_reports_unparseable_digest_files() -> Result<(), Box<dyn std::error::E
 /// A digest file naming a path other than `datapackage.json` does not corroborate the manifest,
 /// even when its hash matches.
 #[test]
-fn verify_rejects_digests_naming_another_path() -> Result<(), Box<dyn std::error::Error>> {
+fn verify_fixity_rejects_digests_naming_another_path() -> Result<(), Box<dyn std::error::Error>> {
     let digest = format!(
         r#"{{"path": "other.json", "hash": "{}"}}"#,
         Sha256Digest::compute(EMPTY_MANIFEST.as_bytes())
@@ -945,10 +972,10 @@ fn verify_rejects_digests_naming_another_path() -> Result<(), Box<dyn std::error
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let verification = reader.verify()?;
+    let fixity = reader.verify_fixity()?;
 
-    assert!(!verification.is_success());
-    assert_eq!(verification.mismatched, vec!["datapackage.json"]);
+    assert!(!fixity.is_success());
+    assert_eq!(fixity.mismatched, vec!["datapackage.json"]);
 
     Ok(())
 }
@@ -971,6 +998,342 @@ fn directory_entries_are_not_member_paths() -> Result<(), Box<dyn std::error::Er
         vec!["archive/data.warc"]
     );
     assert_eq!(reader.index_paths().count(), 0);
+
+    Ok(())
+}
+
+/// A writer-produced WACZ passes every validation layer.
+#[test]
+fn validate_passes_for_conforming_archives() -> Result<(), Box<dyn std::error::Error>> {
+    let wacz = build_wacz("data.warc", &warc_bytes()?)?;
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+    let report = reader.validate(reader::ValidationOptions::all())?;
+
+    assert!(report.is_conformant());
+    assert!(report.layout.is_empty());
+    assert!(report.manifest.is_empty());
+    assert_eq!(report.signature, reader::SignatureStatus::Unsigned);
+    assert_eq!(report.content, Some(Vec::new()));
+    assert_eq!(report.index, Some(Vec::new()));
+    assert!(report.fixity.is_some_and(|fixity| fixity.is_success()));
+
+    Ok(())
+}
+
+/// Absent required members are reported by the always-on layout layer, and unselected layers stay
+/// `None` so they cannot be mistaken for clean results.
+#[test]
+fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = zip_of(&[("datapackage.json", EMPTY_MANIFEST.as_bytes())])?;
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions::default())?;
+
+    assert!(!report.is_conformant());
+    assert_eq!(
+        report.layout,
+        vec![
+            reader::LayoutProblem::MissingPages,
+            reader::LayoutProblem::NoWarcMembers,
+            reader::LayoutProblem::NoIndexMembers,
+        ]
+    );
+    assert_eq!(report.manifest, vec![reader::ManifestProblem::NoResources]);
+    assert_eq!(report.signature, reader::SignatureStatus::Absent);
+    assert_eq!(report.fixity, None);
+    assert_eq!(report.content, None);
+    assert_eq!(report.index, None);
+
+    // Without a manifest, the fixity layer is skipped even when selected, since there are no
+    // declared digests to check.
+    let bytes = zip_of(&[])?;
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions {
+        fixity: true,
+        ..reader::ValidationOptions::default()
+    })?;
+
+    assert_eq!(
+        report.layout.first(),
+        Some(&reader::LayoutProblem::MissingDataPackage)
+    );
+    assert!(report.manifest.is_empty());
+    assert_eq!(report.fixity, None);
+
+    Ok(())
+}
+
+/// Manifest conformance violations are reported individually and in declaration order.
+#[test]
+fn validate_reports_manifest_problems() -> Result<(), Box<dyn std::error::Error>> {
+    const EMPTY_HASH: &str =
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let resource = |name: &str, path: &str| {
+        format!(r#"{{"name": "{name}", "path": "{path}", "hash": "{EMPTY_HASH}", "bytes": 0}}"#)
+    };
+    let manifest = format!(
+        r#"{{"profile": "wacz", "wacz_version": "1.2.0", "resources": [{}, {}, {}, {}]}}"#,
+        resource("Pages.JSONL", "pages/pages.jsonl"),
+        resource("pages.jsonl", "pages/pages.jsonl"),
+        resource("pages.jsonl", "archive/missing.warc"),
+        resource("datapackage.json", "datapackage.json"),
+    );
+    let bytes = zip_of(&[
+        ("datapackage.json", manifest.as_bytes()),
+        ("pages/pages.jsonl", b"placeholder".as_slice()),
+        ("extra/notes.txt", b"notes".as_slice()),
+    ])?;
+
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions::default())?;
+
+    assert_eq!(
+        report.manifest,
+        vec![
+            reader::ManifestProblem::Profile("wacz".to_owned()),
+            reader::ManifestProblem::WaczVersion("1.2.0".to_owned()),
+            reader::ManifestProblem::InvalidResourceName("Pages.JSONL".to_owned()),
+            reader::ManifestProblem::DuplicateResourcePath("pages/pages.jsonl".to_owned()),
+            reader::ManifestProblem::DuplicateResourceName("pages.jsonl".to_owned()),
+            reader::ManifestProblem::MissingResourceMember("archive/missing.warc".to_owned()),
+            reader::ManifestProblem::ReservedResourcePath("datapackage.json".to_owned()),
+            reader::ManifestProblem::UnlistedMember("extra/notes.txt".to_owned()),
+        ]
+    );
+
+    // An unparseable manifest is reported rather than failing validation.
+    let bytes = zip_of(&[("datapackage.json", b"not json".as_slice())])?;
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions::default())?;
+
+    assert!(matches!(
+        report.manifest.as_slice(),
+        [reader::ManifestProblem::Unparseable(_)]
+    ));
+
+    Ok(())
+}
+
+/// The signature layer distinguishes unsigned, unverified, and internally inconsistent digest
+/// files, without attempting cryptographic verification.
+#[test]
+fn validate_reports_signature_status() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_hash = Sha256Digest::compute(EMPTY_MANIFEST.as_bytes());
+    let signed = |signed_hash: Sha256Digest| {
+        format!(
+            concat!(
+                r#"{{"path": "datapackage.json", "hash": "{}", "signedData": {{"#,
+                r#""hash": "{}", "created": "2020-10-07T21:22:36Z", "#,
+                r#""software": "example-signer", "version": "0.1.0", "#,
+                r#""signature": "c2ln", "publicKey": "a2V5"}}}}"#,
+            ),
+            manifest_hash, signed_hash,
+        )
+    };
+    let validate = |digest: &str| -> Result<reader::SignatureStatus, Box<dyn std::error::Error>> {
+        let bytes = zip_of(&[
+            ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+            ("datapackage-digest.json", digest.as_bytes()),
+        ])?;
+        let mut reader = WaczReader::new(Cursor::new(bytes))?;
+        Ok(reader
+            .validate(reader::ValidationOptions::default())?
+            .signature)
+    };
+
+    // A consistent signature is reported as present but not cryptographically checked.
+    assert_eq!(
+        validate(&signed(manifest_hash))?,
+        reader::SignatureStatus::Unverified
+    );
+
+    // A signature covering a different hash invalidates the digest file.
+    let other = Sha256Digest::compute(b"other");
+    assert_eq!(
+        validate(&signed(other))?,
+        reader::SignatureStatus::Invalid(vec![reader::SignatureProblem::SignedHash {
+            declared: manifest_hash,
+            signed: other,
+        }])
+    );
+
+    // A declared hash that does not match the manifest bytes invalidates the digest file.
+    assert_eq!(
+        validate(&format!(
+            r#"{{"path": "datapackage.json", "hash": "{other}"}}"#
+        ))?,
+        reader::SignatureStatus::Invalid(vec![reader::SignatureProblem::ManifestHash {
+            declared: other,
+            computed: manifest_hash,
+        }])
+    );
+
+    // An unparseable digest file is reported rather than failing validation.
+    assert!(matches!(
+        validate("not json")?,
+        reader::SignatureStatus::Invalid(problems)
+            if matches!(problems.as_slice(), [reader::SignatureProblem::Unparseable(_)])
+    ));
+
+    Ok(())
+}
+
+/// The content layer reports the first parse failure in each page list, index, and WARC member.
+#[test]
+fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>> {
+    let page0 = item_for("https://www.example.com/page0")?;
+    let page1 = item_for("https://www.example.com/page1")?;
+    let unsorted_index = format!("{page1}\n{page0}\n");
+
+    let bytes = stored_zip_of(&[
+        ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+        (
+            "pages/pages.jsonl",
+            "{\"format\": \"json-pages-1.0\", \"id\": \"pages\", \"title\": \"t\"}\n".as_bytes(),
+        ),
+        ("pages/bad.jsonl", b"not a page list".as_slice()),
+        ("indexes/unsorted.cdx", unsorted_index.as_bytes()),
+        ("indexes/bad.cdx", b"garbage\n".as_slice()),
+        ("indexes/bad.idx", b"garbage\n".as_slice()),
+        (
+            "archive/truncated.warc",
+            b"WARC/1.1\r\nWARC-Type: response\r\n".as_slice(),
+        ),
+    ])?;
+
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions {
+        content: true,
+        ..reader::ValidationOptions::default()
+    })?;
+    let content = report.content.expect("content layer should run");
+
+    assert_eq!(content.len(), 5);
+    assert!(content.iter().any(|problem| matches!(
+        problem,
+        reader::ContentProblem::Pages { path, .. } if path == "pages/bad.jsonl"
+    )));
+    assert!(content.iter().any(|problem| matches!(
+        problem,
+        reader::ContentProblem::IndexOrder { path } if path == "indexes/unsorted.cdx"
+    )));
+    assert!(content.iter().any(|problem| matches!(
+        problem,
+        reader::ContentProblem::Index { path, .. } if path == "indexes/bad.cdx"
+    )));
+    assert!(content.iter().any(|problem| matches!(
+        problem,
+        reader::ContentProblem::ZipNum { path, .. } if path == "indexes/bad.idx"
+    )));
+    assert!(content.iter().any(|problem| matches!(
+        problem,
+        reader::ContentProblem::Warc { path, .. } if path == "archive/truncated.warc"
+    )));
+
+    Ok(())
+}
+
+/// The index layer resolves each entry to its record, reporting digest mismatches and ranges that
+/// do not resolve while accepting entries that do.
+#[test]
+fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error::Error>> {
+    let warc = warc_bytes()?;
+    let length = warc.len() as u64;
+
+    let good = resolvable_item("https://www.example.com/page0", "data.warc", length)?;
+    let mut bad_digest = resolvable_item("https://www.example.com/page1", "data.warc", length)?;
+    bad_digest.fields.record_digest = Some(Sha256Digest::compute(b"wrong"));
+    let out_of_bounds = resolvable_item("https://www.example.com/page2", "data.warc", length + 10)?;
+
+    let index = format!("{good}\n{bad_digest}\n{out_of_bounds}\n");
+    let bytes = stored_zip_of(&[
+        ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+        ("archive/data.warc", &warc),
+        ("indexes/index.cdx", index.as_bytes()),
+    ])?;
+
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(reader::ValidationOptions {
+        index: true,
+        ..reader::ValidationOptions::default()
+    })?;
+
+    // The index layer implies the content layer, which finds nothing wrong here.
+    assert_eq!(report.content, Some(Vec::new()));
+
+    let problems = report.index.expect("index layer should run");
+
+    assert_eq!(problems.len(), 2);
+    assert!(matches!(
+        &problems[0],
+        reader::IndexProblem::Capture { index_path, key, message, .. }
+            if index_path == "indexes/index.cdx"
+                && key == "com,example,www)/page1"
+                && message.contains("digest mismatch")
+    ));
+    assert!(matches!(
+        &problems[1],
+        reader::IndexProblem::Capture { key, message, .. }
+            if key == "com,example,www)/page2" && message.contains("outside member")
+    ));
+
+    Ok(())
+}
+
+/// A `ZipNum` block whose stored bytes no longer match the summary's digest is reported, while
+/// entries in intact blocks still resolve.
+#[test]
+fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Error>> {
+    let warc = warc_bytes()?;
+    let length = warc.len() as u64;
+    let items = (0..4)
+        .map(|i| {
+            resolvable_item(
+                &format!("https://www.example.com/page{i}"),
+                "data.warc",
+                length,
+            )
+        })
+        .collect::<Result<Vec<_>, cdxj::Error>>()?;
+
+    let config = WriterConfig {
+        index_format: IndexFormat::ZipNum { lines: 2 },
+        ..WriterConfig::default()
+    };
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+    writer.add_index("index.cdx", &items)?;
+    writer.add_warc("data.warc", warc.as_slice())?;
+    let mut wacz = writer.finish(PackageMetadata::default())?.into_inner();
+
+    // Locate the first block's stored bytes and flip its gzip header OS byte, which changes the
+    // block digest without invalidating the gzip framing.
+    let mut reader = WaczReader::new(Cursor::new(wacz.clone()))?;
+    let summary = reader.zipnum_summary("indexes/index.idx")?;
+
+    assert_eq!(summary.blocks.len(), 2);
+
+    let block = summary.blocks[0].clone();
+    let stored = reader.member_range(&block.data_path, block.offset, block.length)?;
+    let position = wacz
+        .windows(stored.len())
+        .position(|window| window == stored)
+        .expect("stored block bytes should appear in the container");
+    wacz[position + 9] ^= 0xff;
+
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+    let report = reader.validate(reader::ValidationOptions {
+        index: true,
+        ..reader::ValidationOptions::default()
+    })?;
+    let problems = report.index.expect("index layer should run");
+
+    assert_eq!(problems.len(), 1);
+    assert!(matches!(
+        &problems[0],
+        reader::IndexProblem::Block { summary_path, offset, message }
+            if summary_path == "indexes/index.idx"
+                && *offset == 0
+                && message.contains("digest mismatch")
+    ));
 
     Ok(())
 }

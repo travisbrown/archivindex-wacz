@@ -294,7 +294,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
 
     let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     // The WARC file is named after the session identifier.
     assert_eq!(
@@ -629,7 +629,7 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
     // The failed attempt leaves no trace: one warcinfo record plus one exchange's records.
     let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
     assert_eq!(
         reader
             .warc("archive/retry.warc.gz")?
@@ -672,7 +672,7 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
     // The collection is still written and internally consistent.
     let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
 
     Ok(())
@@ -777,7 +777,7 @@ fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std:
 
     let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
 
     Ok(())

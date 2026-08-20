@@ -178,7 +178,7 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut reader = WaczReader::new(Cursor::new(&bytes))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     let package = reader.data_package()?;
 
@@ -460,7 +460,7 @@ fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut reader = WaczReader::new(Cursor::new(&bytes))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     let records = reader
         .warc("archive/data.warc")?
@@ -518,7 +518,7 @@ fn archive_with_compressed_index() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut reader = WaczReader::new(Cursor::new(&bytes))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     // The compressed data file holds the full index; the summary locates its single block.
     let items = reader
@@ -563,7 +563,7 @@ fn archive_records_unreachable_urls_as_failures() -> Result<(), Box<dyn std::err
     // The collection is still written and internally consistent.
     let mut reader = WaczReader::new(Cursor::new(&bytes))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
 
     Ok(())
@@ -624,7 +624,7 @@ fn archive_to_path_writes_a_collection() -> Result<(), Box<dyn std::error::Error
 
     let mut reader = WaczReader::new(std::fs::File::open(&path)?)?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     Ok(())
 }
@@ -1099,7 +1099,7 @@ fn archive_concurrently_preserves_input_order() -> Result<(), Box<dyn std::error
 
     let mut reader = WaczReader::new(Cursor::new(&bytes))?;
 
-    assert!(reader.verify()?.is_success());
+    assert!(reader.verify_fixity()?.is_success());
 
     // Page entries follow input order, exactly as in a sequential run.
     let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;

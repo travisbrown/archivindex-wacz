@@ -21,8 +21,13 @@ use crate::{
 };
 
 mod random;
+mod validate;
 
 pub use random::{Capture, ZipNumBlock, ZipNumSummary};
+pub use validate::{
+    ContentProblem, IndexProblem, LayoutProblem, ManifestProblem, SignatureProblem,
+    SignatureStatus, ValidationOptions, ValidationReport,
+};
 
 /// An error type for WACZ reading.
 #[derive(Debug, thiserror::Error)]
@@ -128,9 +133,10 @@ pub struct MemberMetadata {
     pub crc32: u32,
 }
 
-/// The outcome of verifying the files in a WACZ against its manifest.
+/// The outcome of checking a WACZ's declared fixity: whether each file listed in the manifest
+/// matches its declared byte length and SHA-256 digest.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
-pub struct Verification {
+pub struct Fixity {
     /// Paths whose digests and sizes match the manifest. Includes the manifest itself when a digest
     /// file is present and matches.
     pub verified: Vec<String>,
@@ -140,8 +146,8 @@ pub struct Verification {
     pub missing: Vec<String>,
 }
 
-impl Verification {
-    /// Whether every check passed.
+impl Fixity {
+    /// Whether every declared digest and size matched.
     #[must_use]
     pub const fn is_success(&self) -> bool {
         self.mismatched.is_empty() && self.missing.is_empty()
@@ -237,31 +243,35 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(WarcReader::new(self.member_stream(path)?))
     }
 
-    /// Verify the WACZ files against the manifest, and the manifest against the digest file if one
-    /// is present.
+    /// Check the WACZ files against the digests and sizes declared by the manifest, and the
+    /// manifest against the digest file if one is present.
     ///
     /// Missing, corrupt, and mismatched files are reported in the result rather than treated as
     /// errors, as is a digest file that cannot be parsed or that does not name the manifest.
-    pub fn verify(&mut self) -> Result<Verification, Error> {
+    ///
+    /// This checks declared fixity only: members that the manifest does not list are ignored, and
+    /// conformance with the WACZ specification is not examined. Use [`validate`](Self::validate)
+    /// for layered conformance checking, which can include this check as its fixity layer.
+    pub fn verify_fixity(&mut self) -> Result<Fixity, Error> {
         let manifest_bytes = self.member_bytes(DATA_PACKAGE_PATH)?;
         let package = parse_data_package(&manifest_bytes)?;
 
-        let mut verification = Verification::default();
+        let mut fixity = Fixity::default();
 
         match self.data_package_digest() {
             Ok(Some(digest)) => {
                 if digest.path == DATA_PACKAGE_PATH
                     && digest.hash == Sha256Digest::compute(&manifest_bytes)
                 {
-                    verification.verified.push(DATA_PACKAGE_PATH.to_owned());
+                    fixity.verified.push(DATA_PACKAGE_PATH.to_owned());
                 } else {
-                    verification.mismatched.push(DATA_PACKAGE_PATH.to_owned());
+                    fixity.mismatched.push(DATA_PACKAGE_PATH.to_owned());
                 }
             }
             Ok(None) => {}
             // A digest file that cannot be parsed cannot corroborate the manifest.
             Err(Error::InvalidDataPackageDigest(_)) => {
-                verification.mismatched.push(DATA_PACKAGE_PATH.to_owned());
+                fixity.mismatched.push(DATA_PACKAGE_PATH.to_owned());
             }
             Err(error) => return Err(error),
         }
@@ -270,22 +280,22 @@ impl<R: Read + Seek> WaczReader<R> {
             match self.member(&resource.path) {
                 Ok(member) => match Sha256Digest::from_reader(member) {
                     Ok((hash, bytes)) if hash == resource.hash && bytes == resource.bytes => {
-                        verification.verified.push(resource.path.to_string());
+                        fixity.verified.push(resource.path.to_string());
                     }
-                    Ok(_) => verification.mismatched.push(resource.path.to_string()),
+                    Ok(_) => fixity.mismatched.push(resource.path.to_string()),
                     // The ZIP layer reports a corrupt entry (a CRC or decompression failure) as
                     // `InvalidData` once the stream has been read to its end.
                     Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                        verification.mismatched.push(resource.path.to_string());
+                        fixity.mismatched.push(resource.path.to_string());
                     }
                     Err(error) => return Err(error.into()),
                 },
-                Err(Error::MissingMember(path)) => verification.missing.push(path),
+                Err(Error::MissingMember(path)) => fixity.missing.push(path),
                 Err(error) => return Err(error),
             }
         }
 
-        Ok(verification)
+        Ok(fixity)
     }
 
     /// Open a ZIP entry by path, mapping the ZIP crate's not-found error to a dedicated variant.
