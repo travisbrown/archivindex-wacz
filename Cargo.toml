@@ -16,6 +16,7 @@ version = "0.4.0"
 archivindex-warc = { git = "https://github.com/travisbrown/archivindex-warc", features = [
     "payload-identification",
     "recorder",
+    "serde",
 ] }
 chrono = "0.4"
 cli-helpers = "0.1"

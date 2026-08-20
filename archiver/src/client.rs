@@ -16,11 +16,12 @@ use crate::config::Config;
 mod capture;
 mod collection;
 mod pool;
+mod warc_fields;
 mod warc_mapping;
 
 pub(crate) use capture::Exchange;
 pub(crate) use collection::Collection;
-use warc_mapping::WarcinfoOptions;
+use warc_fields::WarcinfoOptions;
 
 const WARC_NAME: &str = "data.warc";
 const GZIP_WARC_NAME: &str = "data.warc.gz";
@@ -67,6 +68,9 @@ pub enum Error {
     /// A `warc-fields` value could not be written.
     #[error(transparent)]
     WarcFields(#[from] archivindex_warc::record::fields::Error),
+    /// Semantic `warc-fields` metadata could not be serialized.
+    #[error(transparent)]
+    WarcFieldsSerde(archivindex_warc::record::fields::serde::Error),
     /// A WARC record could not be rendered.
     #[error(transparent)]
     WarcRender(#[from] archivindex_warc::record::RenderError),
@@ -76,6 +80,17 @@ pub enum Error {
     /// The WACZ file could not be written.
     #[error(transparent)]
     Wacz(#[from] archivindex_wacz::writer::Error),
+}
+
+impl From<archivindex_warc::record::fields::serde::Error> for Error {
+    fn from(source: archivindex_warc::record::fields::serde::Error) -> Self {
+        match source {
+            archivindex_warc::record::fields::serde::Error::Field(source) => {
+                Self::WarcFields(source)
+            }
+            source => Self::WarcFieldsSerde(source),
+        }
+    }
 }
 
 /// The outcome of an archiving run.

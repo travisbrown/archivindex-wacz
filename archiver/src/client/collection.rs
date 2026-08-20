@@ -14,9 +14,8 @@ use archivindex_warc::io::write::WarcWriter;
 use fluent_uri::Uri;
 
 use super::capture::Original;
-use super::warc_mapping::{
-    RevisitTarget, WarcinfoOptions, warcinfo_record, write_exchange, write_record,
-};
+use super::warc_fields::{WarcinfoOptions, warcinfo_record};
+use super::warc_mapping::{RevisitTarget, write_exchange, write_record};
 use super::{ArchiveSummary, CaptureSummary, Error, Exchange, Failure};
 use crate::config::DEFAULT_USER_AGENT;
 
@@ -42,7 +41,7 @@ pub struct Collection {
 
 impl Collection {
     /// Start a collection by writing its initial `warcinfo` record.
-    pub(crate) fn new(
+    pub(super) fn new(
         warc_name: String,
         gzip: bool,
         warcinfo: &WarcinfoOptions<'_>,

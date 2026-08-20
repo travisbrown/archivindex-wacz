@@ -7,22 +7,17 @@ use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_warc::io::write::{WarcWriter, Written};
+use archivindex_warc::record::Record;
 use archivindex_warc::record::capture::{CaptureEvent, CaptureRecords};
-use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
-use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::recorder::CapturedExchange;
-use archivindex_warc::value::{
-    DigestAlgorithm, LabelledDigest, MediaType, WarcDate, WarcDatePrecision,
-};
-use chrono::Utc;
+use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
 use fluent_uri::Uri;
 
+use super::warc_fields::metadata_record;
 use super::{Error, Exchange};
 use crate::response;
-
-const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
 
 /// The conventional CDXJ media type for an entry backed by a `revisit` record.
 const REVISIT_MIME: &str = "warc/revisit";
@@ -38,26 +33,6 @@ pub(super) struct RevisitTarget {
     date: WarcDate,
     /// The original record's payload digest, which every revisit of it shares.
     payload_digest: Sha256Digest,
-}
-
-/// Information recorded in the WARC file's initial `warcinfo` record.
-pub struct WarcinfoOptions<'a> {
-    pub(crate) user_agent: &'a str,
-    pub(crate) software: Option<(&'a str, &'a str)>,
-    pub(crate) operator: Option<(&'a str, Option<&'a str>)>,
-    pub(crate) session_id: Option<&'a str>,
-}
-
-impl<'a> WarcinfoOptions<'a> {
-    /// Options for a one-shot run: this crate as software, with no operator or session.
-    pub(crate) const fn archiver(user_agent: &'a str) -> Self {
-        Self {
-            user_agent,
-            software: None,
-            operator: None,
-            session_id: None,
-        }
-    }
 }
 
 /// Write a record, optionally as an independent gzip member.
@@ -102,28 +77,17 @@ pub(super) fn write_exchange<W: Write>(
         captured,
     } = exchange;
 
-    let (mut records, target_uri) = if let Some(original) = revisit_of {
+    let (records, target_uri) = if let Some(original) = revisit_of {
         let profile = if revalidated.is_some() {
             RevisitProfile::SERVER_NOT_MODIFIED
         } else {
             RevisitProfile::IDENTICAL_PAYLOAD_DIGEST
         };
 
-        revisit_records(captured, date, warcinfo_id, original, profile)?
+        revisit_records(captured, date, warcinfo_id, original, profile, via)?
     } else {
-        full_records(captured, date, warcinfo_id, payload_digest.as_ref())?
+        full_records(captured, date, warcinfo_id, payload_digest.as_ref(), via)?
     };
-    if let (
-        Some(via),
-        Some(Record::Metadata {
-            header,
-            body: FieldsBlock::Fields(fields),
-        }),
-    ) = (via, records.metadata.as_mut())
-    {
-        fields.push(MetadataField::Via, via)?;
-        header.core.content_length = Some(fields.rendered_len() as u64);
-    }
 
     let mime = if revisit_of.is_some() {
         Some(Cow::Borrowed(REVISIT_MIME))
@@ -178,6 +142,7 @@ fn full_records(
     date: WarcDate,
     warcinfo_id: &Uri<String>,
     payload_digest: Option<&Sha256Digest>,
+    via: Option<&str>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
         request,
@@ -191,8 +156,7 @@ fn full_records(
     let mut event = CaptureEvent::new(target_uri.clone(), date)
         .warcinfo_id(warcinfo_id.clone())
         .ip_address(ip_address)
-        .identify_payload_type()
-        .fetch_time(fetch_time);
+        .identify_payload_type();
 
     if let Some(digest) = payload_digest {
         event = event.payload_digest(LabelledDigest::from_digest(
@@ -204,7 +168,17 @@ fn full_records(
         event = event.truncated(reason);
     }
 
-    Ok((event.exchange(request, response)?, target_uri))
+    let mut records = event.exchange(request, response)?;
+    records.metadata = Some(metadata_record(
+        date,
+        target_uri.clone(),
+        records.response.core().record_id.clone(),
+        warcinfo_id,
+        fetch_time,
+        via,
+    )?);
+
+    Ok((records, target_uri))
 }
 
 /// Build the records of a capture revisiting an earlier record's payload: its request and metadata
@@ -216,6 +190,7 @@ fn revisit_records(
     warcinfo_id: &Uri<String>,
     original: &RevisitTarget,
     profile: RevisitProfile,
+    via: Option<&str>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
         request,
@@ -255,12 +230,14 @@ fn revisit_records(
     }
     let revisit = revisit.body(response)?;
 
-    let metadata = Record::metadata(date)
-        .target_uri(target_uri.clone())
-        .concurrent_to(revisit.core().record_id.clone())
-        .fetch_time_ms(fetch_time)
-        .warcinfo_id(warcinfo_id.clone())
-        .build();
+    let metadata = metadata_record(
+        date,
+        target_uri.clone(),
+        revisit.core().record_id.clone(),
+        warcinfo_id,
+        fetch_time,
+        via,
+    )?;
 
     Ok((
         CaptureRecords {
@@ -270,38 +247,6 @@ fn revisit_records(
         },
         target_uri,
     ))
-}
-
-/// Build the `warcinfo` record at the start of a WARC file.
-pub(super) fn warcinfo_record(
-    warc_name: &str,
-    options: &WarcinfoOptions<'_>,
-) -> Result<Record, Error> {
-    let (software_name, software_version) = options
-        .software
-        .unwrap_or((env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")));
-    let mut builder = Record::warcinfo(record_date())
-        .filename(warc_name)
-        .expect("well-formed WARC file name")
-        .software(software_name, software_version)?;
-
-    if let Some((name, email)) = options.operator {
-        builder = builder.operator(name, email)?;
-    }
-    builder = builder
-        .http_header_user_agent(options.user_agent)
-        .map_err(|_| Error::InvalidUserAgent(options.user_agent.to_owned()))?;
-    if let Some(session_id) = options.session_id {
-        builder = builder
-            .is_part_of(session_id)
-            .expect("well-formed session identifier");
-    }
-
-    Ok(builder.build())
-}
-
-fn record_date() -> WarcDate {
-    WarcDate::new(Utc::now(), DATE_PRECISION)
 }
 
 fn stored_digest(written: &Written) -> Sha256Digest {
