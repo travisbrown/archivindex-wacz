@@ -114,13 +114,87 @@ pub struct ArchiveSummary {
     pub captures: Vec<CaptureSummary>,
     /// URLs that could not be captured.
     pub failures: Vec<Failure>,
+    /// Whether an event sink requested a clean stop before all input was dispatched.
+    pub cancelled: bool,
 }
 
 impl ArchiveSummary {
     /// Whether every URL was captured.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
-        self.failures.is_empty()
+        self.failures.is_empty() && !self.cancelled
+    }
+}
+
+/// A live capture lifecycle notification.
+#[derive(Clone, Copy, Debug)]
+pub enum CaptureEvent<'a> {
+    /// A URL capture attempt is starting.
+    Started {
+        /// Requested URL.
+        url: &'a str,
+        /// One-based attempt number.
+        attempt: usize,
+    },
+    /// A transient failure will be retried after a delay.
+    Retrying {
+        /// Requested URL.
+        url: &'a str,
+        /// One-based number of the upcoming attempt.
+        attempt: usize,
+        /// Delay before that attempt.
+        delay: std::time::Duration,
+    },
+    /// A URL produced a final HTTP response.
+    Captured {
+        /// Requested URL.
+        url: &'a str,
+        /// Final HTTP status.
+        status: u16,
+    },
+    /// A URL could not be captured.
+    Failed {
+        /// Requested URL.
+        url: &'a str,
+        /// Final capture error.
+        error: &'a Error,
+    },
+    /// The URL's records were written to the pending collection.
+    Written {
+        /// Requested URL.
+        url: &'a str,
+    },
+}
+
+/// Decision returned by a [`CaptureEventSink`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureControl {
+    /// Continue capturing.
+    Continue,
+    /// Stop dispatching work and finalize what has already completed.
+    Cancel,
+}
+
+/// Observer that can report progress or request clean cancellation.
+pub trait CaptureEventSink {
+    /// Observe one event and decide whether capture should continue.
+    fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl;
+}
+
+impl<F> CaptureEventSink for F
+where
+    F: for<'a> FnMut(CaptureEvent<'a>) -> CaptureControl,
+{
+    fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl {
+        self(event)
+    }
+}
+
+struct IgnoreEvents;
+
+impl CaptureEventSink for IgnoreEvents {
+    fn event(&mut self, _event: CaptureEvent<'_>) -> CaptureControl {
+        CaptureControl::Continue
     }
 }
 
@@ -189,6 +263,16 @@ impl Archiver {
         urls: I,
         path: P,
     ) -> Result<ArchiveSummary, Error> {
+        self.archive_to_path_with_events(urls, path, &mut IgnoreEvents)
+    }
+
+    /// Download URLs with live events and atomically publish a new WARC at `path`.
+    pub fn archive_to_path_with_events<P: AsRef<Path>, I: IntoIterator<Item = S>, S: AsRef<str>>(
+        &self,
+        urls: I,
+        path: P,
+        events: &mut impl CaptureEventSink,
+    ) -> Result<ArchiveSummary, Error> {
         let path = path.as_ref();
         let warc_name =
             path.file_name()
@@ -198,8 +282,10 @@ impl Archiver {
                 } else {
                     WARC_NAME
                 });
-        self.archive_collection(urls, warc_name)?
-            .finish_to_path(path)
+        let (collection, cancelled) = self.archive_collection(urls, warc_name, events)?;
+        let mut summary = collection.finish_to_path(path)?;
+        summary.cancelled = cancelled;
+        Ok(summary)
     }
 
     /// Download URLs and write a WARC stream to `writer`.
@@ -208,12 +294,25 @@ impl Archiver {
         urls: I,
         writer: W,
     ) -> Result<ArchiveSummary, Error> {
+        self.archive_with_events(urls, writer, &mut IgnoreEvents)
+    }
+
+    /// Download URLs with live events and write a WARC stream to `writer`.
+    pub fn archive_with_events<W: Write, I: IntoIterator<Item = S>, S: AsRef<str>>(
+        &self,
+        urls: I,
+        writer: W,
+        events: &mut impl CaptureEventSink,
+    ) -> Result<ArchiveSummary, Error> {
         let warc_name = if self.config.gzip_warc {
             GZIP_WARC_NAME
         } else {
             WARC_NAME
         };
-        self.archive_collection(urls, warc_name)?.finish(writer)
+        let (collection, cancelled) = self.archive_collection(urls, warc_name, events)?;
+        let mut summary = collection.finish(writer)?;
+        summary.cancelled = cancelled;
+        Ok(summary)
     }
 
     /// Start the collection used by a crawl session.
@@ -244,7 +343,8 @@ impl Archiver {
         &self,
         urls: I,
         warc_name: &str,
-    ) -> Result<Collection, Error> {
+        events: &mut impl CaptureEventSink,
+    ) -> Result<(Collection, bool), Error> {
         let gzip = self.config.gzip_warc;
         let mut collection = Collection::new(
             warc_name,
@@ -254,16 +354,46 @@ impl Archiver {
         )?;
 
         let concurrency = self.config.concurrency.max(1);
+        let mut cancelled = false;
         if concurrency == 1 {
             for url in urls {
                 let url = url.as_ref();
+                if events.event(CaptureEvent::Started { url, attempt: 1 }) == CaptureControl::Cancel
+                {
+                    cancelled = true;
+                    break;
+                }
                 let (exchanges, error) = self.capture(url, None);
+                cancelled |= notify_outcome(events, url, &exchanges, error.as_ref());
                 collection.record(url.to_owned(), exchanges, error, None, None)?;
+                cancelled |= events.event(CaptureEvent::Written { url }) == CaptureControl::Cancel;
+                if cancelled {
+                    break;
+                }
             }
         } else {
-            self.capture_concurrently(urls, concurrency, &mut collection)?;
+            cancelled = self.capture_concurrently(urls, concurrency, &mut collection, events)?;
         }
 
-        Ok(collection)
+        Ok((collection, cancelled))
     }
+}
+
+fn notify_outcome(
+    events: &mut impl CaptureEventSink,
+    url: &str,
+    exchanges: &[Exchange],
+    error: Option<&Error>,
+) -> bool {
+    let event = error.map_or_else(
+        || CaptureEvent::Captured {
+            url,
+            status: exchanges
+                .last()
+                .expect("successful capture has an exchange")
+                .status,
+        },
+        |error| CaptureEvent::Failed { url, error },
+    );
+    events.event(event) == CaptureControl::Cancel
 }

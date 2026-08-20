@@ -9,7 +9,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::client::{Archiver, CaptureSummary, Error, Failure};
+use crate::client::{
+    Archiver, CaptureControl, CaptureEvent, CaptureEventSink, CaptureSummary, Error, Failure,
+};
 
 mod run;
 
@@ -104,13 +106,15 @@ pub struct SessionSummary {
     pub failures: Vec<Failure>,
     /// The error that ended crawling early, if the partial WARC could still be written.
     pub fatal_error: Option<Error>,
+    /// Whether an event sink requested a clean stop.
+    pub cancelled: bool,
 }
 
 impl SessionSummary {
     /// Whether no URL failed and no fatal error ended the crawl.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
-        self.failures.is_empty() && self.fatal_error.is_none()
+        self.failures.is_empty() && self.fatal_error.is_none() && !self.cancelled
     }
 }
 
@@ -126,6 +130,7 @@ pub struct Session<'a> {
     retry: RetryConfig,
     limit: Option<usize>,
     revisit_index: Option<PathBuf>,
+    events: Option<Box<dyn CaptureEventSink + 'a>>,
 }
 
 impl<'a> Session<'a> {
@@ -162,6 +167,7 @@ impl<'a> Session<'a> {
             retry: RetryConfig::default(),
             limit: None,
             revisit_index: None,
+            events: None,
         })
     }
 
@@ -177,6 +183,19 @@ impl<'a> Session<'a> {
     pub fn processor<P: CaptureProcessor + 'a>(mut self, processor: P) -> Self {
         self.processor = Some(Box::new(processor));
         self
+    }
+
+    /// Observe capture lifecycle events and optionally request clean cancellation.
+    #[must_use]
+    pub fn events<E: CaptureEventSink + 'a>(mut self, events: E) -> Self {
+        self.events = Some(Box::new(events));
+        self
+    }
+
+    fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl {
+        self.events
+            .as_mut()
+            .map_or(CaptureControl::Continue, |sink| sink.event(event))
     }
 
     /// Set the transient-failure retry policy.

@@ -4,11 +4,13 @@
 #![allow(clippy::missing_errors_doc)]
 #![forbid(unsafe_code)]
 
+use std::cell::RefCell;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
-use archivindex_archiver::client::Archiver;
+use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent};
 use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Operator, RetryConfig, Session};
 use archivindex_archiver::wordpress::CommentCaptureProcessor;
@@ -31,18 +33,23 @@ fn main() -> Result<(), Error> {
 
 /// Archive a list of URLs read from standard input.
 fn archive(options: ArchiveOptions) -> Result<(), Error> {
-    let urls = read_urls(std::io::stdin().lock())?;
     let config = options.config.into_config(options.concurrency);
     let archiver = Archiver::new(config)?;
-
-    // The archiver pulls URLs from the iterator as it dispatches them for download, so the bar
-    // tracks dispatches, running at most the configured concurrency ahead of completions. It is
-    // cleared before the result is checked so that an error cannot leak a stuck bar.
-    let progress = progress_bar(urls.len() as u64, "Archiving", "URLs");
-    let result =
-        archiver.archive_to_path(urls.iter().inspect(|_| progress.inc(1)), &options.output);
+    let input_error = Rc::new(RefCell::new(None));
+    let urls = read_urls(std::io::stdin().lock(), Rc::clone(&input_error));
+    let progress = progress_spinner("Archiving", "URLs");
+    let mut events = |event: CaptureEvent<'_>| {
+        if matches!(event, CaptureEvent::Written { .. }) {
+            progress.inc(1);
+        }
+        CaptureControl::Continue
+    };
+    let result = archiver.archive_to_path_with_events(urls, &options.output, &mut events);
     progress.finish_and_clear();
     let summary = result?;
+    if let Some(error) = input_error.borrow_mut().take() {
+        return Err(error.into());
+    }
 
     for failure in &summary.failures {
         log::warn!("Failed to capture {}: {}", failure.url, failure.error);
@@ -51,7 +58,7 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
     println!(
         "Archived {} of {} URLs to {}",
         summary.captures.len(),
-        urls.len(),
+        summary.captures.len() + summary.failures.len(),
         options.output.display()
     );
 
@@ -75,6 +82,7 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     };
     let config = options.config.into_config(None);
     let archiver = Archiver::new(config)?;
+    let progress = progress_spinner("Archiving", "batches");
     let operator = Operator {
         name: options.operator,
         email: options.operator_email,
@@ -88,6 +96,12 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     )?
     .software(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
     .processor(processor)
+    .events(|event: CaptureEvent<'_>| {
+        if matches!(event, CaptureEvent::Written { .. }) {
+            progress.inc(1);
+        }
+        CaptureControl::Continue
+    })
     .retry(retry);
 
     if let Some(revisit_index) = options.revisit_index {
@@ -98,6 +112,7 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     }
 
     let summary = session.run()?;
+    progress.finish_and_clear();
 
     for failure in &summary.failures {
         log::warn!("Failed to capture {}: {}", failure.url, failure.error);
@@ -167,29 +182,30 @@ fn read_wp_comments(options: ReadWpCommentsOptions) -> Result<(), Error> {
 }
 
 /// Read one URL per line, trimming surrounding whitespace and skipping blank lines.
-fn read_urls<R: BufRead>(reader: R) -> Result<Vec<String>, std::io::Error> {
-    let mut urls = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        let url = line.trim();
-
-        if !url.is_empty() {
-            urls.push(url.to_owned());
-        }
-    }
-
-    Ok(urls)
+fn read_urls<R: BufRead>(
+    reader: R,
+    error: Rc<RefCell<Option<std::io::Error>>>,
+) -> impl Iterator<Item = String> {
+    reader
+        .lines()
+        .map_while(move |line| match line {
+            Ok(line) => {
+                let url = line.trim();
+                Some((!url.is_empty()).then(|| url.to_owned()))
+            }
+            Err(source) => {
+                *error.borrow_mut() = Some(source);
+                None
+            }
+        })
+        .flatten()
 }
 
-/// Create a progress bar of `len` steps, labelled with `message` and counting units named `unit`.
-fn progress_bar(len: u64, message: &'static str, unit: &str) -> ProgressBar {
-    let progress = ProgressBar::new(len);
+fn progress_spinner(message: &'static str, unit: &str) -> ProgressBar {
+    let progress = ProgressBar::new_spinner();
     progress.set_style(
-        ProgressStyle::with_template(&format!(
-            "{{msg}} [{{bar:40}}] {{human_pos}}/{{human_len}} {unit} ({{eta}})"
-        ))
-        .expect("valid progress bar template"),
+        ProgressStyle::with_template(&format!("{{msg}} {{human_pos}} {unit} {{spinner}}"))
+            .expect("valid progress spinner template"),
     );
     progress.set_message(message);
     progress
@@ -366,9 +382,12 @@ mod tests {
     fn read_urls_trims_and_skips_blank_lines() {
         let input = "https://example.com/\n\n  https://example.org/  \n";
 
-        let urls = super::read_urls(input.as_bytes()).expect("read URLs");
+        let error = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let urls =
+            super::read_urls(input.as_bytes(), std::rc::Rc::clone(&error)).collect::<Vec<_>>();
 
         assert_eq!(urls, ["https://example.com/", "https://example.org/"]);
+        assert!(error.borrow().is_none());
     }
 
     #[test]

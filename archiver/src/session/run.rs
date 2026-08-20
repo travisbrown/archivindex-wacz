@@ -9,7 +9,7 @@ use archivindex_warc::record::payload;
 use archivindex_warc_revisit_index::Index as RevisitIndex;
 
 use super::{Capture, Inspection, Session, SessionSummary};
-use crate::client::{Collection, Error, Exchange};
+use crate::client::{CaptureControl, CaptureEvent, Collection, Error, Exchange};
 use crate::response;
 
 impl Session<'_> {
@@ -38,12 +38,33 @@ impl Session<'_> {
         let seeds = seen.clone();
         let mut fatal_error = None;
         let mut capture_count = 0;
+        let mut cancelled = false;
 
         while self.limit.is_none_or(|limit| capture_count < limit) {
             let Some((url, via)) = queue.pop_front() else {
                 break;
             };
-            let (exchanges, error) = self.capture_with_retry(&url, &collection);
+            if self.event(CaptureEvent::Started {
+                url: &url,
+                attempt: 1,
+            }) == CaptureControl::Cancel
+            {
+                cancelled = true;
+                break;
+            }
+            let (exchanges, error, retry_cancelled) = self.capture_with_retry(&url, &collection);
+            if retry_cancelled {
+                cancelled = true;
+                break;
+            }
+            let outcome = error.as_ref().map_or_else(
+                || CaptureEvent::Captured {
+                    url: &url,
+                    status: exchanges.last().map_or(0, |exchange| exchange.status),
+                },
+                |error| CaptureEvent::Failed { url: &url, error },
+            );
+            cancelled |= self.event(outcome) == CaptureControl::Cancel;
             let captured = error.is_none();
             let (title, processor_error) = if captured {
                 self.process_capture(&url, &exchanges, &mut seen, &mut queue)
@@ -52,13 +73,17 @@ impl Session<'_> {
             };
             let stop = processor_error.is_some();
             if let Err(error) = collection.record(
-                url,
+                url.clone(),
                 exchanges,
                 error.or(processor_error),
                 title.as_deref(),
                 via.as_deref(),
             ) {
                 fatal_error = Some(error);
+                break;
+            }
+            cancelled |= self.event(CaptureEvent::Written { url: &url }) == CaptureControl::Cancel;
+            if cancelled {
                 break;
             }
             if stop {
@@ -79,6 +104,7 @@ impl Session<'_> {
                     extra_captures,
                     failures: summary.failures,
                     fatal_error,
+                    cancelled,
                 })
             }
             Err(error) => Err(fatal_error.unwrap_or(error)),
@@ -144,22 +170,38 @@ impl Session<'_> {
     /// Capture a URL, revalidating the collection's earlier captures and retrying transient
     /// failures with exponential backoff.
     fn capture_with_retry(
-        &self,
+        &mut self,
         url: &str,
         collection: &Collection,
-    ) -> (Vec<Exchange>, Option<Error>) {
+    ) -> (Vec<Exchange>, Option<Error>, bool) {
         let attempts = self.retry.attempts.max(1);
         let mut backoff = self.retry.initial_backoff.min(self.retry.max_backoff);
 
         for attempt in 0..attempts {
+            if attempt > 0
+                && self.event(CaptureEvent::Started {
+                    url,
+                    attempt: attempt + 1,
+                }) == CaptureControl::Cancel
+            {
+                return (Vec::new(), None, true);
+            }
             let (exchanges, error) = self.archiver.capture(url, Some(collection));
             match error {
                 Some(error) if is_transient(&error) && attempt + 1 < attempts => {
                     drop((exchanges, error));
+                    if self.event(CaptureEvent::Retrying {
+                        url,
+                        attempt: attempt + 2,
+                        delay: backoff,
+                    }) == CaptureControl::Cancel
+                    {
+                        return (Vec::new(), None, true);
+                    }
                     thread::sleep(backoff);
                     backoff = doubled_backoff(backoff, self.retry.max_backoff);
                 }
-                Some(error) => return (exchanges, Some(error)),
+                Some(error) => return (exchanges, Some(error), false),
                 None => {
                     let status = exchanges.last().map(|exchange| exchange.status);
                     if status.is_some_and(is_retryable_status) {
@@ -170,6 +212,7 @@ impl Session<'_> {
                                     url: url.to_owned(),
                                     status: status.expect("checked"),
                                 }),
+                                false,
                             );
                         }
                         let delay = exchanges
@@ -177,10 +220,18 @@ impl Session<'_> {
                             .and_then(retry_after)
                             .unwrap_or(backoff)
                             .min(self.retry.max_backoff);
+                        if self.event(CaptureEvent::Retrying {
+                            url,
+                            attempt: attempt + 2,
+                            delay,
+                        }) == CaptureControl::Cancel
+                        {
+                            return (Vec::new(), None, true);
+                        }
                         thread::sleep(delay);
                         backoff = doubled_backoff(backoff, self.retry.max_backoff);
                     } else {
-                        return (exchanges, None);
+                        return (exchanges, None, false);
                     }
                 }
             }

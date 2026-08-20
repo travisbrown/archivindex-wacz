@@ -2,12 +2,12 @@
 
 use std::collections::HashSet;
 use std::net::TcpListener;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use archivindex_archiver::client::{Archiver, Error};
+use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
 use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
@@ -1222,6 +1222,8 @@ fn session_retries_retryable_http_statuses() -> Result<(), Box<dyn std::error::E
     let url = format!("http://127.0.0.1:{port}/");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("status-retry.warc.gz");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_sink = Arc::clone(&events);
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -1230,6 +1232,19 @@ fn session_retries_retryable_http_statuses() -> Result<(), Box<dyn std::error::E
         [&url],
         &path,
     )?
+    .events(move |event: CaptureEvent<'_>| {
+        events_for_sink
+            .lock()
+            .expect("event lock")
+            .push(match event {
+                CaptureEvent::Started { attempt, .. } => format!("started:{attempt}"),
+                CaptureEvent::Retrying { attempt, .. } => format!("retrying:{attempt}"),
+                CaptureEvent::Captured { .. } => "captured".to_owned(),
+                CaptureEvent::Written { .. } => "written".to_owned(),
+                CaptureEvent::Failed { .. } => "failed".to_owned(),
+            });
+        CaptureControl::Continue
+    })
     .retry(RetryConfig {
         attempts: 2,
         initial_backoff: Duration::from_secs(30),
@@ -1242,6 +1257,16 @@ fn session_retries_retryable_http_statuses() -> Result<(), Box<dyn std::error::E
     assert_eq!(requests, ["/", "/"]);
     assert!(summary.is_complete());
     assert_eq!(summary.seed_captures[0].status, 200);
+    assert_eq!(
+        *events.lock().expect("event lock"),
+        [
+            "started:1",
+            "retrying:2",
+            "started:2",
+            "captured",
+            "written"
+        ]
+    );
 
     Ok(())
 }

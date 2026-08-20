@@ -9,7 +9,7 @@ mod support;
 
 use support::{plain, request_path, serve_with};
 
-use archivindex_archiver::client::{Archiver, Error};
+use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
 use archivindex_archiver::config::Config;
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::cdxj;
@@ -449,6 +449,48 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
             Some(item.fields.url.as_ref())
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn event_sink_can_cancel_and_finalize_a_partial_archive() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (port, server) = serve(1)?;
+    let urls = [
+        format!("http://127.0.0.1:{port}/"),
+        format!("http://127.0.0.1:{port}/missing"),
+    ];
+    let archiver = Archiver::new(Config {
+        concurrency: 1,
+        ..Config::default()
+    })?;
+    let mut bytes = Vec::new();
+    let mut events = Vec::new();
+    let summary = {
+        let mut sink = |event: CaptureEvent<'_>| {
+            events.push(match event {
+                CaptureEvent::Started { .. } => "started",
+                CaptureEvent::Captured { .. } => "captured",
+                CaptureEvent::Written { .. } => "written",
+                CaptureEvent::Retrying { .. } => "retrying",
+                CaptureEvent::Failed { .. } => "failed",
+            });
+            if matches!(event, CaptureEvent::Written { .. }) {
+                CaptureControl::Cancel
+            } else {
+                CaptureControl::Continue
+            }
+        };
+        archiver.archive_with_events(&urls, Cursor::new(&mut bytes), &mut sink)?
+    };
+    server.join().expect("server thread should not panic");
+
+    assert!(summary.cancelled);
+    assert!(!summary.is_complete());
+    assert_eq!(summary.captures.len(), 1);
+    assert_eq!(events, ["started", "captured", "written"]);
+    assert!(package_bytes(&bytes)?.verify_fixity()?.is_success());
 
     Ok(())
 }

@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, mpsc};
 use std::thread;
 
-use super::{Archiver, Collection, Error, Exchange};
+use super::{
+    Archiver, CaptureControl, CaptureEvent, CaptureEventSink, Collection, Error, Exchange,
+    notify_outcome,
+};
 
 type CaptureOutcome = (usize, String, Vec<Exchange>, Option<Error>);
 
@@ -15,7 +18,8 @@ impl Archiver {
         urls: I,
         concurrency: usize,
         collection: &mut Collection,
-    ) -> Result<(), Error> {
+        events: &mut impl CaptureEventSink,
+    ) -> Result<bool, Error> {
         let mut urls = urls.into_iter();
         let (task_sender, task_receiver) = mpsc::channel::<(usize, String)>();
         let task_receiver = Mutex::new(task_receiver);
@@ -44,8 +48,18 @@ impl Archiver {
 
             drop(outcome_sender);
             let mut dispatched = 0;
+            let mut cancelled = false;
             for (index, url) in urls.by_ref().take(concurrency).enumerate() {
-                let _ = task_sender.send((index, url.as_ref().to_owned()));
+                let url = url.as_ref().to_owned();
+                if events.event(CaptureEvent::Started {
+                    url: &url,
+                    attempt: 1,
+                }) == CaptureControl::Cancel
+                {
+                    cancelled = true;
+                    break;
+                }
+                let _ = task_sender.send((index, url));
                 dispatched += 1;
             }
 
@@ -61,24 +75,37 @@ impl Archiver {
                 completed += 1;
 
                 if result.is_ok() {
-                    if let Some(url) = urls.next() {
-                        let _ = task_sender.send((dispatched, url.as_ref().to_owned()));
-                        dispatched += 1;
+                    cancelled |= notify_outcome(events, &url, &exchanges, error.as_ref());
+                    if !cancelled && let Some(url) = urls.next() {
+                        let url = url.as_ref().to_owned();
+                        if events.event(CaptureEvent::Started {
+                            url: &url,
+                            attempt: 1,
+                        }) == CaptureControl::Cancel
+                        {
+                            cancelled = true;
+                        } else {
+                            let _ = task_sender.send((dispatched, url));
+                            dispatched += 1;
+                        }
                     }
-
                     pending.insert(index, (url, exchanges, error));
                     while let Some((url, exchanges, error)) = pending.remove(&next_to_record) {
-                        if let Err(error) = collection.record(url, exchanges, error, None, None) {
+                        if let Err(error) =
+                            collection.record(url.clone(), exchanges, error, None, None)
+                        {
                             result = Err(error);
                             break;
                         }
+                        cancelled |= events.event(CaptureEvent::Written { url: &url })
+                            == CaptureControl::Cancel;
                         next_to_record += 1;
                     }
                 }
             }
 
             drop(task_sender);
-            result
+            result.map(|()| cancelled)
         })
     }
 }
