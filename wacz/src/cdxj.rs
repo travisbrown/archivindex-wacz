@@ -374,7 +374,7 @@ impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
     }
 }
 
-/// Backwards-compatible name for leniently parsed fields.
+/// Short name for leniently parsed fields.
 pub type Fields<'a> = ParsedFields<'a>;
 
 /// A reader that iteratively parses CDXJ items from a stream.

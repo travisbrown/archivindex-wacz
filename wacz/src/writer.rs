@@ -16,7 +16,7 @@ mod resource;
 
 use resource::options_for;
 
-/// Backward-compatible name for manifest metadata supplied to [`WaczWriter::finish`].
+/// Short name for manifest metadata supplied to [`WaczWriter::finish`].
 ///
 /// New code should use [`crate::frictionless::DataPackageBuilder`] directly.
 pub type PackageMetadata = crate::frictionless::DataPackageBuilder;
