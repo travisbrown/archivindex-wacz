@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::thread;
+use std::time::Duration;
 
 use archivindex_warc::record::payload;
 use archivindex_warc_revisit_index::Index as RevisitIndex;
@@ -44,13 +45,23 @@ impl Session<'_> {
             };
             let (exchanges, error) = self.capture_with_retry(&url, &collection);
             let captured = error.is_none();
-            let title = captured
-                .then(|| self.process_capture(&url, &exchanges, &mut seen, &mut queue))
-                .flatten();
-            if let Err(error) =
-                collection.record(url, exchanges, error, title.as_deref(), via.as_deref())
-            {
+            let (title, processor_error) = if captured {
+                self.process_capture(&url, &exchanges, &mut seen, &mut queue)
+            } else {
+                (None, None)
+            };
+            let stop = processor_error.is_some();
+            if let Err(error) = collection.record(
+                url,
+                exchanges,
+                error.or(processor_error),
+                title.as_deref(),
+                via.as_deref(),
+            ) {
                 fatal_error = Some(error);
+                break;
+            }
+            if stop {
                 break;
             }
             capture_count += usize::from(captured);
@@ -81,8 +92,10 @@ impl Session<'_> {
         exchanges: &[Exchange],
         seen: &mut HashSet<String>,
         queue: &mut VecDeque<(String, Option<String>)>,
-    ) -> Option<String> {
-        let processor = self.processor.as_mut()?;
+    ) -> (Option<String>, Option<Error>) {
+        let Some(processor) = self.processor.as_mut() else {
+            return (None, None);
+        };
         let last = exchanges
             .last()
             .expect("a capture without an error has at least one exchange");
@@ -103,7 +116,18 @@ impl Session<'_> {
             links,
             recaptures,
             title,
+            error,
         } = processor.inspect(&capture);
+
+        if let Some(message) = error {
+            return (
+                title,
+                Some(Error::Processor {
+                    url: url.to_owned(),
+                    message,
+                }),
+            );
+        }
 
         for discovered in links {
             if seen.insert(discovered.clone()) {
@@ -114,7 +138,7 @@ impl Session<'_> {
             queue.push_back((recapture, Some(capture.final_url.to_owned())));
         }
 
-        title
+        (title, None)
     }
 
     /// Capture a URL, revalidating the collection's earlier captures and retrying transient
@@ -125,22 +149,65 @@ impl Session<'_> {
         collection: &Collection,
     ) -> (Vec<Exchange>, Option<Error>) {
         let attempts = self.retry.attempts.max(1);
-        let mut backoff = self.retry.initial_backoff;
+        let mut backoff = self.retry.initial_backoff.min(self.retry.max_backoff);
 
-        for _ in 1..attempts {
+        for attempt in 0..attempts {
             let (exchanges, error) = self.archiver.capture(url, Some(collection));
             match error {
-                Some(error) if is_transient(&error) => {
+                Some(error) if is_transient(&error) && attempt + 1 < attempts => {
                     drop((exchanges, error));
                     thread::sleep(backoff);
-                    backoff = (backoff * 2).min(self.retry.max_backoff);
+                    backoff = doubled_backoff(backoff, self.retry.max_backoff);
                 }
-                error => return (exchanges, error),
+                Some(error) => return (exchanges, Some(error)),
+                None => {
+                    let status = exchanges.last().map(|exchange| exchange.status);
+                    if status.is_some_and(is_retryable_status) {
+                        if attempt + 1 == attempts {
+                            return (
+                                exchanges,
+                                Some(Error::HttpStatus {
+                                    url: url.to_owned(),
+                                    status: status.expect("checked"),
+                                }),
+                            );
+                        }
+                        let delay = exchanges
+                            .last()
+                            .and_then(retry_after)
+                            .unwrap_or(backoff)
+                            .min(self.retry.max_backoff);
+                        thread::sleep(delay);
+                        backoff = doubled_backoff(backoff, self.retry.max_backoff);
+                    } else {
+                        return (exchanges, None);
+                    }
+                }
             }
         }
 
-        self.archiver.capture(url, Some(collection))
+        unreachable!("at least one capture attempt is made")
     }
+}
+
+fn doubled_backoff(backoff: Duration, maximum: Duration) -> Duration {
+    backoff.checked_mul(2).unwrap_or(maximum).min(maximum)
+}
+
+const fn is_retryable_status(status: u16) -> bool {
+    status == 429 || matches!(status, 500 | 502 | 503 | 504)
+}
+
+fn retry_after(exchange: &Exchange) -> Option<Duration> {
+    let value = exchange.validator("retry-after")?;
+    if let Ok(seconds) = value.trim().parse() {
+        return Some(Duration::from_secs(seconds));
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value.trim())
+        .ok()?
+        .to_utc();
+    (retry_at - chrono::Utc::now()).to_std().ok()
 }
 
 const fn is_transient(error: &Error) -> bool {

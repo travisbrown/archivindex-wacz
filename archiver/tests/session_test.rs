@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -290,6 +292,17 @@ impl CaptureProcessor for ObservingProcessor<'_> {
 /// Return a fixed set of links for every capture.
 struct FixedLinksProcessor {
     links: Vec<String>,
+}
+
+struct FailingProcessor;
+
+impl CaptureProcessor for FailingProcessor {
+    fn inspect(&mut self, _capture: &Capture<'_>) -> Inspection {
+        Inspection {
+            error: Some("cannot continue traversal".to_owned()),
+            ..Inspection::default()
+        }
+    }
 }
 
 impl CaptureProcessor for FixedLinksProcessor {
@@ -1271,6 +1284,114 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
             .count(),
         4
     );
+
+    Ok(())
+}
+
+#[test]
+fn session_retries_retryable_http_statuses() -> Result<(), Box<dyn std::error::Error>> {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = Arc::clone(&attempts);
+    let (port, server) = serve_with(2, move |head| {
+        let attempt = server_attempts.fetch_add(1, Ordering::Relaxed);
+        let response = if attempt == 0 {
+            plain(
+                "503 Service Unavailable",
+                "content-type: text/plain\r\nretry-after: 0",
+                "try later",
+            )
+        } else {
+            plain("200 OK", "content-type: text/plain", "complete")
+        };
+        (response, request_path(head).to_owned())
+    })?;
+    let url = format!("http://127.0.0.1:{port}/");
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("status-retry.warc.gz");
+
+    let summary = Session::new(
+        archiver(Config::default()),
+        "status-retry",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .retry(RetryConfig {
+        attempts: 2,
+        initial_backoff: Duration::from_secs(30),
+        max_backoff: Duration::from_secs(30),
+    })
+    .run()?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(requests, ["/", "/"]);
+    assert!(summary.is_complete());
+    assert_eq!(summary.seed_captures[0].status, 200);
+
+    Ok(())
+}
+
+#[test]
+fn session_reports_exhausted_http_status_retries() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve_with(2, |head| {
+        (
+            plain(
+                "503 Service Unavailable",
+                "content-type: text/plain",
+                "busy",
+            ),
+            request_path(head).to_owned(),
+        )
+    })?;
+    let url = format!("http://127.0.0.1:{port}/");
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("status-exhausted.warc.gz");
+
+    let summary = Session::new(
+        archiver(Config::default()),
+        "status-exhausted",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .retry(RetryConfig {
+        attempts: 2,
+        initial_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+    })
+    .run()?;
+    server.join().expect("server thread should not panic");
+
+    assert!(!summary.is_complete());
+    assert!(matches!(
+        summary.failures[0].error,
+        Error::HttpStatus { status: 503, .. }
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn processor_failure_stops_with_an_incomplete_summary() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve(1)?;
+    let url = format!("http://127.0.0.1:{port}/");
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("processor-failure.warc.gz");
+
+    let summary = Session::new(
+        archiver(Config::default()),
+        "processor-failure",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .processor(FailingProcessor)
+    .run()?;
+    server.join().expect("server thread should not panic");
+
+    assert!(!summary.is_complete());
+    assert!(matches!(summary.failures[0].error, Error::Processor { .. }));
 
     Ok(())
 }

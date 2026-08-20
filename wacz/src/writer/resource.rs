@@ -47,7 +47,11 @@ impl<W: Write + Seek> WaczWriter<W> {
     where
         F: FnOnce(&mut HashingWriter<&mut ZipWriter<W>>) -> Result<(), Error>,
     {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         self.validate_path(path)?;
+        self.poisoned = true;
         self.zip.start_file(path, options)?;
         let mut writer = HashingWriter::new(&mut self.zip);
         write(&mut writer)?;
@@ -58,6 +62,7 @@ impl<W: Write + Seek> WaczWriter<W> {
             hash,
             bytes,
         ));
+        self.poisoned = false;
         Ok(())
     }
 

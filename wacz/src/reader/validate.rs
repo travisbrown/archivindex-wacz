@@ -7,8 +7,7 @@
 //! central directory and the two metadata files; the fixity, content, and index layers each read
 //! complete members and are selected through [`ValidationOptions`].
 //!
-//! The ZIP layer indexes members by name, so an archive holding duplicate entry names cannot be
-//! detected here; the entry appearing last in the central directory is the one observed.
+//! Duplicate ZIP entry names are reported before name-based validation selects an entry.
 
 use std::collections::HashSet;
 use std::io::{Read, Seek};
@@ -92,6 +91,9 @@ impl ValidationReport {
 /// A required member that is absent from the ZIP container.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, thiserror::Error)]
 pub enum LayoutProblem {
+    /// More than one ZIP central-directory entry has the same file name.
+    #[error("duplicate ZIP member name: {0}")]
+    DuplicateMember(String),
     /// There is no `datapackage.json` manifest.
     #[error("missing required member: datapackage.json")]
     MissingDataPackage,
@@ -333,7 +335,12 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// Check that the members the specification requires are present.
     fn layout_problems(&self) -> Vec<LayoutProblem> {
-        let mut problems = Vec::new();
+        let mut problems = self
+            .duplicate_members
+            .iter()
+            .cloned()
+            .map(LayoutProblem::DuplicateMember)
+            .collect::<Vec<_>>();
 
         if self.archive.index_for_name(DATA_PACKAGE_PATH).is_none() {
             problems.push(LayoutProblem::MissingDataPackage);

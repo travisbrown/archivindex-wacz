@@ -109,6 +109,20 @@ fn stored_zip_of(members: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::erro
     Ok(zip.finish()?.into_inner())
 }
 
+struct FailingReader(bool);
+
+impl Read for FailingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.0 {
+            Err(std::io::Error::other("deliberate test read failure"))
+        } else {
+            self.0 = true;
+            buffer[..7].copy_from_slice(b"partial");
+            Ok(7)
+        }
+    }
+}
+
 /// A minimal valid manifest with no resources, for hand-rolled containers.
 const EMPTY_MANIFEST: &str =
     r#"{"profile": "data-package", "wacz_version": "1.1.1", "resources": []}"#;
@@ -644,6 +658,32 @@ fn create_refuses_an_existing_output() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn failed_member_write_poisons_writer_and_leaves_no_final_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("failed.wacz");
+    let mut writer = WaczWriter::create(&path)?;
+
+    assert!(!path.exists());
+    assert!(
+        writer
+            .add_resource("partial.bin", FailingReader(false))
+            .is_err()
+    );
+    assert!(matches!(
+        writer.add_resource("replacement.bin", &b"replacement"[..]),
+        Err(writer::Error::Poisoned)
+    ));
+    assert!(matches!(
+        writer.finish_unchecked(PackageMetadata::default()),
+        Err(writer::Error::Poisoned)
+    ));
+    assert!(!path.exists());
+
+    Ok(())
+}
+
+#[test]
 fn write_and_open_from_paths() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let warc_path = directory.path().join("data.warc");
@@ -651,6 +691,7 @@ fn write_and_open_from_paths() -> Result<(), Box<dyn std::error::Error>> {
 
     let wacz_path = directory.path().join("test.wacz");
     let mut writer = WaczWriter::create(&wacz_path)?;
+    assert!(!wacz_path.exists());
     writer.add_warc_from_path(&warc_path)?;
     writer.add_pages(&PageListHeader::default(), [])?;
     writer.finish_unchecked(PackageMetadata::default())?;
@@ -1182,6 +1223,37 @@ fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error:
     );
     assert!(report.manifest.is_empty());
     assert_eq!(report.fixity, None);
+
+    Ok(())
+}
+
+#[test]
+fn validate_reports_duplicate_zip_member_names() -> Result<(), Box<dyn std::error::Error>> {
+    let first = b"duplicate-a.txt";
+    let second = b"duplicate-b.txt";
+    let mut bytes = zip_of(&[
+        ("duplicate-a.txt", b"first"),
+        ("duplicate-b.txt", b"second"),
+    ])?;
+    let positions = bytes
+        .windows(second.len())
+        .enumerate()
+        .filter_map(|(position, value)| (value == second).then_some(position))
+        .collect::<Vec<_>>();
+    for position in positions {
+        bytes[position..position + first.len()].copy_from_slice(first);
+    }
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(Default::default())?;
+
+    assert!(
+        report
+            .layout
+            .contains(&reader::LayoutProblem::DuplicateMember(
+                "duplicate-a.txt".to_owned()
+            ))
+    );
+    assert!(!report.is_conformant());
 
     Ok(())
 }

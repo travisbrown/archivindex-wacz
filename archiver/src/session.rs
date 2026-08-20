@@ -61,6 +61,9 @@ pub struct Inspection {
     pub recaptures: Vec<String>,
     /// The page-list title for this capture, also retained in its WARC metadata record.
     pub title: Option<String>,
+    /// A failure that makes the traversal incomplete and stops the session after recording this
+    /// capture.
+    pub error: Option<String>,
 }
 
 /// Inspect successful captures to discover URLs, request recaptures, and supply titles.

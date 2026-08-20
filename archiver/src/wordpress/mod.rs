@@ -24,9 +24,8 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// are deleted during collection.
 ///
 /// A recapture the server answers with `304 Not Modified` repeats a page already read: it adds no
-/// IDs, and the sweep continues by the page count last advertised. Malformed JSON or a response
-/// outside the expected `WordPress` comments shape yields no title or next link, ending collection
-/// without panicking.
+/// IDs, and the sweep continues by the page count last advertised. Malformed JSON or an unexpected
+/// HTTP response makes the session incomplete instead of silently ending pagination.
 ///
 /// # Examples
 ///
@@ -167,6 +166,16 @@ impl CaptureProcessor for CommentCaptureProcessor {
             };
         }
 
+        if !matches!(capture.status, 200 | 304) {
+            return Inspection {
+                error: Some(format!(
+                    "unexpected WordPress comments response status {} on page {}",
+                    capture.status, self.page
+                )),
+                ..Inspection::default()
+            };
+        }
+
         // A revalidated recapture carries no batch and no fresh page count: the page is unchanged
         // since it was last read, so the sweep continues by the count last advertised.
         let revalidated = capture.status == 304;
@@ -174,7 +183,13 @@ impl CaptureProcessor for CommentCaptureProcessor {
             Vec::new()
         } else {
             let Ok(comments) = serde_json::from_slice::<Vec<Comment>>(capture.payload) else {
-                return Inspection::default();
+                return Inspection {
+                    error: Some(format!(
+                        "invalid WordPress comments response on page {}",
+                        self.page
+                    )),
+                    ..Inspection::default()
+                };
             };
             self.total_pages = capture
                 .header("x-wp-totalpages")
@@ -432,18 +447,32 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_empty_batches_do_not_continue() {
+    fn malformed_batches_fail_but_empty_batches_finish() {
         let mut processor =
             CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
                 .expect("a processor");
 
-        for payload in [&b"not json"[..], &b"[]"[..]] {
-            let inspection = processor.inspect(&capture(payload, 200, ONE_PAGE));
+        let malformed = processor.inspect(&capture(b"not json", 200, ONE_PAGE));
+        assert!(malformed.error.is_some());
+        assert_eq!(malformed.recaptures, Vec::<String>::new());
 
-            assert_eq!(inspection.title, None);
-            assert_eq!(inspection.links, Vec::<String>::new());
-            assert_eq!(inspection.recaptures, Vec::<String>::new());
-        }
+        let empty = processor.inspect(&capture(b"[]", 200, ONE_PAGE));
+        assert_eq!(empty.error, None);
+        assert_eq!(empty.title, None);
+        assert_eq!(empty.links, Vec::<String>::new());
+        assert_eq!(empty.recaptures, Vec::<String>::new());
+    }
+
+    #[test]
+    fn unexpected_status_fails_the_traversal() {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+                .expect("a processor");
+
+        let inspection = processor.inspect(&capture(b"{}", 403, b"HTTP/1.1 403 Forbidden\r\n\r\n"));
+
+        assert!(inspection.error.is_some());
+        assert_eq!(inspection.recaptures, Vec::<String>::new());
     }
 
     #[test]

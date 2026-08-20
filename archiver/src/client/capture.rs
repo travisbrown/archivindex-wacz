@@ -56,7 +56,7 @@ impl Exchange {
     }
 
     /// Return a readable response validator exactly as received.
-    pub(super) fn validator(&self, name: &str) -> Option<String> {
+    pub(crate) fn validator(&self, name: &str) -> Option<String> {
         response::header(&self.captured.response, name)
             .and_then(|value| std::str::from_utf8(value).ok())
             .map(str::to_owned)

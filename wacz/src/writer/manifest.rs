@@ -16,6 +16,9 @@ const SOFTWARE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERS
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write the manifest and digest files and finish the ZIP.
     pub fn finish(self, metadata: DataPackageBuilder) -> Result<W, Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         let mut missing = Vec::new();
         if !self
             .resources
@@ -50,10 +53,15 @@ impl<W: Write + Seek> WaczWriter<W> {
     /// construction should use [`Self::finish`]. Member paths and resource names are still checked
     /// when they are inserted.
     pub fn finish_unchecked(self, metadata: DataPackageBuilder) -> Result<W, Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         let Self {
             mut zip,
             resources,
             config,
+            publication,
+            poisoned: _,
         } = self;
         let mut package = metadata.into_data_package(resources);
         package.created.get_or_insert_with(Utc::now);
@@ -76,6 +84,17 @@ impl<W: Write + Seek> WaczWriter<W> {
             options_for(DATA_PACKAGE_DIGEST_PATH, config.zip_compression_level)?,
         )?;
         zip.write_all(&digest_bytes)?;
-        Ok(zip.finish()?)
+        let mut output = zip.finish()?;
+        output.flush()?;
+
+        if let Some(publication) = publication {
+            publication.temporary.as_file().sync_all()?;
+            publication
+                .temporary
+                .persist_noclobber(publication.target)
+                .map_err(|error| error.error)?;
+        }
+
+        Ok(output)
     }
 }

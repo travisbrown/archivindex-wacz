@@ -122,6 +122,14 @@ pub enum Error {
     /// An index entry omits normative CDXJ fields.
     #[error(transparent)]
     NonconformingIndex(#[from] crate::cdxj::MissingFields),
+    /// A previous member write failed after mutating the ZIP stream.
+    #[error("WACZ writer is unusable after a member write failure")]
+    Poisoned,
+}
+
+struct AtomicPublication {
+    temporary: tempfile::NamedTempFile,
+    target: PathBuf,
 }
 
 /// A WACZ assembler that tracks member digests and sizes for its final manifest.
@@ -129,6 +137,8 @@ pub struct WaczWriter<W: Write + Seek> {
     zip: ZipWriter<W>,
     resources: Vec<Resource<'static>>,
     config: WriterConfig,
+    publication: Option<AtomicPublication>,
+    poisoned: bool,
 }
 
 impl WaczWriter<BufWriter<File>> {
@@ -146,10 +156,25 @@ impl WaczWriter<BufWriter<File>> {
         if path.extension().and_then(|extension| extension.to_str()) != Some("wacz") {
             return Err(Error::InvalidWaczExtension(path.to_owned()));
         }
-        Ok(Self::with_config(
-            BufWriter::new(File::create_new(path)?),
-            config,
-        ))
+        if path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("output already exists: {}", path.display()),
+            )
+            .into());
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        let writer = BufWriter::new(temporary.reopen()?);
+        let mut wacz = Self::with_config(writer, config);
+        wacz.publication = Some(AtomicPublication {
+            temporary,
+            target: path.to_owned(),
+        });
+        Ok(wacz)
     }
 }
 
@@ -167,6 +192,8 @@ impl<W: Write + Seek> WaczWriter<W> {
             zip: ZipWriter::new(writer),
             resources: Vec::new(),
             config,
+            publication: None,
+            poisoned: false,
         }
     }
 

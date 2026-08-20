@@ -51,6 +51,22 @@ pub enum Error {
         #[source]
         source: http::uri::InvalidUri,
     },
+    /// An HTTP response status remained retryable after the configured attempts were exhausted.
+    #[error("HTTP status {status} after retries for {url}")]
+    HttpStatus {
+        /// The URL whose response remained unsuccessful.
+        url: String,
+        /// The final HTTP response status.
+        status: u16,
+    },
+    /// A capture processor could not complete its traversal.
+    #[error("capture processor failed for {url}: {message}")]
+    Processor {
+        /// The URL being inspected.
+        url: String,
+        /// The processor's description of the failure.
+        message: String,
+    },
     /// The configured `User-Agent` cannot be sent or recorded safely.
     #[error("invalid User-Agent header value: {0:?}")]
     InvalidUserAgent(String),

@@ -1,7 +1,8 @@
 //! Reading files from an existing WACZ.
 
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use archivindex_warc::io::read::WarcReader;
@@ -160,6 +161,7 @@ impl Fixity {
 /// this reader mutably and only one file can be read at once.
 pub struct WaczReader<R> {
     archive: ZipArchive<R>,
+    duplicate_members: Vec<String>,
 }
 
 impl WaczReader<BufReader<File>> {
@@ -172,8 +174,14 @@ impl WaczReader<BufReader<File>> {
 impl<R: Read + Seek> WaczReader<R> {
     /// Create a new reader, parsing the ZIP central directory.
     pub fn new(reader: R) -> Result<Self, Error> {
+        let archive = ZipArchive::new(reader)?;
+        let central_directory_start = archive.central_directory_start();
+        let mut reader = archive.into_inner();
+        let duplicate_members = duplicate_member_names(&mut reader, central_directory_start)?;
+
         Ok(Self {
             archive: ZipArchive::new(reader)?,
+            duplicate_members,
         })
     }
 
@@ -409,6 +417,43 @@ impl<R: Read + Seek> WaczReader<R> {
 
         Ok(bytes)
     }
+}
+
+/// Read raw central-directory entries because `zip` indexes them by name and therefore hides
+/// earlier entries when an archive contains duplicate names.
+fn duplicate_member_names<R: Read + Seek>(
+    reader: &mut R,
+    central_directory_start: u64,
+) -> Result<Vec<String>, std::io::Error> {
+    const CENTRAL_HEADER_SIZE: usize = 46;
+    const CENTRAL_HEADER_SIGNATURE: [u8; 4] = *b"PK\x01\x02";
+
+    reader.seek(SeekFrom::Start(central_directory_start))?;
+    let mut names = HashSet::<Vec<u8>>::new();
+    let mut reported = HashSet::<Vec<u8>>::new();
+    let mut duplicates = Vec::new();
+
+    loop {
+        let mut header = [0_u8; CENTRAL_HEADER_SIZE];
+        reader.read_exact(&mut header[..4])?;
+        if header[..4] != CENTRAL_HEADER_SIGNATURE {
+            break;
+        }
+        reader.read_exact(&mut header[4..])?;
+
+        let name_len = u16::from_le_bytes([header[28], header[29]]) as usize;
+        let extra_len = i64::from(u16::from_le_bytes([header[30], header[31]]));
+        let comment_len = i64::from(u16::from_le_bytes([header[32], header[33]]));
+        let mut name = vec![0_u8; name_len];
+        reader.read_exact(&mut name)?;
+        reader.seek(SeekFrom::Current(extra_len + comment_len))?;
+
+        if !names.insert(name.clone()) && reported.insert(name.clone()) {
+            duplicates.push(String::from_utf8_lossy(&name).into_owned());
+        }
+    }
+
+    Ok(duplicates)
 }
 
 /// The maximum capacity preallocated from an untrusted ZIP entry size.
