@@ -386,11 +386,11 @@ mod tests {
             [processor.first_comment_url()]
         );
         assert_eq!(processor.seen_ids.len(), 101);
-        assert!(
+        assert_eq!(
             processor
                 .inspect(&capture(&shifted_page, 200, ONE_PAGE))
-                .recaptures
-                .is_empty()
+                .recaptures,
+            Vec::<String>::new()
         );
 
         Ok(())

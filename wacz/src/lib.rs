@@ -13,13 +13,8 @@
 //! - [`pages`]: The `pages/pages.jsonl` page list format
 //! - [`reader`]: Reading the files in an existing WACZ
 //! - [`writer`]: Assembling a new WACZ file
-#![warn(
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    missing_docs,
-    rust_2018_idioms
-)]
+#![deny(missing_docs)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
 #![forbid(unsafe_code)]
 

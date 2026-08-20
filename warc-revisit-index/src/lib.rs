@@ -32,6 +32,9 @@
 //! assert!(index.lookup_resource(&key)?.is_none());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+#![deny(missing_docs)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
+#![forbid(unsafe_code)]
 
 mod db;
 mod error;

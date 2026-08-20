@@ -35,13 +35,8 @@
 //! * [`config`]: client configuration
 //! * [`session`]: queue-driven crawl sessions
 //! * [`wordpress`]: capturing and reading resources from the `WordPress` REST API
-#![warn(
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    missing_docs,
-    rust_2018_idioms
-)]
+#![deny(missing_docs)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
 #![forbid(unsafe_code)]
 

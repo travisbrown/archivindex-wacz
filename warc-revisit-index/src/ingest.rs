@@ -2,7 +2,7 @@
 
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::Extension;
-use archivindex_warc::record::header::RevisitProfile;
+use archivindex_warc::record::header::{ResponseHeader, RevisitHeader, RevisitProfile};
 use rusqlite::Connection;
 
 use crate::db::{insert_payload, lookup_payload, lookup_resource, update_resource};
@@ -25,6 +25,11 @@ impl Index {
     /// `identical-payload-digest` revisits resolve their resource state to an existing canonical
     /// source or their explicit `WARC-Refers-To` fields, while `server-not-modified` revisits
     /// preserve prior representation identity and merge only validators.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed WARC/HTTP metadata, unsupported or malformed digests,
+    /// malformed persisted state, or a SQLite query failure.
     pub fn index_record<E: Extension>(
         &self,
         record: &Record<E>,
@@ -35,6 +40,11 @@ impl Index {
 
 impl Transaction<'_> {
     /// Index one semantic WARC record within this bulk transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed WARC/HTTP metadata, unsupported or malformed digests,
+    /// malformed persisted state, or a SQLite query failure.
     pub fn index_record<E: Extension>(
         &self,
         record: &Record<E>,
@@ -49,137 +59,152 @@ fn index_record<E: Extension>(
 ) -> Result<IndexRecordOutcome, Error> {
     match record {
         Record::Response { header, body } if body.starts_with(b"HTTP/") => {
-            let metadata = http_metadata(body)?;
-            let payload_digest = header.payload.payload_digest.clone();
-            let payload_length = record
-                .payload_bytes()
-                .map_err(|error| Error::MalformedWarcPayload(error.to_string()))?
-                .map(|payload| payload.len() as u64);
+            index_response(connection, record, header, body)
+        }
+        Record::Revisit { header, body } => index_revisit(connection, header, body),
+        _ => Ok(IndexRecordOutcome::default()),
+    }
+}
 
-            let payload_inserted = if let (Some(payload_digest), Some(payload_length)) =
-                (payload_digest.as_ref(), payload_length)
-            {
-                insert_payload(
+fn index_response<E: Extension>(
+    connection: &Connection,
+    record: &Record<E>,
+    header: &ResponseHeader<E>,
+    body: &[u8],
+) -> Result<IndexRecordOutcome, Error> {
+    let metadata = http_metadata(body)?;
+    let payload_digest = header.payload.payload_digest.clone();
+    let payload_length = record
+        .payload_bytes()
+        .map_err(|error| Error::MalformedWarcPayload(error.to_string()))?
+        .map(|payload| payload.len() as u64);
+
+    let payload_inserted = if let (Some(payload_digest), Some(payload_length)) =
+        (payload_digest.as_ref(), payload_length)
+    {
+        insert_payload(
+            connection,
+            &RevisitTarget {
+                payload_digest: payload_digest.clone(),
+                payload_length: Some(payload_length),
+                record_id: header.core.record_id.clone(),
+                target_uri: header.target_uri.clone(),
+                warc_date: header.core.date,
+            },
+        )?
+    } else {
+        false
+    };
+
+    let resource_updated = if metadata.status == 200 {
+        let key = ResourceKey::new(header.target_uri.clone());
+        update_resource(
+            connection,
+            &key,
+            ResourceStateUpdate::representation(
+                metadata.etag,
+                metadata.last_modified,
+                payload_digest,
+                Some(header.core.record_id.clone()),
+                Some(header.core.date),
+            ),
+        )?
+        .is_some()
+    } else {
+        false
+    };
+
+    Ok(IndexRecordOutcome {
+        payload_inserted,
+        resource_updated,
+    })
+}
+
+fn index_revisit<E: Extension>(
+    connection: &Connection,
+    header: &RevisitHeader<E>,
+    body: &[u8],
+) -> Result<IndexRecordOutcome, Error> {
+    let metadata = if body.is_empty() {
+        HttpMetadata::default()
+    } else if body.starts_with(b"HTTP/") {
+        http_metadata(body)?
+    } else {
+        return Err(Error::MalformedHttpResponse(
+            "revisit block is not an HTTP response head",
+        ));
+    };
+    let key = ResourceKey::new(header.target_uri.clone());
+
+    let resource_updated = match &header.profile {
+        RevisitProfile::IdenticalPayloadDigest(_) => {
+            let digest =
+                header
+                    .payload
+                    .payload_digest
+                    .as_ref()
+                    .ok_or(Error::MalformedHttpResponse(
+                        "identical-payload-digest revisit has no payload digest",
+                    ))?;
+            let canonical = lookup_payload(connection, digest)?;
+            let (record_id, warc_date) = canonical.as_ref().map_or_else(
+                || {
+                    (
+                        header
+                            .refers_to
+                            .clone()
+                            .or_else(|| Some(header.core.record_id.clone())),
+                        header.refers_to_date.or(Some(header.core.date)),
+                    )
+                },
+                |target| (Some(target.record_id.clone()), Some(target.warc_date)),
+            );
+
+            update_resource(
+                connection,
+                &key,
+                ResourceStateUpdate::representation(
+                    metadata.etag,
+                    metadata.last_modified,
+                    Some(digest.clone()),
+                    record_id,
+                    warc_date,
+                ),
+            )?
+            .is_some()
+        }
+        RevisitProfile::ServerNotModified(_) => {
+            if lookup_resource(connection, &key)?.is_some() {
+                update_resource(
                     connection,
-                    &RevisitTarget {
-                        payload_digest: payload_digest.clone(),
-                        payload_length: Some(payload_length),
-                        record_id: header.core.record_id.clone(),
-                        target_uri: header.target_uri.clone(),
-                        warc_date: header.core.date,
-                    },
+                    &key,
+                    ResourceStateUpdate::not_modified(metadata.etag, metadata.last_modified),
                 )?
-            } else {
-                false
-            };
-
-            let resource_updated = if metadata.status == 200 {
-                let key = ResourceKey::new(header.target_uri.clone());
+                .is_some()
+            } else if header.refers_to.is_some() && header.refers_to_date.is_some() {
                 update_resource(
                     connection,
                     &key,
                     ResourceStateUpdate::representation(
                         metadata.etag,
                         metadata.last_modified,
-                        payload_digest,
-                        Some(header.core.record_id.clone()),
-                        Some(header.core.date),
+                        header.payload.payload_digest.clone(),
+                        header.refers_to.clone(),
+                        header.refers_to_date,
                     ),
                 )?
                 .is_some()
             } else {
                 false
-            };
-
-            Ok(IndexRecordOutcome {
-                payload_inserted,
-                resource_updated,
-            })
+            }
         }
-        Record::Revisit { header, body } => {
-            let metadata = if body.is_empty() {
-                HttpMetadata::default()
-            } else if body.starts_with(b"HTTP/") {
-                http_metadata(body)?
-            } else {
-                return Err(Error::MalformedHttpResponse(
-                    "revisit block is not an HTTP response head",
-                ));
-            };
-            let key = ResourceKey::new(header.target_uri.clone());
+        RevisitProfile::Other(_) => false,
+    };
 
-            let resource_updated = match &header.profile {
-                RevisitProfile::IdenticalPayloadDigest(_) => {
-                    let digest = header.payload.payload_digest.as_ref().ok_or(
-                        Error::MalformedHttpResponse(
-                            "identical-payload-digest revisit has no payload digest",
-                        ),
-                    )?;
-                    let canonical = lookup_payload(connection, digest)?;
-                    let (record_id, warc_date) = canonical.as_ref().map_or_else(
-                        || {
-                            (
-                                header
-                                    .refers_to
-                                    .clone()
-                                    .or_else(|| Some(header.core.record_id.clone())),
-                                header.refers_to_date.or(Some(header.core.date)),
-                            )
-                        },
-                        |target| (Some(target.record_id.clone()), Some(target.warc_date)),
-                    );
-
-                    update_resource(
-                        connection,
-                        &key,
-                        ResourceStateUpdate::representation(
-                            metadata.etag,
-                            metadata.last_modified,
-                            Some(digest.clone()),
-                            record_id,
-                            warc_date,
-                        ),
-                    )?
-                    .is_some()
-                }
-                RevisitProfile::ServerNotModified(_) => {
-                    if lookup_resource(connection, &key)?.is_some() {
-                        update_resource(
-                            connection,
-                            &key,
-                            ResourceStateUpdate::not_modified(
-                                metadata.etag,
-                                metadata.last_modified,
-                            ),
-                        )?
-                        .is_some()
-                    } else if header.refers_to.is_some() && header.refers_to_date.is_some() {
-                        update_resource(
-                            connection,
-                            &key,
-                            ResourceStateUpdate::representation(
-                                metadata.etag,
-                                metadata.last_modified,
-                                header.payload.payload_digest.clone(),
-                                header.refers_to.clone(),
-                                header.refers_to_date,
-                            ),
-                        )?
-                        .is_some()
-                    } else {
-                        false
-                    }
-                }
-                RevisitProfile::Other(_) => false,
-            };
-
-            Ok(IndexRecordOutcome {
-                payload_inserted: false,
-                resource_updated,
-            })
-        }
-        _ => Ok(IndexRecordOutcome::default()),
-    }
+    Ok(IndexRecordOutcome {
+        payload_inserted: false,
+        resource_updated,
+    })
 }
 
 #[derive(Default)]
@@ -199,7 +224,7 @@ fn http_metadata(message: &[u8]) -> Result<HttpMetadata, Error> {
         .unwrap_or(status_line)
         .strip_suffix(b"\r")
         .unwrap_or_else(|| status_line.strip_suffix(b"\n").unwrap_or(status_line));
-    let mut parts = status_line.split(|byte| byte.is_ascii_whitespace());
+    let mut parts = status_line.split(u8::is_ascii_whitespace);
     let version = parts
         .next()
         .filter(|part| part.starts_with(b"HTTP/"))
