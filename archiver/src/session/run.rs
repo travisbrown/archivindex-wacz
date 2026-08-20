@@ -7,7 +7,7 @@ use std::thread;
 use archivindex_warc::record::payload;
 
 use super::{Capture, Inspection, Session, SessionSummary};
-use crate::client::{Error, Exchange};
+use crate::client::{Collection, Error, Exchange};
 use crate::response;
 
 impl Session<'_> {
@@ -36,7 +36,7 @@ impl Session<'_> {
             let Some((url, via)) = queue.pop_front() else {
                 break;
             };
-            let (exchanges, error) = self.capture_with_retry(&url);
+            let (exchanges, error) = self.capture_with_retry(&url, &collection);
             let captured = error.is_none();
             let title = captured
                 .then(|| self.process_capture(&url, &exchanges, &mut seen, &mut queue))
@@ -113,13 +113,18 @@ impl Session<'_> {
         title
     }
 
-    /// Capture a URL, retrying transient failures with exponential backoff.
-    fn capture_with_retry(&self, url: &str) -> (Vec<Exchange>, Option<Error>) {
+    /// Capture a URL, revalidating the collection's earlier captures and retrying transient
+    /// failures with exponential backoff.
+    fn capture_with_retry(
+        &self,
+        url: &str,
+        collection: &Collection,
+    ) -> (Vec<Exchange>, Option<Error>) {
         let attempts = self.retry.attempts.max(1);
         let mut backoff = self.retry.initial_backoff;
 
         for _ in 1..attempts {
-            let (exchanges, error) = self.archiver.capture(url);
+            let (exchanges, error) = self.archiver.capture(url, Some(collection));
             match error {
                 Some(error) if is_transient(&error) => {
                     drop((exchanges, error));
@@ -130,7 +135,7 @@ impl Session<'_> {
             }
         }
 
-        self.archiver.capture(url)
+        self.archiver.capture(url, Some(collection))
     }
 }
 

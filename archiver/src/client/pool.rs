@@ -33,7 +33,7 @@ impl Archiver {
                             .ok()
                             .and_then(|receiver| receiver.recv().ok());
                         let Some((index, url)) = task else { return };
-                        let (exchanges, error) = self.capture(&url);
+                        let (exchanges, error) = self.capture(&url, None);
 
                         if outcome_sender.send((index, url, exchanges, error)).is_err() {
                             return;

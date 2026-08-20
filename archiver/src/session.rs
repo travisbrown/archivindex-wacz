@@ -1,8 +1,10 @@
 //! Queue-driven crawl sessions written to a single WARC file.
 //!
 //! A processor may inspect successful responses, title pages, discover deduplicated URLs, and
-//! deliberately request recaptures. Sessions retry transient failures and preserve completed work
-//! when a later recording failure ends the crawl.
+//! deliberately request recaptures. A recapture of a URL whose earlier response carried an `ETag`
+//! or `Last-Modified` validator is requested conditionally, so that the server may answer `304 Not
+//! Modified` instead of repeating the payload. Sessions retry transient failures and preserve
+//! completed work when a later recording failure ends the crawl.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -27,9 +29,11 @@ pub struct Capture<'a> {
     pub url: &'a str,
     /// The final URL after redirects.
     pub final_url: &'a str,
-    /// The final HTTP status.
+    /// The final HTTP status: `304` when the server revalidated a recapture instead of repeating
+    /// its payload.
     pub status: u16,
-    /// The decoded entity body, or stored body bytes when decoding fails.
+    /// The decoded entity body, or stored body bytes when decoding fails. Empty for a revalidated
+    /// recapture, whose unchanged payload the earlier capture holds.
     pub payload: &'a [u8],
     /// The complete recorded HTTP response.
     pub response: &'a [u8],
@@ -51,7 +55,9 @@ pub struct Inspection {
     pub links: Vec<String>,
     /// URLs appended without deduplication for validation workflows.
     ///
-    /// A processor that returns recaptures forever creates an infinite crawl.
+    /// A recapture is requested conditionally on the validators of the URL's earlier response, and
+    /// a `304 Not Modified` answer reaches the processor with an empty payload. A processor that
+    /// returns recaptures forever creates an infinite crawl.
     pub recaptures: Vec<String>,
     /// The page-list title for this capture.
     pub title: Option<String>,

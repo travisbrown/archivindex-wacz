@@ -23,8 +23,10 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// after construction from moving the snapshot. Already captured IDs remain retained even if they
 /// are deleted during collection.
 ///
-/// Malformed JSON or a response outside the expected `WordPress` comments shape yields no title or
-/// next link, ending collection without panicking.
+/// A recapture the server answers with `304 Not Modified` repeats a page already read: it adds no
+/// IDs, and the sweep continues by the page count last advertised. Malformed JSON or a response
+/// outside the expected `WordPress` comments shape yields no title or next link, ending collection
+/// without panicking.
 ///
 /// # Examples
 ///
@@ -62,6 +64,8 @@ pub struct CommentCaptureProcessor {
     seen_ids: HashSet<u64>,
     page: usize,
     new_in_sweep: usize,
+    /// The page count most recently advertised by `X-WP-TotalPages`.
+    total_pages: Option<usize>,
 }
 
 impl CommentCaptureProcessor {
@@ -101,6 +105,7 @@ impl CommentCaptureProcessor {
             seen_ids: HashSet::new(),
             page: 1,
             new_in_sweep: 0,
+            total_pages: None,
         })
     }
 
@@ -162,8 +167,19 @@ impl CaptureProcessor for CommentCaptureProcessor {
             };
         }
 
-        let Ok(comments) = serde_json::from_slice::<Vec<Comment>>(capture.payload) else {
-            return Inspection::default();
+        // A revalidated recapture carries no batch and no fresh page count: the page is unchanged
+        // since it was last read, so the sweep continues by the count last advertised.
+        let revalidated = capture.status == 304;
+        let comments = if revalidated {
+            Vec::new()
+        } else {
+            let Ok(comments) = serde_json::from_slice::<Vec<Comment>>(capture.payload) else {
+                return Inspection::default();
+            };
+            self.total_pages = capture
+                .header("x-wp-totalpages")
+                .and_then(|value| value.parse::<usize>().ok());
+            comments
         };
 
         let title = self.title(&comments);
@@ -172,12 +188,11 @@ impl CaptureProcessor for CommentCaptureProcessor {
             .filter(|comment| self.seen_ids.insert(comment.id))
             .count();
 
-        let total_pages = capture
-            .header("x-wp-totalpages")
-            .and_then(|value| value.parse::<usize>().ok());
-        let has_next = total_pages.map_or(comments.len() == COMMENTS_PER_PAGE, |total| {
-            self.page < total
-        });
+        let has_next = self
+            .total_pages
+            .map_or(comments.len() == COMMENTS_PER_PAGE, |total| {
+                self.page < total
+            });
         let recaptures = if has_next {
             self.page += 1;
             vec![self.comment_url(self.page)]
@@ -238,6 +253,7 @@ mod tests {
     const ONE_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
     const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 2\r\n\r\n";
     const INVALID_PAGE: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
+    const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
 
     fn capture<'a>(payload: &'a [u8], status: u16, response: &'a [u8]) -> Capture<'a> {
         Capture {
@@ -376,6 +392,41 @@ mod tests {
                 .recaptures
                 .is_empty()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn revalidated_pages_continue_a_sweep_by_the_last_advertised_page_count()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+                .expect("a processor");
+        let page_one = serde_json::to_vec(
+            &(1..=100)
+                .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
+                .collect::<Vec<_>>(),
+        )?;
+        let page_two =
+            serde_json::to_vec(&[json!({"id": 101, "date_gmt": "2020-11-30T12:30:00"})])?;
+        let page_two_url = "https://jihadwatch.org/wp-json/wp/v2/comments?\
+            before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100";
+
+        processor.inspect(&capture(&page_one, 200, TWO_PAGES));
+        processor.inspect(&capture(&page_two, 200, TWO_PAGES));
+
+        // The validation sweep finds both pages unchanged: the first revalidated page still leads
+        // to the second, and the second ends the sweep with nothing new to validate.
+        let first = processor.inspect(&capture(b"", 304, NOT_MODIFIED));
+        assert_eq!(first.title, None);
+        assert_eq!(first.recaptures, [page_two_url]);
+        assert_eq!(
+            processor
+                .inspect(&capture(b"", 304, NOT_MODIFIED))
+                .recaptures,
+            Vec::<String>::new()
+        );
+        assert_eq!(processor.seen_ids.len(), 101);
 
         Ok(())
     }

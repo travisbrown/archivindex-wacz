@@ -13,6 +13,7 @@ use archivindex_wacz::writer::{PackageMetadata, WaczWriter};
 use archivindex_warc::io::write::WarcWriter;
 use fluent_uri::Uri;
 
+use super::capture::Original;
 use super::warc_mapping::{
     RevisitTarget, WarcinfoOptions, warcinfo_record, write_exchange, write_record,
 };
@@ -34,6 +35,9 @@ pub struct Collection {
     extra_page_list: Vec<Page<'static>>,
     /// Stored `response` records eligible as revisit originals, by payload digest.
     revisits: HashMap<Sha256Digest, RevisitTarget>,
+    /// The latest complete capture carrying validators for each target URI, which a later capture
+    /// of the URI asks the server to revalidate.
+    originals: HashMap<String, Original>,
 }
 
 impl Collection {
@@ -58,13 +62,20 @@ impl Collection {
             page_list: Vec::new(),
             extra_page_list: Vec::new(),
             revisits: HashMap::new(),
+            originals: HashMap::new(),
         })
+    }
+
+    /// The earlier capture of a target URI that a new capture may ask the server to revalidate.
+    pub(super) fn original(&self, url: &str) -> Option<&Original> {
+        self.originals.get(url)
     }
 
     /// Record every captured hop and add either a page summary or failure.
     ///
-    /// A hop whose payload digest matches an earlier capture in this collection is stored as a
-    /// `revisit` record referencing the original, instead of repeating the payload.
+    /// A hop whose payload digest matches an earlier capture in this collection, or whose `304 Not
+    /// Modified` confirms an earlier capture's payload unchanged, is stored as a `revisit` record
+    /// referencing the original, instead of repeating the payload.
     pub(crate) fn record(
         &mut self,
         url: String,
@@ -84,6 +95,7 @@ impl Collection {
                 exchange.payload_length,
             ));
             let key = exchange.revisit_key();
+            let original = exchange.original();
             let (item, target) = write_exchange(
                 &mut self.warc,
                 exchange,
@@ -93,6 +105,9 @@ impl Collection {
                 via.filter(|_| hop == 0),
                 key.and_then(|key| self.revisits.get(&key)),
             )?;
+            if let Some(original) = original {
+                self.originals.insert(item.fields.url.to_string(), original);
+            }
             self.items.push(item);
             if let (Some(key), Some(target)) = (key, target) {
                 self.revisits.insert(key, target);

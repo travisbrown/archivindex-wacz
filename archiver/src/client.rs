@@ -122,7 +122,8 @@ pub struct Failure {
 /// An HTTP client that captures lists of URLs in WACZ files.
 ///
 /// Each URL is fetched synchronously over HTTP/1.1. Redirect hops, wire-format messages, capture
-/// metadata, CDXJ entries, and page-list entries are all retained.
+/// metadata, CDXJ entries, and page-list entries are all retained. One-shot lists request every
+/// URL unconditionally; only crawl sessions revalidate earlier captures.
 #[derive(Clone, Debug)]
 pub struct Archiver {
     recorder: Recorder,
@@ -229,7 +230,7 @@ impl Archiver {
         if concurrency == 1 {
             for url in urls {
                 let url = url.as_ref();
-                let (exchanges, error) = self.capture(url);
+                let (exchanges, error) = self.capture(url, None);
                 collection.record(url.to_owned(), exchanges, error, None, false, None)?;
             }
         } else {
