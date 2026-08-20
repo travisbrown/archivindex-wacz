@@ -60,7 +60,8 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
 
 /// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
 fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
-    let processor = CommentCaptureProcessor::new(&options.base_url)?;
+    let processor =
+        CommentCaptureProcessor::new(&options.base_url)?.second_sweep(options.second_sweep);
     let first_url = processor.first_comment_url();
     let retry_defaults = RetryConfig::default();
     let retry = RetryConfig {
@@ -273,6 +274,9 @@ struct ArchiveWpCommentsOptions {
     /// Stop successfully after capturing this many comment batches.
     #[clap(long)]
     limit: Option<usize>,
+    /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
+    #[clap(long)]
+    second_sweep: bool,
     /// Total attempts for a transiently failing URL (defaults to 3; zero is treated as one).
     #[clap(long)]
     retry_attempts: Option<usize>,
@@ -384,6 +388,7 @@ mod tests {
             "crawl-state.sqlite3",
             "--limit",
             "12",
+            "--second-sweep",
         ])
         .expect("valid options");
 
@@ -400,6 +405,7 @@ mod tests {
             Some(PathBuf::from("crawl-state.sqlite3"))
         );
         assert_eq!(options.limit, Some(12));
+        assert!(options.second_sweep);
     }
 
     #[test]

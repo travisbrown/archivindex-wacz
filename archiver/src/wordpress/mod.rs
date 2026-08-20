@@ -17,11 +17,12 @@ const COMMENTS_PER_PAGE: usize = 100;
 ///
 /// The processor takes a snapshot cutoff when it is constructed. Start a crawl with
 /// [`first_comment_url`](Self::first_comment_url), which requests comments in ascending ID order up
-/// to that cutoff. It walks every page advertised by `X-WP-TotalPages`, then repeats complete
-/// sweeps until one finds no new comment IDs. Rechecking earlier pages closes the gap left when
-/// deletions shift comments backward during a sweep; the fixed cutoff prevents ordinary additions
-/// after construction from moving the snapshot. Already captured IDs remain retained even if they
-/// are deleted during collection.
+/// to that cutoff. It walks every page advertised by `X-WP-TotalPages` and normally finishes after
+/// one sweep when `X-WP-Total` is stable and equals the number of distinct comment IDs seen. A
+/// second sweep runs when those consistency checks fail, or when explicitly requested with
+/// [`second_sweep`](Self::second_sweep). The fixed cutoff prevents ordinary additions after
+/// construction from moving the snapshot. Already captured IDs remain retained even if they are
+/// deleted during collection.
 ///
 /// A recapture the server answers with `304 Not Modified` repeats a page already read: it adds no
 /// IDs, and the sweep continues by the page count last advertised. Malformed JSON or an unexpected
@@ -62,7 +63,11 @@ pub struct CommentCaptureProcessor {
     before: DateTime<Utc>,
     seen_ids: HashSet<u64>,
     page: usize,
-    new_in_sweep: usize,
+    sweeps_completed: usize,
+    force_second_sweep: bool,
+    total_comments: Option<usize>,
+    previous_sweep_total: Option<usize>,
+    totals_consistent: bool,
     /// The page count most recently advertised by `X-WP-TotalPages`.
     total_pages: Option<usize>,
 }
@@ -103,9 +108,20 @@ impl CommentCaptureProcessor {
             before,
             seen_ids: HashSet::new(),
             page: 1,
-            new_in_sweep: 0,
+            sweeps_completed: 0,
+            force_second_sweep: false,
+            total_comments: None,
+            previous_sweep_total: None,
+            totals_consistent: true,
             total_pages: None,
         })
+    }
+
+    /// Request a validation sweep even when the first sweep's total is consistent.
+    #[must_use]
+    pub const fn second_sweep(mut self, enabled: bool) -> Self {
+        self.force_second_sweep = enabled;
+        self
     }
 
     /// Build one page URL, retaining the snapshot cutoff on every request.
@@ -121,15 +137,41 @@ impl CommentCaptureProcessor {
         url.into()
     }
 
-    /// Finish a sweep, restarting from page one only when the sweep found unseen IDs.
-    fn finish_sweep(&mut self) -> Vec<String> {
+    /// Finish a sweep, optionally scheduling one validation sweep.
+    fn finish_sweep(&mut self) -> Inspection {
+        self.sweeps_completed += 1;
         self.page = 1;
 
-        if std::mem::take(&mut self.new_in_sweep) == 0 {
-            Vec::new()
-        } else {
-            vec![self.comment_url(1)]
+        let total = self.total_comments.or(self.previous_sweep_total);
+        let counts_match = self.totals_consistent && total == Some(self.seen_ids.len());
+        if self.sweeps_completed == 1 && (self.force_second_sweep || !counts_match) {
+            self.previous_sweep_total = self.total_comments;
+            self.total_comments = None;
+            self.totals_consistent = true;
+            return Inspection {
+                recaptures: vec![self.comment_url(1)],
+                ..Inspection::default()
+            };
         }
+
+        if !counts_match {
+            return Inspection {
+                error: Some(format!(
+                    "WordPress reported {} comments after sweep {}, but {} distinct IDs were captured{}",
+                    total.map_or_else(|| "no total".to_owned(), |value| value.to_string()),
+                    self.sweeps_completed,
+                    self.seen_ids.len(),
+                    if self.totals_consistent {
+                        ""
+                    } else {
+                        " and totals changed during the sweep"
+                    }
+                )),
+                ..Inspection::default()
+            };
+        }
+
+        Inspection::default()
     }
 
     /// Title a parsed comment batch by its ID and GMT date ranges.
@@ -160,10 +202,7 @@ impl CaptureProcessor for CommentCaptureProcessor {
         // reports that as a 400 `rest_post_invalid_page_number`; treat it as the end of this sweep
         // and validate again from page one when the sweep found anything new.
         if capture.status == 400 && self.page > 1 {
-            return Inspection {
-                recaptures: self.finish_sweep(),
-                ..Inspection::default()
-            };
+            return self.finish_sweep();
         }
 
         if !matches!(capture.status, 200 | 304) {
@@ -191,6 +230,25 @@ impl CaptureProcessor for CommentCaptureProcessor {
                     ..Inspection::default()
                 };
             };
+            let Some(total_comments) = capture
+                .header("x-wp-total")
+                .and_then(|value| value.parse::<usize>().ok())
+            else {
+                return Inspection {
+                    error: Some(format!(
+                        "missing or invalid X-WP-Total on WordPress comments page {}",
+                        self.page
+                    )),
+                    ..Inspection::default()
+                };
+            };
+            if self
+                .total_comments
+                .is_some_and(|total| total != total_comments)
+            {
+                self.totals_consistent = false;
+            }
+            self.total_comments = Some(total_comments);
             self.total_pages = capture
                 .header("x-wp-totalpages")
                 .and_then(|value| value.parse::<usize>().ok());
@@ -198,28 +256,25 @@ impl CaptureProcessor for CommentCaptureProcessor {
         };
 
         let title = self.title(&comments);
-        self.new_in_sweep += comments
-            .iter()
-            .filter(|comment| self.seen_ids.insert(comment.id))
-            .count();
+        self.seen_ids
+            .extend(comments.iter().map(|comment| comment.id));
 
         let has_next = self
             .total_pages
             .map_or(comments.len() == COMMENTS_PER_PAGE, |total| {
                 self.page < total
             });
-        let recaptures = if has_next {
+        let mut inspection = if has_next {
             self.page += 1;
-            vec![self.comment_url(self.page)]
+            Inspection {
+                recaptures: vec![self.comment_url(self.page)],
+                ..Inspection::default()
+            }
         } else {
             self.finish_sweep()
         };
-
-        Inspection {
-            recaptures,
-            title,
-            ..Inspection::default()
-        }
+        inspection.title = title;
+        inspection
     }
 }
 
@@ -265,8 +320,9 @@ mod tests {
             .expect("a test timestamp")
     }
 
-    const ONE_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
-    const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 2\r\n\r\n";
+    const EMPTY_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 0\r\nX-WP-TotalPages: 1\r\n\r\n";
+    const ONE_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 100\r\nX-WP-TotalPages: 1\r\n\r\n";
+    const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 101\r\nX-WP-TotalPages: 2\r\n\r\n";
     const INVALID_PAGE: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
     const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
 
@@ -316,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn more_than_one_page_at_one_timestamp_is_collected_and_validated()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn matching_total_finishes_after_one_complete_sweep() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut processor =
             CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
                 .expect("a processor");
@@ -336,28 +392,14 @@ mod tests {
             ["https://jihadwatch.org/wp-json/wp/v2/comments?\
                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
-        // Finding ID 101 at the end of the first sweep starts a validation sweep.
-        assert_eq!(
-            processor
-                .inspect(&capture(&page_two, 200, TWO_PAGES))
-                .recaptures,
-            [processor.first_comment_url()]
-        );
-        assert_eq!(processor.seen_ids.len(), 101);
-
-        assert_eq!(
-            processor
-                .inspect(&capture(&page_one, 200, TWO_PAGES))
-                .recaptures
-                .len(),
-            1
-        );
+        // A stable total matching the 101 distinct IDs makes the first sweep sufficient.
         assert_eq!(
             processor
                 .inspect(&capture(&page_two, 200, TWO_PAGES))
                 .recaptures,
             Vec::<String>::new()
         );
+        assert_eq!(processor.seen_ids.len(), 101);
 
         Ok(())
     }
@@ -393,20 +435,11 @@ mod tests {
                 .recaptures,
             [processor.first_comment_url()]
         );
-        // The repeated first page now exposes ID 101, which shifted backward.
-        assert_eq!(
-            processor
-                .inspect(&capture(&shifted_page, 200, ONE_PAGE))
-                .recaptures,
-            [processor.first_comment_url()]
-        );
+        // The repeated first page now exposes ID 101, but the retained deleted ID means the
+        // reported total still cannot account for every distinct ID observed.
+        let validation = processor.inspect(&capture(&shifted_page, 200, ONE_PAGE));
         assert_eq!(processor.seen_ids.len(), 101);
-        assert_eq!(
-            processor
-                .inspect(&capture(&shifted_page, 200, ONE_PAGE))
-                .recaptures,
-            Vec::<String>::new()
-        );
+        assert!(validation.error.is_some());
 
         Ok(())
     }
@@ -416,7 +449,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut processor =
             CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
-                .expect("a processor");
+                .expect("a processor")
+                .second_sweep(true);
         let page_one = serde_json::to_vec(
             &(1..=100)
                 .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
@@ -456,11 +490,41 @@ mod tests {
         assert!(malformed.error.is_some());
         assert_eq!(malformed.recaptures, Vec::<String>::new());
 
-        let empty = processor.inspect(&capture(b"[]", 200, ONE_PAGE));
+        let empty = processor.inspect(&capture(b"[]", 200, EMPTY_PAGE));
         assert_eq!(empty.error, None);
         assert_eq!(empty.title, None);
         assert_eq!(empty.links, Vec::<String>::new());
         assert_eq!(empty.recaptures, Vec::<String>::new());
+    }
+
+    #[test]
+    fn total_mismatch_requests_one_second_sweep_then_fails_incomplete() {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+                .expect("a processor");
+        let payload = br#"[{"id": 1, "date_gmt": "2020-11-30T12:30:00"}]"#;
+        let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 2\r\nX-WP-TotalPages: 1\r\n\r\n";
+
+        let first = processor.inspect(&capture(payload, 200, response));
+        assert_eq!(first.recaptures, [processor.first_comment_url()]);
+        assert_eq!(first.error, None);
+
+        let second = processor.inspect(&capture(payload, 200, response));
+        assert!(second.recaptures.is_empty());
+        assert!(second.error.is_some());
+    }
+
+    #[test]
+    fn missing_total_fails_the_traversal() {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+                .expect("a processor");
+        let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
+
+        let inspection = processor.inspect(&capture(b"[]", 200, response));
+
+        assert!(inspection.error.is_some());
+        assert!(inspection.recaptures.is_empty());
     }
 
     #[test]

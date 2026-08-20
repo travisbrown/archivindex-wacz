@@ -30,9 +30,10 @@ echo https://example.com/ \
 ```
 
 The `archive-wp-comments` command captures comment batches from a WordPress REST API into a crawl
-session. It fixes a creation-time cutoff, pages by comment ID, and repeats complete sweeps until no
-new IDs appear, so comments shifted between pages by concurrent deletions are not missed. `--limit`
-can stop after a fixed number of successful batches (including validation recaptures):
+session. It fixes a creation-time cutoff and pages by comment ID. One sweep is sufficient when the
+reported total is stable and matches the distinct IDs captured; otherwise a second consistency
+sweep runs automatically. Pass `--second-sweep` to request that validation sweep unconditionally.
+`--limit` can stop after a fixed number of successful batches (including validation recaptures):
 
 ```bash
 cargo run --bin archivindex-archiver -- archive-wp-comments \
