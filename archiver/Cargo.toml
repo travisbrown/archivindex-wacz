@@ -15,6 +15,7 @@ archivindex-warc-revisit-index = { version = "0.4.0", path = "../warc-revisit-in
 archivindex-wacz = { version = "0.4.0", path = "../wacz/" }
 archivindex-warc.workspace = true
 chrono.workspace = true
+flate2.workspace = true
 fluent-uri.workspace = true
 http.workspace = true
 serde.workspace = true
@@ -24,7 +25,4 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-# Integration tests inspect the raw WARC member to check the recorded index offsets, decoding the
-# gzip members framed by those offsets independently of the writer.
-flate2.workspace = true
 zip.workspace = true

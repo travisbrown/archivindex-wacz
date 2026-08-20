@@ -298,24 +298,9 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
     const HISTORICAL: &str = "historical payload";
     const NEW: &str = "new shared payload";
 
-    let (port, server) = serve_with(3, |head| {
-        let path = request_path(head);
-        let body = if path == "/historical" {
-            HISTORICAL
-        } else {
-            NEW
-        };
-        (
-            plain("200 OK", "content-type: text/plain", body),
-            path.to_owned(),
-        )
-    })?;
-    let historical_url = format!("http://127.0.0.1:{port}/historical");
-    let new_a_url = format!("http://127.0.0.1:{port}/new-a");
-    let new_b_url = format!("http://127.0.0.1:{port}/new-b");
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("revisits.sqlite3");
-    let output = directory.path().join("persistent-revisits.wacz");
+    let database_for_server = database.clone();
     let historical_target = RevisitTarget {
         payload_digest: sha256(HISTORICAL.as_bytes()),
         payload_length: Some(HISTORICAL.len() as u64),
@@ -324,6 +309,26 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
         warc_date: warc_date("2025-01-01T00:00:00Z"),
     };
     Index::open(&database)?.insert_payload(&historical_target)?;
+    let (port, server) = serve_with(3, move |head| {
+        let path = request_path(head);
+        let body = if path == "/historical" {
+            HISTORICAL
+        } else {
+            NEW
+        };
+        let new_payload_is_durable = Index::open(&database_for_server)
+            .and_then(|index| index.lookup_payload(&sha256(NEW.as_bytes())))
+            .expect("inspect durable revisit index")
+            .is_some();
+        (
+            plain("200 OK", "content-type: text/plain", body),
+            format!("{path}:{new_payload_is_durable}"),
+        )
+    })?;
+    let historical_url = format!("http://127.0.0.1:{port}/historical");
+    let new_a_url = format!("http://127.0.0.1:{port}/new-a");
+    let new_b_url = format!("http://127.0.0.1:{port}/new-b");
+    let output = directory.path().join("persistent-revisits.wacz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -337,7 +342,7 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
 
     assert_eq!(
         server.join().expect("server thread"),
-        ["/historical", "/new-a", "/new-b"]
+        ["/historical:false", "/new-a:false", "/new-b:false"]
     );
     assert!(summary.is_complete());
 

@@ -193,9 +193,10 @@ impl<'a> Session<'a> {
     /// Use the persistent revisit and resource-state database at `path`.
     ///
     /// Existing payload entries make matching responses revisits, and existing resource state
-    /// supplies conditional request headers. Successful captures update the database immediately,
-    /// so later captures in this session also benefit from both indexes. Without this option, the
-    /// session uses an in-memory index that lasts only for the run.
+    /// supplies conditional request headers. New records enter a private in-memory overlay during
+    /// the crawl, so later captures in the same session can use them without exposing records that
+    /// are not durable yet. After the WACZ is complete, its WARC is indexed into this database in
+    /// one transaction. Without this option, the in-memory index simply lasts for the run.
     #[must_use]
     pub fn revisit_index(mut self, path: impl Into<PathBuf>) -> Self {
         self.revisit_index = Some(path.into());

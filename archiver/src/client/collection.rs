@@ -2,14 +2,19 @@
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{BufReader, BufWriter, Seek, Write};
 
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_wacz::writer::{PackageMetadata, WaczWriter};
+use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::io::write::WarcWriter;
-use archivindex_warc_revisit_index::{Index, ResourceKey, ResourceStateUpdate};
+use archivindex_warc::record::extension::NoExtension;
+use archivindex_warc_revisit_index::{
+    Index, ResourceKey, ResourceState, ResourceStateUpdate, Transaction,
+};
+use flate2::bufread::MultiGzDecoder;
 use fluent_uri::Uri;
 
 use super::capture::Original;
@@ -31,8 +36,10 @@ pub struct Collection {
     items: Vec<cdxj::Item<'static>>,
     page_list: Vec<Page<'static>>,
     extra_page_list: Vec<Page<'static>>,
-    /// Payload and conditional-request state, persistent when configured by a session.
-    revisit_index: Index,
+    /// Payload and conditional-request state created by this collection.
+    session_index: Index,
+    /// Earlier durable crawl state, published to only after the WACZ is complete.
+    persistent_index: Option<Index>,
 }
 
 impl Collection {
@@ -41,7 +48,7 @@ impl Collection {
         warc_name: String,
         gzip: bool,
         warcinfo: &WarcinfoOptions<'_>,
-        revisit_index: Index,
+        persistent_index: Option<Index>,
     ) -> Result<Self, Error> {
         let mut warc = WarcWriter::new(BufWriter::new(tempfile::tempfile()?)).with_digests();
         let warcinfo = warcinfo_record(&warc_name, warcinfo)?;
@@ -57,7 +64,8 @@ impl Collection {
             items: Vec::new(),
             page_list: Vec::new(),
             extra_page_list: Vec::new(),
-            revisit_index,
+            session_index: Index::open_in_memory()?,
+            persistent_index,
         })
     }
 
@@ -68,17 +76,60 @@ impl Collection {
             .to_owned();
         let key = ResourceKey::new(target_uri);
 
-        let Some(state) = self.revisit_index.lookup_resource(&key)? else {
+        if let Some(state) = self.session_index.lookup_resource(&key)? {
+            return self.original_from_state(state);
+        }
+        let Some(state) = self
+            .persistent_index
+            .as_ref()
+            .map(|index| index.lookup_resource(&key))
+            .transpose()?
+            .flatten()
+        else {
             return Ok(None);
         };
+        self.session_index.update_resource(
+            &key,
+            ResourceStateUpdate::representation(
+                state.etag.clone(),
+                state.last_modified.clone(),
+                state.payload_digest.clone(),
+                state.record_id.clone(),
+                state.warc_date,
+            ),
+        )?;
+
+        self.original_from_state(state)
+    }
+
+    /// Resolve a resource state's canonical payload target across the session overlay and durable
+    /// index.
+    fn original_from_state(&self, state: ResourceState) -> Result<Option<Original>, Error> {
         let canonical = state
             .payload_digest
             .as_ref()
-            .map(|digest| self.revisit_index.lookup_payload(digest))
+            .map(|digest| self.lookup_payload(digest))
             .transpose()?
             .flatten();
 
         Ok(Original::from_state(state, canonical))
+    }
+
+    /// Look up a payload created in this collection before consulting earlier durable state.
+    fn lookup_payload(
+        &self,
+        digest: &archivindex_warc::value::LabelledDigest,
+    ) -> Result<Option<archivindex_warc_revisit_index::RevisitTarget>, Error> {
+        if let Some(target) = self.session_index.lookup_payload(digest)? {
+            return Ok(Some(target));
+        }
+
+        self.persistent_index
+            .as_ref()
+            .map(|index| index.lookup_payload(digest))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(Error::from)
     }
 
     /// Record every captured hop and add either a page summary or failure.
@@ -114,7 +165,7 @@ impl Collection {
                 Some(target) => Some(target.clone()),
                 None => key
                     .as_ref()
-                    .map(|digest| self.revisit_index.lookup_payload(digest))
+                    .map(|digest| self.lookup_payload(digest))
                     .transpose()?
                     .flatten(),
             };
@@ -132,11 +183,11 @@ impl Collection {
             if key.is_some()
                 && let Some(target) = &target
             {
-                self.revisit_index.insert_payload(target)?;
+                self.session_index.insert_payload(target)?;
             }
 
             if status == 304 && revalidated.is_some() {
-                self.revisit_index.update_resource(
+                self.session_index.update_resource(
                     &resource_key,
                     ResourceStateUpdate::not_modified(etag, last_modified),
                 )?;
@@ -144,7 +195,7 @@ impl Collection {
                 && key.is_some()
                 && let Some(original) = revisit_of.as_ref().or(target.as_ref())
             {
-                self.revisit_index.update_resource(
+                self.session_index.update_resource(
                     &resource_key,
                     ResourceStateUpdate::representation(
                         etag,
@@ -197,17 +248,20 @@ impl Collection {
     ) -> Result<ArchiveSummary, Error> {
         let Self {
             warc,
+            warcinfo_id: _,
             warc_name,
             summary,
             items,
             page_list,
             extra_page_list,
-            ..
+            persistent_index,
+            gzip,
+            session_index: _,
         } = self;
         let mut file = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
         file.rewind()?;
 
-        wacz.add_warc(&warc_name, file)?;
+        wacz.add_warc(&warc_name, &mut file)?;
         wacz.add_index(INDEX_NAME, &items)?;
         wacz.add_pages(&PageListHeader::default(), &page_list)?;
         if !extra_page_list.is_empty() {
@@ -226,8 +280,38 @@ impl Collection {
             ..PackageMetadata::default()
         };
         wacz.finish(metadata)?.flush()?;
+        if let Some(mut persistent_index) = persistent_index {
+            publish_warc(&mut persistent_index, &mut file, gzip)?;
+        }
         Ok(summary)
     }
+}
+
+/// Publish the completed WARC's records to durable crawl state as one atomic update.
+fn publish_warc(index: &mut Index, file: &mut File, gzip: bool) -> Result<(), Error> {
+    file.rewind()?;
+    let transaction = index.begin()?;
+
+    if gzip {
+        let decoder = MultiGzDecoder::new(BufReader::new(file));
+        index_records(BufReader::new(decoder), &transaction)?;
+    } else {
+        index_records(BufReader::new(file), &transaction)?;
+    }
+
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Parse and index every semantic record from one completed WARC stream.
+fn index_records<R: std::io::BufRead>(
+    reader: R,
+    transaction: &Transaction<'_>,
+) -> Result<(), Error> {
+    for record in WarcReader::new(reader).iter_records::<NoExtension>() {
+        transaction.index_record(&record?)?;
+    }
+    Ok(())
 }
 
 fn extra_page_list_header() -> PageListHeader<'static> {
@@ -236,5 +320,78 @@ fn extra_page_list_header() -> PageListHeader<'static> {
         id: Some(Cow::Borrowed("extra-pages")),
         title: Some(Cow::Borrowed("Extra Pages")),
         extra: ExtraProperties::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Error as IoError, SeekFrom};
+
+    use archivindex_wacz::digest::Sha256Digest;
+    use archivindex_warc::record::Record;
+    use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate};
+    use archivindex_warc::version::WarcVersion;
+    use archivindex_warc_revisit_index::RevisitTarget;
+
+    use super::*;
+
+    /// A seekable WACZ sink that accepts the ZIP bytes but cannot flush them durably.
+    struct FailingWriter {
+        cursor: Cursor<Vec<u8>>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.cursor.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(IoError::other("injected WACZ failure"))
+        }
+    }
+
+    impl Seek for FailingWriter {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    #[test]
+    fn failed_wacz_is_not_published_to_the_persistent_index()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("revisits.sqlite3");
+        let digest = Sha256Digest::compute(b"body");
+        let labelled = LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest.0);
+        let date =
+            WarcDate::parse("2025-01-01T00:00:00Z", WarcVersion::V1_1).expect("test WARC date");
+        let mut collection = Collection::new(
+            "failed.warc".to_owned(),
+            false,
+            &WarcinfoOptions::archiver("test-agent/1.0"),
+            Some(Index::open(&database)?),
+        )?;
+        let response = Record::<NoExtension>::response("https://example.com/", date)?
+            .payload_digest(labelled.clone())
+            .body(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody".to_vec())?;
+        collection.session_index.insert_payload(&RevisitTarget {
+            payload_digest: labelled.clone(),
+            payload_length: Some(4),
+            record_id: response.core().record_id.clone(),
+            target_uri: Uri::parse("https://example.com/")?.to_owned(),
+            warc_date: date,
+        })?;
+        write_record(&mut collection.warc, response, false)?;
+
+        let result = collection.finish(
+            WaczWriter::new(FailingWriter {
+                cursor: Cursor::new(Vec::new()),
+            }),
+            None,
+        );
+
+        assert!(result.is_err());
+        assert!(Index::open(&database)?.lookup_payload(&labelled)?.is_none());
+        Ok(())
     }
 }

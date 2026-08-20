@@ -81,6 +81,9 @@ pub enum Error {
     /// A WARC record could not be written.
     #[error(transparent)]
     WarcWrite(#[from] archivindex_warc::io::write::Error),
+    /// A completed WARC record could not be read for persistent indexing.
+    #[error(transparent)]
+    WarcRead(#[from] archivindex_warc::io::read::Error),
     /// The WACZ file could not be written.
     #[error(transparent)]
     Wacz(#[from] archivindex_wacz::writer::Error),
@@ -200,7 +203,7 @@ impl Archiver {
         id: &str,
         software: (&str, &str),
         operator: (&str, Option<&str>),
-        revisit_index: RevisitIndex,
+        persistent_index: Option<RevisitIndex>,
     ) -> Result<Collection, Error> {
         let gzip = self.config.gzip_warc;
         let suffix = if gzip { ".warc.gz" } else { ".warc" };
@@ -214,7 +217,7 @@ impl Archiver {
                 operator: Some(operator),
                 session_id: Some(id),
             },
-            revisit_index,
+            persistent_index,
         )
     }
 
@@ -245,7 +248,7 @@ impl Archiver {
             warc_name.to_owned(),
             gzip,
             &WarcinfoOptions::archiver(&self.config.user_agent),
-            RevisitIndex::open_in_memory()?,
+            None,
         )?;
 
         let concurrency = self.config.concurrency.max(1);
