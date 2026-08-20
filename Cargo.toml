@@ -9,7 +9,7 @@ keywords = ["warc", "web", "archive"]
 edition = "2024"
 readme = "README.md"
 license = "MIT"
-version = "0.4.0"
+version = "0.1.0"
 
 [workspace.dependencies]
 # The archiver captures with the byte-exact HTTP client and identifies response payloads.

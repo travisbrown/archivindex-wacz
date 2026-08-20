@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "archivindex-archiver"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "archivindex-wacz",
  "archivindex-warc",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "archivindex-archiver-cli"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
  "cli-helpers",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "archivindex-wacz"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "archivindex-warc",
  "bounded-static",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "archivindex-warc-revisit-index"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "archivindex-warc",
  "fluent-uri",

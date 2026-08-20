@@ -14,7 +14,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-archivindex-archiver = { version = "0.4.0", path = "../archiver/" }
+archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
 cli-helpers.workspace = true
 indicatif.workspace = true
 serde_json.workspace = true
