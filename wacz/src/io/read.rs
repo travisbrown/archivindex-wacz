@@ -21,9 +21,7 @@ use crate::{
     PAGES_PATH,
 };
 
-#[path = "reader/random.rs"]
 mod random;
-#[path = "reader/validate.rs"]
 mod validate;
 
 pub use random::{Capture, ZipNumBlock, ZipNumSummary};
