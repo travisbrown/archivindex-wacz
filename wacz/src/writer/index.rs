@@ -21,6 +21,19 @@ impl<W: Write + Seek> WaczWriter<W> {
         name: &str,
         items: I,
     ) -> Result<(), Error> {
+        let items = items.into_iter().collect::<Vec<_>>();
+        for item in &items {
+            cdxj::ConformingFields::try_from(&item.fields)?;
+        }
+        self.add_index_lenient(name, items)
+    }
+
+    /// Write an index while explicitly allowing entries that omit normative CDXJ fields.
+    pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
+        &mut self,
+        name: &str,
+        items: I,
+    ) -> Result<(), Error> {
         let mut rendered = items
             .into_iter()
             .map(|item| format!("{item}\n"))

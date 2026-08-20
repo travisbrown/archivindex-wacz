@@ -144,6 +144,153 @@ pub struct DataPackage<'a> {
     pub extra: ExtraProperties,
 }
 
+/// Builder for the caller-controlled metadata in a WACZ data package.
+///
+/// [`crate::writer::WaczWriter`] supplies the structural properties (`profile`, `wacz_version`,
+/// and `resources`) when it finishes the archive. It also supplies defaults for `created` and
+/// `software` when those properties are not set here.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DataPackageBuilder {
+    name: Option<Cow<'static, str>>,
+    id: Option<Cow<'static, str>>,
+    title: Option<Cow<'static, str>>,
+    description: Option<Cow<'static, str>>,
+    keywords: Vec<Cow<'static, str>>,
+    homepage: Option<Cow<'static, str>>,
+    image: Option<Cow<'static, str>>,
+    version: Option<Cow<'static, str>>,
+    sources: Vec<Source<'static>>,
+    licenses: Vec<License<'static>>,
+    contributors: Vec<Contributor<'static>>,
+    created: Option<DateTime<Utc>>,
+    modified: Option<DateTime<Utc>>,
+    software: Option<Cow<'static, str>>,
+    main_page_url: Option<Cow<'static, str>>,
+    main_page_date: Option<DateTime<Utc>>,
+    extra: ExtraProperties,
+}
+
+macro_rules! string_setter {
+    ($name:ident, $field:ident, $docs:literal) => {
+        #[doc = $docs]
+        #[must_use]
+        pub fn $name(mut self, value: impl Into<Cow<'static, str>>) -> Self {
+            self.$field = Some(value.into());
+            self
+        }
+    };
+}
+
+impl DataPackageBuilder {
+    /// Create an empty metadata builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    string_setter!(name, name, "Set the short, URL-usable package identifier.");
+    string_setter!(id, id, "Set the globally unique package identifier.");
+    string_setter!(title, title, "Set the short collection description.");
+    string_setter!(
+        description,
+        description,
+        "Set the longer, optionally Markdown-formatted description."
+    );
+    string_setter!(homepage, homepage, "Set the package homepage URL.");
+    string_setter!(image, image, "Set the package image URL or relative path.");
+    string_setter!(version, version, "Set the package version.");
+    string_setter!(software, software, "Set the creating software description.");
+    string_setter!(main_page_url, main_page_url, "Set the primary replay URL.");
+
+    /// Set all package keywords, replacing any previously configured keywords.
+    #[must_use]
+    pub fn keywords<I, S>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Cow<'static, str>>,
+    {
+        self.keywords = values.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set all package sources, replacing any previously configured sources.
+    #[must_use]
+    pub fn sources(mut self, values: Vec<Source<'static>>) -> Self {
+        self.sources = values;
+        self
+    }
+
+    /// Set all package licenses, replacing any previously configured licenses.
+    #[must_use]
+    pub fn licenses(mut self, values: Vec<License<'static>>) -> Self {
+        self.licenses = values;
+        self
+    }
+
+    /// Set all package contributors, replacing any previously configured contributors.
+    #[must_use]
+    pub fn contributors(mut self, values: Vec<Contributor<'static>>) -> Self {
+        self.contributors = values;
+        self
+    }
+
+    /// Set the package creation time instead of using the writer's current-time default.
+    #[must_use]
+    pub const fn created(mut self, value: DateTime<Utc>) -> Self {
+        self.created = Some(value);
+        self
+    }
+
+    /// Set the package modification time.
+    #[must_use]
+    pub const fn modified(mut self, value: DateTime<Utc>) -> Self {
+        self.modified = Some(value);
+        self
+    }
+
+    /// Set the capture date for the primary replay URL.
+    #[must_use]
+    pub const fn main_page_date(mut self, value: DateTime<Utc>) -> Self {
+        self.main_page_date = Some(value);
+        self
+    }
+
+    /// Set extension properties, replacing any previously configured properties.
+    #[must_use]
+    pub fn extra(mut self, value: ExtraProperties) -> Self {
+        self.extra = value;
+        self
+    }
+
+    pub(crate) fn into_data_package(
+        self,
+        resources: Vec<Resource<'static>>,
+    ) -> DataPackage<'static> {
+        DataPackage {
+            profile: Cow::Borrowed(PROFILE),
+            wacz_version: Cow::Borrowed(WACZ_VERSION),
+            resources,
+            name: self.name,
+            id: self.id,
+            title: self.title,
+            description: self.description,
+            keywords: self.keywords,
+            homepage: self.homepage,
+            image: self.image,
+            version: self.version,
+            sources: self.sources,
+            licenses: self.licenses,
+            contributors: self.contributors,
+            created: self.created,
+            modified: self.modified,
+            software: self.software,
+            main_page_url: self.main_page_url,
+            main_page_date: self.main_page_date,
+            extra: self.extra,
+        }
+    }
+}
+
 /// A WACZ `datapackage-digest.json` file.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 pub struct DataPackageDigest<'a> {
@@ -363,6 +510,74 @@ mod tests {
         assert_eq!(serde_json::from_str::<DataPackage<'_>>(&encoded)?, package);
 
         Ok(())
+    }
+
+    #[test]
+    fn data_package_builder_covers_the_complete_metadata_surface() {
+        let created = "2020-10-07T21:22:36Z".parse().expect("test date");
+        let modified = "2020-10-08T21:22:36Z".parse().expect("test date");
+        let main_page_date = "2020-10-07T20:00:00Z".parse().expect("test date");
+        let mut extra = ExtraProperties::default();
+        extra.insert("custom".to_owned(), serde_json::json!({ "key": "value" }));
+
+        let package = DataPackageBuilder::new()
+            .name("example-collection")
+            .id("urn:uuid:735c0f4b-b054-4bb2-a5b6-2b4c27ba0bc7")
+            .title("Example collection")
+            .description("An example archive")
+            .keywords(["example", "crawl"])
+            .homepage("https://example.com/collection")
+            .image("images/collection.png")
+            .version("1.0.0")
+            .sources(vec![Source {
+                title: Some("example.com".into()),
+                ..Source::default()
+            }])
+            .licenses(vec![License {
+                name: Some("CC-BY-4.0".into()),
+                ..License::default()
+            }])
+            .contributors(vec![Contributor {
+                title: Some("An Archivist".into()),
+                ..Contributor::default()
+            }])
+            .created(created)
+            .modified(modified)
+            .software("example-archiver/1.0")
+            .main_page_url("https://example.com/")
+            .main_page_date(main_page_date)
+            .extra(extra.clone())
+            .into_data_package(Vec::new());
+
+        assert_eq!(package.profile, PROFILE);
+        assert_eq!(package.wacz_version, WACZ_VERSION);
+        assert_eq!(package.name.as_deref(), Some("example-collection"));
+        assert_eq!(
+            package.id.as_deref(),
+            Some("urn:uuid:735c0f4b-b054-4bb2-a5b6-2b4c27ba0bc7")
+        );
+        assert_eq!(package.title.as_deref(), Some("Example collection"));
+        assert_eq!(package.description.as_deref(), Some("An example archive"));
+        assert_eq!(package.keywords, ["example", "crawl"]);
+        assert_eq!(
+            package.homepage.as_deref(),
+            Some("https://example.com/collection")
+        );
+        assert_eq!(package.image.as_deref(), Some("images/collection.png"));
+        assert_eq!(package.version.as_deref(), Some("1.0.0"));
+        assert_eq!(package.sources.len(), 1);
+        assert_eq!(package.licenses.len(), 1);
+        assert_eq!(package.contributors.len(), 1);
+        assert_eq!(package.created, Some(created));
+        assert_eq!(package.modified, Some(modified));
+        assert_eq!(package.software.as_deref(), Some("example-archiver/1.0"));
+        assert_eq!(
+            package.main_page_url.as_deref(),
+            Some("https://example.com/")
+        );
+        assert_eq!(package.main_page_date, Some(main_page_date));
+        assert_eq!(package.extra, extra);
+        assert!(package.resources.is_empty());
     }
 
     #[test]

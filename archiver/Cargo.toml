@@ -6,13 +6,19 @@ repository.workspace = true
 documentation = "https://docs.rs/crate/archivindex-archiver/"
 keywords = ["warc", "web", "archive", "http"]
 edition.workspace = true
+rust-version.workspace = true
 readme.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
 archivindex-warc-revisit-index = { version = "0.1.0", path = "../warc-revisit-index/" }
-archivindex-warc.workspace = true
+archivindex-warc = { workspace = true, features = [
+  "gzip",
+  "payload-identification",
+  "recorder",
+  "serde",
+] }
 chrono.workspace = true
 flate2.workspace = true
 fluent-uri.workspace = true

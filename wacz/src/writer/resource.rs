@@ -9,11 +9,28 @@ use zip::{CompressionMethod, ZipWriter};
 use super::{Error, WaczWriter};
 use crate::digest::Sha256Digest;
 use crate::frictionless::Resource;
-use crate::{ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, GZIP_EXTENSION};
+use crate::{
+    ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, GZIP_EXTENSION, INDEXES_PREFIX,
+    PAGES_PREFIX,
+};
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Add a custom resource and track its manifest digest and size.
     pub fn add_resource<R: Read>(&mut self, path: &str, mut reader: R) -> Result<(), Error> {
+        if path.starts_with(ARCHIVE_PREFIX)
+            || path.starts_with(INDEXES_PREFIX)
+            || path.starts_with(PAGES_PREFIX)
+        {
+            return Err(Error::ReservedResourcePath(path.to_owned()));
+        }
+        self.add_typed_resource(path, &mut reader)
+    }
+
+    pub(super) fn add_typed_resource<R: Read>(
+        &mut self,
+        path: &str,
+        mut reader: R,
+    ) -> Result<(), Error> {
         let options = options_for(path, self.config.zip_compression_level)?;
         self.add_member(path, options, |writer| {
             std::io::copy(&mut reader, writer)?;
@@ -57,6 +74,11 @@ impl<W: Write + Seek> WaczWriter<W> {
             || self.resources.iter().any(|resource| resource.path == path)
         {
             return Err(Error::DuplicateMemberPath(path.to_owned()));
+        }
+        let name = resource_name(path);
+        if !valid_resource_name(name) || self.resources.iter().any(|resource| resource.name == name)
+        {
+            return Err(Error::InvalidResourceName(name.to_owned()));
         }
         Ok(())
     }
@@ -132,4 +154,11 @@ fn resource_name(path: &str) -> &str {
         "extraPages.jsonl" => "extra-pages.jsonl",
         name => name,
     }
+}
+
+fn valid_resource_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
+        })
 }

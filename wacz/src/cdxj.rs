@@ -178,7 +178,7 @@ pub struct Item<'a> {
     /// The capture timestamp.
     pub timestamp: Timestamp,
     /// The JSON block locating the capture.
-    pub fields: Fields<'a>,
+    pub fields: ParsedFields<'a>,
 }
 
 impl<'a> Item<'a> {
@@ -219,7 +219,7 @@ impl fmt::Display for Item<'_> {
 /// The numeric fields are written as decimal strings, following the convention of pywb-family
 /// indexers, but are accepted as either strings or JSON numbers on parsing.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
-pub struct Fields<'a> {
+pub struct ParsedFields<'a> {
     /// The original URL of the capture.
     #[serde(borrow)]
     pub url: Cow<'a, str>,
@@ -281,6 +281,101 @@ pub struct Fields<'a> {
     #[serde(flatten)]
     pub extra: ExtraProperties,
 }
+
+/// A conforming CDXJ field block used for index construction.
+///
+/// Unlike [`ParsedFields`], every property required by CDXJ 0.1.0 is present. Optional extension
+/// properties, including the WACZ stored-record digest, remain optional.
+#[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Serialize)]
+pub struct ConformingFields<'a> {
+    /// The original URL of the capture.
+    pub url: Cow<'a, str>,
+    /// A cryptographic digest of the HTTP response payload.
+    pub digest: Cow<'a, str>,
+    /// The MIME type of the captured payload.
+    pub mime: Cow<'a, str>,
+    /// The HTTP status of the capture.
+    #[serde(serialize_with = "crate::attributes::integer_str")]
+    pub status: u16,
+    /// The byte offset of the record within its WARC file.
+    #[serde(serialize_with = "crate::attributes::integer_str")]
+    pub offset: u64,
+    /// The length in bytes of the record within its WARC file.
+    #[serde(serialize_with = "crate::attributes::integer_str")]
+    pub length: u64,
+    /// The name of the WARC file containing the record.
+    pub filename: Cow<'a, str>,
+    /// The digest of the stored record bytes.
+    #[serde(rename = "recordDigest", skip_serializing_if = "Option::is_none")]
+    pub record_digest: Option<Sha256Digest>,
+    /// Additional properties.
+    #[serde(flatten)]
+    pub extra: ExtraProperties,
+}
+
+impl<'a> From<ConformingFields<'a>> for ParsedFields<'a> {
+    fn from(fields: ConformingFields<'a>) -> Self {
+        Self {
+            url: fields.url,
+            digest: Some(fields.digest),
+            mime: Some(fields.mime),
+            status: Some(fields.status),
+            offset: Some(fields.offset),
+            length: Some(fields.length),
+            filename: Some(fields.filename),
+            record_digest: fields.record_digest,
+            extra: fields.extra,
+        }
+    }
+}
+
+/// The required properties missing from a leniently parsed CDXJ field block.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("missing required CDXJ fields: {}", .0.join(", "))]
+pub struct MissingFields(pub Vec<&'static str>);
+
+impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
+    type Error = MissingFields;
+
+    fn try_from(fields: &ParsedFields<'a>) -> Result<Self, Self::Error> {
+        let mut missing = Vec::new();
+        if fields.digest.is_none() {
+            missing.push("digest");
+        }
+        if fields.mime.is_none() {
+            missing.push("mime");
+        }
+        if fields.status.is_none() {
+            missing.push("status");
+        }
+        if fields.offset.is_none() {
+            missing.push("offset");
+        }
+        if fields.length.is_none() {
+            missing.push("length");
+        }
+        if fields.filename.is_none() {
+            missing.push("filename");
+        }
+        if !missing.is_empty() {
+            return Err(MissingFields(missing));
+        }
+        Ok(Self {
+            url: fields.url.clone(),
+            digest: fields.digest.clone().expect("checked"),
+            mime: fields.mime.clone().expect("checked"),
+            status: fields.status.expect("checked"),
+            offset: fields.offset.expect("checked"),
+            length: fields.length.expect("checked"),
+            filename: fields.filename.clone().expect("checked"),
+            record_digest: fields.record_digest,
+            extra: fields.extra.clone(),
+        })
+    }
+}
+
+/// Backwards-compatible name for leniently parsed fields.
+pub type Fields<'a> = ParsedFields<'a>;
 
 /// A reader that iteratively parses CDXJ items from a stream.
 ///
@@ -457,6 +552,18 @@ mod tests {
         assert_eq!(item.fields.status, None);
         assert_eq!(item.fields.offset, None);
 
+        Ok(())
+    }
+
+    #[test]
+    fn conforming_fields_report_every_missing_normative_property() -> Result<(), Error> {
+        let item = Item::parse("com,example)/ 20201007212236 {\"url\":\"https://example.com/\"}")?;
+        let error = ConformingFields::try_from(&item.fields).expect_err("fields are incomplete");
+
+        assert_eq!(
+            error.0,
+            ["digest", "mime", "status", "offset", "length", "filename"]
+        );
         Ok(())
     }
 

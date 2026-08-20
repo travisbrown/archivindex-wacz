@@ -6,47 +6,58 @@ use std::io::{Seek, Write};
 use chrono::Utc;
 
 use super::resource::options_for;
-use super::{Error, PackageMetadata, WaczWriter};
+use super::{Error, WaczWriter};
 use crate::digest::Sha256Digest;
-use crate::frictionless::{DataPackage, DataPackageDigest, PROFILE, WACZ_VERSION};
-use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, ExtraProperties};
+use crate::frictionless::{DataPackageBuilder, DataPackageDigest};
+use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH};
 
 const SOFTWARE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write the manifest and digest files and finish the ZIP.
-    pub fn finish(self, metadata: PackageMetadata) -> Result<W, Error> {
+    pub fn finish(self, metadata: DataPackageBuilder) -> Result<W, Error> {
+        let mut missing = Vec::new();
+        if !self
+            .resources
+            .iter()
+            .any(|resource| resource.path.starts_with(crate::ARCHIVE_PREFIX))
+        {
+            missing.push("archive/*.warc[.gz]");
+        }
+        if !self
+            .resources
+            .iter()
+            .any(|resource| resource.path.starts_with(crate::INDEXES_PREFIX))
+        {
+            missing.push("indexes/*");
+        }
+        if !self
+            .resources
+            .iter()
+            .any(|resource| resource.path == crate::PAGES_PATH)
+        {
+            missing.push("pages/pages.jsonl");
+        }
+        if !missing.is_empty() {
+            return Err(Error::MissingRequiredMembers(missing));
+        }
+        self.finish_unchecked(metadata)
+    }
+
+    /// Finish a package without checking the required WACZ member classes.
+    ///
+    /// This is intended for malformed-archive fixtures and compatibility tooling. Normal package
+    /// construction should use [`Self::finish`]. Member paths and resource names are still checked
+    /// when they are inserted.
+    pub fn finish_unchecked(self, metadata: DataPackageBuilder) -> Result<W, Error> {
         let Self {
             mut zip,
             resources,
             config,
         } = self;
-        let package = DataPackage {
-            profile: Cow::Borrowed(PROFILE),
-            wacz_version: Cow::Borrowed(WACZ_VERSION),
-            resources,
-            name: None,
-            id: None,
-            title: metadata.title.map(Cow::Owned),
-            description: metadata.description.map(Cow::Owned),
-            keywords: Vec::new(),
-            homepage: None,
-            image: None,
-            version: None,
-            sources: Vec::new(),
-            licenses: Vec::new(),
-            contributors: Vec::new(),
-            created: Some(metadata.created.unwrap_or_else(Utc::now)),
-            modified: metadata.modified,
-            software: Some(
-                metadata
-                    .software
-                    .map_or(Cow::Borrowed(SOFTWARE), Cow::Owned),
-            ),
-            main_page_url: metadata.main_page_url.map(Cow::Owned),
-            main_page_date: metadata.main_page_date,
-            extra: ExtraProperties::default(),
-        };
+        let mut package = metadata.into_data_package(resources);
+        package.created.get_or_insert_with(Utc::now);
+        package.software.get_or_insert(Cow::Borrowed(SOFTWARE));
 
         let manifest = serde_json::to_vec_pretty(&package).map_err(Error::Manifest)?;
         zip.start_file(

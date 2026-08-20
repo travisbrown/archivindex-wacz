@@ -170,3 +170,8 @@ pub fn optional_integer_str<S: Serializer, T: Display>(
         None => serializer.serialize_none(),
     }
 }
+
+/// Serialize a required integer as the decimal string convention used by CDXJ.
+pub fn integer_str<S: Serializer, T: Display>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
+}

@@ -6,6 +6,7 @@ repository.workspace = true
 documentation = "https://docs.rs/crate/archivindex-warc-revisit-index/"
 keywords = ["warc", "web", "archive", "http", "sqlite"]
 edition.workspace = true
+rust-version.workspace = true
 readme.workspace = true
 license.workspace = true
 version.workspace = true

@@ -1,10 +1,9 @@
 //! WACZ writer facade and configuration.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use zip::ZipWriter;
 
 use crate::frictionless::Resource;
@@ -16,6 +15,11 @@ mod manifest;
 mod resource;
 
 use resource::options_for;
+
+/// Backward-compatible name for manifest metadata supplied to [`WaczWriter::finish`].
+///
+/// New code should use [`crate::frictionless::DataPackageBuilder`] directly.
+pub type PackageMetadata = crate::frictionless::DataPackageBuilder;
 
 const DEFAULT_PAGE_ID_LENGTH: usize = 24;
 const DEFAULT_ZIPNUM_LINES: usize = 1024;
@@ -97,25 +101,27 @@ pub enum Error {
     /// The requested ZIP DEFLATE compression level is outside the supported range.
     #[error("ZIP compression level must be between 1 and 264, got {0}")]
     InvalidZipCompressionLevel(u32),
-}
-
-/// Contextual manifest properties supplied when finishing a WACZ.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PackageMetadata {
-    /// Short collection description.
-    pub title: Option<String>,
-    /// Longer, optionally Markdown-formatted description.
-    pub description: Option<String>,
-    /// Creation time; defaults to the current time.
-    pub created: Option<DateTime<Utc>>,
-    /// Last modification time.
-    pub modified: Option<DateTime<Utc>>,
-    /// Creating software; defaults to this crate and version.
-    pub software: Option<String>,
-    /// Primary replay URL.
-    pub main_page_url: Option<String>,
-    /// Primary replay capture date.
-    pub main_page_date: Option<DateTime<Utc>>,
+    /// A WARC member name does not have a conforming suffix.
+    #[error("WARC member must end in .warc or .warc.gz: {0}")]
+    InvalidWarcName(String),
+    /// A gzip-named WARC is not a valid gzip stream.
+    #[error("invalid gzip WARC: {0}")]
+    InvalidGzip(#[source] std::io::Error),
+    /// A path-based WACZ output does not use the required extension.
+    #[error("WACZ output path must end in .wacz: {}", .0.display())]
+    InvalidWaczExtension(PathBuf),
+    /// A custom resource attempts to use a WACZ-reserved directory.
+    #[error("custom resource may not use a reserved directory: {0}")]
+    ReservedResourcePath(String),
+    /// A manifest resource name is invalid or duplicates an existing name.
+    #[error("invalid or duplicate resource name: {0}")]
+    InvalidResourceName(String),
+    /// The package is missing one or more member classes required by WACZ.
+    #[error("missing required WACZ members: {}", .0.join(", "))]
+    MissingRequiredMembers(Vec<&'static str>),
+    /// An index entry omits normative CDXJ fields.
+    #[error(transparent)]
+    NonconformingIndex(#[from] crate::cdxj::MissingFields),
 }
 
 /// A WACZ assembler that tracks member digests and sizes for its final manifest.
@@ -136,6 +142,10 @@ impl WaczWriter<BufWriter<File>> {
         path: P,
         config: WriterConfig,
     ) -> Result<Self, Error> {
+        let path = path.as_ref();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("wacz") {
+            return Err(Error::InvalidWaczExtension(path.to_owned()));
+        }
         Ok(Self::with_config(
             BufWriter::new(File::create_new(path)?),
             config,
@@ -161,8 +171,26 @@ impl<W: Write + Seek> WaczWriter<W> {
     }
 
     /// Add WARC data under `archive/` using ZIP `STORE`.
-    pub fn add_warc<R: Read>(&mut self, name: &str, reader: R) -> Result<(), Error> {
-        self.add_resource(&format!("{ARCHIVE_PREFIX}{name}"), reader)
+    pub fn add_warc<R: Read>(&mut self, name: &str, mut reader: R) -> Result<(), Error> {
+        let gzip = name.strip_suffix(".warc.gz").is_some();
+        if !(gzip || name.strip_suffix(".warc").is_some()) {
+            return Err(Error::InvalidWarcName(name.to_owned()));
+        }
+        let path = format!("{ARCHIVE_PREFIX}{name}");
+        if gzip {
+            let mut spool = tempfile::tempfile()?;
+            std::io::copy(&mut reader, &mut spool)?;
+            spool.seek(SeekFrom::Start(0))?;
+            std::io::copy(
+                &mut flate2::read::MultiGzDecoder::new(&mut spool),
+                &mut std::io::sink(),
+            )
+            .map_err(Error::InvalidGzip)?;
+            spool.seek(SeekFrom::Start(0))?;
+            self.add_typed_resource(&path, spool)
+        } else {
+            self.add_typed_resource(&path, reader)
+        }
     }
 
     /// Add a WARC file under `archive/`, using its file name.

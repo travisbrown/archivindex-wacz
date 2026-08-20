@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
+use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_wacz::writer::{
-    MAX_ZIP_COMPRESSION_LEVEL, MIN_ZIP_COMPRESSION_LEVEL, PackageMetadata, WaczWriter, WriterConfig,
+    MAX_ZIP_COMPRESSION_LEVEL, MIN_ZIP_COMPRESSION_LEVEL, WaczWriter, WriterConfig,
 };
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::io::write::{
@@ -292,7 +293,9 @@ impl<'a> WarcToWacz<'a> {
         };
         let mut wacz = WaczWriter::create_with_config(&self.output, writer_config)?;
         wacz.add_warc(warc_name, file)?;
-        wacz.add_index(INDEX_NAME, &items)?;
+        // Malformed or payload-less WARC responses are retained by conversion. Their CDXJ entries
+        // intentionally use the reader-compatible lenient field model.
+        wacz.add_index_lenient(INDEX_NAME, &items)?;
         let page_entries = pages
             .iter()
             .filter(|page| !page.extra)
@@ -312,15 +315,18 @@ impl<'a> WarcToWacz<'a> {
             )?;
         }
         let warnings = package_info.warnings();
-        let metadata = PackageMetadata {
-            title: package_info.title,
-            description: package_info.description,
-            main_page_url: page_entries
-                .first()
-                .map(|page| page.url.clone().into_owned()),
-            main_page_date: page_entries.first().map(|page| page.ts),
-            ..PackageMetadata::default()
-        };
+        let mut metadata = DataPackageBuilder::new();
+        if let Some(title) = package_info.title {
+            metadata = metadata.title(title);
+        }
+        if let Some(description) = package_info.description {
+            metadata = metadata.description(description);
+        }
+        if let Some(page) = page_entries.first() {
+            metadata = metadata
+                .main_page_url(page.url.clone().into_owned())
+                .main_page_date(page.ts);
+        }
         wacz.finish(metadata)?.flush()?;
 
         Ok(ConversionSummary {

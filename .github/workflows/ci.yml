@@ -49,6 +49,16 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace --all-features
 
+  minimal-features:
+    name: Minimal WACZ dependency features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check archivindex-wacz in isolation
+        run: cargo check --locked -p archivindex-wacz
+
   platforms:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -62,6 +72,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --locked --workspace --all-features
+
+  msrv:
+    name: MSRV and package contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97
+      - uses: Swatinem/rust-cache@v2
+      - name: Build at the declared MSRV
+        run: cargo check --locked --workspace --all-features
+      - name: Inspect publishable package contents
+        run: |
+          cargo package --allow-dirty --list -p archivindex-wacz
+          cargo package --allow-dirty --list -p archivindex-warc-revisit-index
+          cargo package --allow-dirty --list -p archivindex-archiver
+          cargo package --allow-dirty --list -p archivindex-packager
 
   coverage:
     name: Coverage
