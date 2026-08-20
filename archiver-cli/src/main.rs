@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use archivindex_archiver::client::Archiver;
 use archivindex_archiver::config::{Config, IndexFormat};
+use archivindex_archiver::conversion::WarcToWacz;
 use archivindex_archiver::session::{Operator, RetryConfig, Session};
 use archivindex_archiver::wordpress::CommentCaptureProcessor;
 use archivindex_archiver::wordpress::read::read_comments;
@@ -23,6 +24,7 @@ fn main() -> Result<(), Error> {
     match opts.command {
         Command::Archive(options) => archive(options),
         Command::ArchiveWpComments(options) => archive_wp_comments(options),
+        Command::WarcToWacz(options) => warc_to_wacz(&options),
         Command::ReadWpComments(options) => read_wp_comments(options),
     }
 }
@@ -113,6 +115,27 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     Ok(())
 }
 
+/// Convert an existing WARC file into an indexed WACZ package.
+fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
+    let index_format = if options.compressed_index {
+        IndexFormat::zipnum()
+    } else {
+        IndexFormat::Plain
+    };
+    let summary = WarcToWacz::new(&options.warc, &options.output)
+        .index_format(index_format)
+        .run()?;
+
+    println!(
+        "Converted {} records and {} captures from {} to {}",
+        summary.records,
+        summary.captures,
+        options.warc.display(),
+        options.output.display()
+    );
+    Ok(())
+}
+
 /// Read, sort, and deduplicate `WordPress` comments captured in a WACZ file.
 fn read_wp_comments(options: ReadWpCommentsOptions) -> Result<(), Error> {
     let result = read_comments(options.wacz)?;
@@ -175,6 +198,8 @@ enum Error {
     Url(#[from] url::ParseError),
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::client::Error),
+    #[error("WARC conversion error: {0}")]
+    Convert(#[from] archivindex_archiver::conversion::Error),
     #[error("WordPress comment reading error: {0}")]
     ReadComments(#[from] archivindex_archiver::wordpress::read::Error),
     #[error("JSON writing error: {0}")]
@@ -197,6 +222,8 @@ enum Command {
     Archive(ArchiveOptions),
     /// Archive comments iteratively through a site's `WordPress` REST API v2 endpoint.
     ArchiveWpComments(ArchiveWpCommentsOptions),
+    /// Convert an existing WARC file into an indexed WACZ package.
+    WarcToWacz(WarcToWaczOptions),
     /// Read comments captured from the `WordPress` REST API in a WACZ file.
     ReadWpComments(ReadWpCommentsOptions),
 }
@@ -249,6 +276,19 @@ struct ArchiveWpCommentsOptions {
     /// Maximum retry delay in seconds (defaults to 30).
     #[clap(long)]
     retry_max_backoff: Option<u64>,
+}
+
+/// Options for converting an existing WARC file into a WACZ package.
+#[derive(Debug, clap::Args)]
+struct WarcToWaczOptions {
+    /// Plain or gzip-compressed WARC file to convert.
+    warc: PathBuf,
+    /// Path of the WACZ file to write (an existing file is not overwritten).
+    #[clap(long)]
+    output: PathBuf,
+    /// Write the index as a compressed `ZipNum` pair instead of plain CDXJ.
+    #[clap(long)]
+    compressed_index: bool,
 }
 
 /// Options for reading comments from a WACZ file.
@@ -367,5 +407,25 @@ mod tests {
         };
 
         assert_eq!(options.wacz, PathBuf::from("comments.wacz"));
+    }
+
+    #[test]
+    fn warc_conversion_command_reads_paths_and_index_format() {
+        let options = Opts::try_parse_from([
+            "archivindex-archiver",
+            "warc-to-wacz",
+            "capture.warc.gz",
+            "--output",
+            "capture.wacz",
+            "--compressed-index",
+        ])
+        .expect("valid options");
+
+        let Command::WarcToWacz(options) = options.command else {
+            panic!("expected the WARC conversion command");
+        };
+        assert_eq!(options.warc, PathBuf::from("capture.warc.gz"));
+        assert_eq!(options.output, PathBuf::from("capture.wacz"));
+        assert!(options.compressed_index);
     }
 }

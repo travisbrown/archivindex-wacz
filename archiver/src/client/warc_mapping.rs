@@ -24,6 +24,13 @@ use crate::response;
 /// The conventional CDXJ media type for an entry backed by a `revisit` record.
 const REVISIT_MIME: &str = "warc/revisit";
 
+/// Optional fields added to the metadata record accompanying an exchange.
+#[derive(Clone, Copy)]
+pub(super) struct MetadataOptions<'a> {
+    pub(super) via: Option<&'a str>,
+    pub(super) title: Option<&'a str>,
+}
+
 /// Write a record, optionally as an independent gzip member.
 pub(super) fn write_record<W: Write>(
     writer: &mut WarcWriter<W>,
@@ -53,7 +60,7 @@ pub(super) fn write_exchange<W: Write>(
     warcinfo_id: &Uri<String>,
     warc_name: &str,
     gzip: bool,
-    via: Option<&str>,
+    metadata: MetadataOptions<'_>,
     revisit_of: Option<&RevisitTarget>,
 ) -> Result<(cdxj::Item<'static>, Option<RevisitTarget>), Error> {
     let Exchange {
@@ -73,9 +80,24 @@ pub(super) fn write_exchange<W: Write>(
             RevisitProfile::IDENTICAL_PAYLOAD_DIGEST
         };
 
-        revisit_records(captured, date, warcinfo_id, original, profile, via)?
+        revisit_records(
+            captured,
+            date,
+            warcinfo_id,
+            original,
+            profile,
+            metadata.via,
+            metadata.title,
+        )?
     } else {
-        full_records(captured, date, warcinfo_id, payload_digest.as_ref(), via)?
+        full_records(
+            captured,
+            date,
+            warcinfo_id,
+            payload_digest.as_ref(),
+            metadata.via,
+            metadata.title,
+        )?
     };
 
     let mime = if revisit_of.is_some() {
@@ -135,6 +157,7 @@ fn full_records(
     warcinfo_id: &Uri<String>,
     payload_digest: Option<&Sha256Digest>,
     via: Option<&str>,
+    title: Option<&str>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
         request,
@@ -168,6 +191,7 @@ fn full_records(
         warcinfo_id,
         fetch_time,
         via,
+        title,
     )?);
 
     Ok((records, target_uri))
@@ -183,6 +207,7 @@ fn revisit_records(
     original: &RevisitTarget,
     profile: RevisitProfile,
     via: Option<&str>,
+    title: Option<&str>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
         request,
@@ -226,6 +251,7 @@ fn revisit_records(
         warcinfo_id,
         fetch_time,
         via,
+        title,
     )?;
 
     Ok((

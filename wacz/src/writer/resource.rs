@@ -35,7 +35,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         write(&mut writer)?;
         let (hash, bytes) = writer.finish();
         self.resources.push(Resource::new(
-            file_name(path).to_owned(),
+            resource_name(path).to_owned(),
             path.to_owned(),
             hash,
             bytes,
@@ -107,4 +107,16 @@ pub(super) fn options_for(path: &str) -> SimpleFileOptions {
 
 fn file_name(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, name)| name)
+}
+
+/// Return the manifest identifier for a resource path.
+///
+/// The conventional WACZ path uses camel case, while Data Package resource names permit only
+/// lowercase ASCII. The path remains `pages/extraPages.jsonl`; only its manifest identifier is
+/// normalized.
+fn resource_name(path: &str) -> &str {
+    match file_name(path) {
+        "extraPages.jsonl" => "extra-pages.jsonl",
+        name => name,
+    }
 }

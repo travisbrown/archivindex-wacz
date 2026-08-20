@@ -59,7 +59,7 @@ pub struct Inspection {
     /// a `304 Not Modified` answer reaches the processor with an empty payload. A processor that
     /// returns recaptures forever creates an infinite crawl.
     pub recaptures: Vec<String>,
-    /// The page-list title for this capture.
+    /// The page-list title for this capture, also retained in its WARC metadata record.
     pub title: Option<String>,
 }
 

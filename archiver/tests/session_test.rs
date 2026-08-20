@@ -16,6 +16,7 @@ use archivindex_wacz::reader::{ValidationOptions, WaczReader};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
+use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
@@ -872,6 +873,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
 
     assert!(reader.verify_fixity()?.is_success());
+    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
 
     // The WARC file is named after the session identifier.
     assert_eq!(
@@ -981,7 +983,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     // Discovered captures carry the URI of the page they were discovered on as `via` in their
     // metadata records; seed captures (redirect hops included) carry none. Both discoveries came
     // from the home page's payload.
-    let vias = records
+    let metadata = records
         .iter()
         .filter(|record| record.type_name() == "metadata")
         .map(|record| {
@@ -993,18 +995,21 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
                 panic!("the metadata body should parse as warc-fields");
             };
 
-            fields.via()
+            (
+                fields.via(),
+                fields.get(&MetadataField::Dcmi(DcmiTerm::Title)),
+            )
         })
         .collect::<Vec<_>>();
 
     assert_eq!(
-        vias,
+        metadata,
         vec![
-            None,
-            None,
-            None,
-            Some(seeds[0].as_str()),
-            Some(seeds[0].as_str()),
+            (None, Some("Home")),
+            (None, None),
+            (None, Some("About")),
+            (Some(seeds[0].as_str()), Some("About")),
+            (Some(seeds[0].as_str()), None),
         ]
     );
 

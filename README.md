@@ -51,6 +51,15 @@ order. Conflicting captures of the same comment are reported through the warning
 cargo run --bin archivindex-archiver -- read-wp-comments comments.wacz > comments.jsonl
 ```
 
+The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A
+metadata record's `title` field supplies the linked page title. Captures whose metadata contains a
+`via` field are written to `extraPages.jsonl`; all others are written to `pages.jsonl`:
+
+```bash
+cargo run --bin archivindex-archiver -- warc-to-wacz capture.warc.gz \
+  --output capture.wacz
+```
+
 ## License
 
 This project is licensed under the [MIT License](https://opensource.org/license/mit). See

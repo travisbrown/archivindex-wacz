@@ -35,6 +35,7 @@
 //!
 //! * [`client`]: the archiving client and its outcome types
 //! * [`config`]: client configuration
+//! * [`conversion`]: converting existing WARC files into indexed WACZ packages
 //! * [`session`]: queue-driven crawl sessions
 //! * [`wordpress`]: capturing and reading resources from the `WordPress` REST API
 #![deny(missing_docs)]
@@ -44,6 +45,7 @@
 
 pub mod client;
 pub mod config;
+pub mod conversion;
 mod response;
 pub mod session;
 pub mod wordpress;

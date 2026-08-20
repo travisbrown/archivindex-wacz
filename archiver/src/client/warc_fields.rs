@@ -79,6 +79,7 @@ impl<'a> Warcinfo<'a> {
 struct Metadata<'a> {
     via: Option<&'a str>,
     fetch_time_ms: u128,
+    title: Option<&'a str>,
 }
 
 /// Build the `warcinfo` record at the start of a WARC file.
@@ -108,10 +109,12 @@ pub(super) fn metadata_record(
     warcinfo_id: &Uri<String>,
     fetch_time: Duration,
     via: Option<&str>,
+    title: Option<&str>,
 ) -> Result<Record, Error> {
     let fields: MetadataBody = to_body(&Metadata {
         via,
         fetch_time_ms: fetch_time.as_millis(),
+        title,
     })?;
     let mut record = Record::metadata(date)
         .target_uri(target_uri)
