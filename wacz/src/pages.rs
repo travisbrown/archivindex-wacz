@@ -12,8 +12,8 @@ use bounded_static::{IntoBoundedStatic, ToStatic};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::Digest as _;
 
-use crate::ExtraProperties;
 use crate::lines::Lines;
+use crate::{ExtraProperties, LineContext};
 
 /// The format identifier required in the header line of a page list.
 pub const FORMAT: &str = "json-pages-1.0";
@@ -28,20 +28,29 @@ pub enum Error {
     #[error("missing page list header")]
     MissingHeader,
     /// The header line could not be parsed.
-    #[error("invalid page list header")]
-    InvalidHeader(#[source] serde_json::Error),
+    #[error("invalid page list header at {context}")]
+    InvalidHeader {
+        /// Bounded source context.
+        context: LineContext,
+        /// Underlying deserialization error.
+        #[source]
+        source: serde_json::Error,
+    },
     /// The header line declares a format other than [`FORMAT`].
     #[error("unsupported page list format: {0}")]
     UnsupportedFormat(String),
     /// A page entry line could not be parsed.
-    #[error("invalid page list entry on line {line_number}")]
+    #[error("invalid page list entry at {context}")]
     InvalidEntry {
         /// The underlying deserialization error.
         #[source]
-        error: serde_json::Error,
-        /// The one-based line number of the invalid entry.
-        line_number: usize,
+        source: serde_json::Error,
+        /// Bounded source context.
+        context: LineContext,
     },
+    /// The page-list stream failed while reading a line.
+    #[error(transparent)]
+    LineIo(#[from] crate::lines::Error),
     /// A page entry could not be serialized.
     #[error("invalid page list entry")]
     Serialization(#[source] serde_json::Error),
@@ -141,11 +150,20 @@ impl<R: BufRead> PageListReader<R> {
     /// Fails if the stream has no non-blank lines, if the header line is not valid JSON, or if the
     /// header declares a format other than [`FORMAT`].
     pub fn new(reader: R) -> Result<Self, Error> {
-        let mut lines = Lines::new(reader);
-        let (_, content) = lines.next_content()?.ok_or(Error::MissingHeader)?;
+        Self::with_source(reader, "<stream>")
+    }
 
-        let header =
-            serde_json::from_str::<PageListHeader<'_>>(content).map_err(Error::InvalidHeader)?;
+    /// Create a reader carrying a member path or source name for diagnostics.
+    pub fn with_source(reader: R, source: impl Into<String>) -> Result<Self, Error> {
+        let mut lines = Lines::with_source(reader, source);
+        let (location, line_text) = lines.next_content()?.ok_or(Error::MissingHeader)?;
+
+        let header = serde_json::from_str::<PageListHeader<'_>>(line_text).map_err(|source| {
+            Error::InvalidHeader {
+                context: location,
+                source,
+            }
+        })?;
 
         if header.format != FORMAT {
             return Err(Error::UnsupportedFormat(header.format.into_owned()));
@@ -168,13 +186,16 @@ impl<R: BufRead> Iterator for PageListReader<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.lines.next_content() {
-            Ok(Some((line_number, content))) => Some(
-                serde_json::from_str::<Page<'_>>(content)
+            Ok(Some((location, line_text))) => Some(
+                serde_json::from_str::<Page<'_>>(line_text)
                     .map(IntoBoundedStatic::into_static)
-                    .map_err(|error| Error::InvalidEntry { error, line_number }),
+                    .map_err(|source| Error::InvalidEntry {
+                        source,
+                        context: location,
+                    }),
             ),
             Ok(None) => None,
-            Err(error) => Some(Err(Error::Io(error))),
+            Err(error) => Some(Err(Error::LineIo(error))),
         }
     }
 }
@@ -321,13 +342,15 @@ mod tests {
 
     #[test]
     fn read_reports_entry_line_numbers() -> Result<(), Box<dyn std::error::Error>> {
-        let mut reader = PageListReader::new(
+        let mut reader = PageListReader::with_source(
             &b"{\"format\": \"json-pages-1.0\", \"id\": \"pages\", \"title\": \"t\"}\nnot json\n"[..],
+            "pages/pages.jsonl",
         )?;
 
         assert!(matches!(
             reader.next(),
-            Some(Err(Error::InvalidEntry { line_number: 2, .. }))
+            Some(Err(Error::InvalidEntry { context, .. }))
+                if context.source == "pages/pages.jsonl" && context.line == 2
         ));
 
         Ok(())

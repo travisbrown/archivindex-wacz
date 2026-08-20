@@ -15,9 +15,9 @@ use bounded_static::{IntoBoundedStatic, ToStatic};
 // Import the trait anonymously to make `trunc_subsecs` available without binding its name.
 use chrono::{DateTime, NaiveDateTime, SubsecRound as _, Utc};
 
-use crate::ExtraProperties;
 use crate::digest::Sha256Digest;
 use crate::lines::Lines;
+use crate::{ExtraProperties, LineContext};
 
 /// The whole-second portion of a timestamp used in CDXJ lines.
 const SECONDS_FORMAT: &str = "%Y%m%d%H%M%S";
@@ -31,9 +31,15 @@ const MILLISECONDS_LENGTH: usize = 17;
 /// An error type for CDXJ parsing and key generation.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The underlying stream could not be read.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    /// A line-oriented stream failed or contained an invalid CDXJ item.
+    #[error("invalid CDXJ item at {context}")]
+    InvalidLine {
+        /// Bounded source context.
+        context: LineContext,
+        /// Parsing or I/O failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// The line does not contain the three space-separated parts of a CDXJ item.
     #[error("truncated CDXJ line: {0}")]
     Truncated(String),
@@ -388,9 +394,15 @@ pub struct IndexReader<R> {
 impl<R: BufRead> IndexReader<R> {
     /// Create a new reader.
     #[must_use]
-    pub const fn new(reader: R) -> Self {
+    pub fn new(reader: R) -> Self {
+        Self::with_source(reader, "<stream>")
+    }
+
+    /// Create a reader with a source name used in diagnostics.
+    #[must_use]
+    pub fn with_source(reader: R, source: impl Into<String>) -> Self {
         Self {
-            lines: Lines::new(reader),
+            lines: Lines::with_source(reader, source),
         }
     }
 }
@@ -400,11 +412,19 @@ impl<R: BufRead> Iterator for IndexReader<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.lines.next_content() {
-            Ok(Some((_, content))) => {
-                Some(Item::parse(content).map(IntoBoundedStatic::into_static))
-            }
+            Ok(Some((location, line_text))) => Some(
+                Item::parse(line_text)
+                    .map(IntoBoundedStatic::into_static)
+                    .map_err(|source| Error::InvalidLine {
+                        context: location,
+                        source: Box::new(source),
+                    }),
+            ),
             Ok(None) => None,
-            Err(error) => Some(Err(Error::Io(error))),
+            Err(error) => Some(Err(Error::InvalidLine {
+                context: error.context,
+                source: Box::new(error.source),
+            })),
         }
     }
 }
@@ -641,6 +661,32 @@ mod tests {
         assert_eq!(items[0], items[1]);
 
         Ok(())
+    }
+
+    #[test]
+    fn index_errors_include_bounded_source_context() {
+        let input = format!("{}\n", "x".repeat(1_000));
+        let mut reader = IndexReader::with_source(input.as_bytes(), "indexes/example.cdxj");
+
+        let Some(Err(Error::InvalidLine { context, .. })) = reader.next() else {
+            panic!("expected an invalid contextualized line");
+        };
+        assert_eq!(context.source, "indexes/example.cdxj");
+        assert_eq!(context.line, 1);
+        assert_eq!(
+            context
+                .excerpt
+                .as_deref()
+                .map(str::chars)
+                .map(Iterator::count),
+            Some(161)
+        );
+        assert!(
+            context
+                .excerpt
+                .as_deref()
+                .is_some_and(|value| value.ends_with('…'))
+        );
     }
 
     #[test]

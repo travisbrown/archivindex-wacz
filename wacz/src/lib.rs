@@ -26,6 +26,27 @@ pub mod io;
 mod lines;
 pub mod pages;
 
+/// Bounded source context for an error in a line-oriented member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LineContext {
+    /// Member path or caller-supplied stream name.
+    pub source: String,
+    /// One-based line number.
+    pub line: usize,
+    /// A bounded excerpt, absent when reading failed before content was available.
+    pub excerpt: Option<String>,
+}
+
+impl std::fmt::Display for LineContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}", self.source, self.line)?;
+        if let Some(excerpt) = &self.excerpt {
+            write!(formatter, ": {excerpt}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Additional JSON properties preserved verbatim for round-tripping.
 ///
 /// A [`serde_json::Map`] wrapper that implements the `bounded_static` traits required by the

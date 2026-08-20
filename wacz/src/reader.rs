@@ -216,7 +216,7 @@ impl<R: Read + Seek> WaczReader<R> {
     pub fn page_list(&mut self, path: &str) -> Result<PageListReader<MemberReader<'_>>, Error> {
         let member = self.member_stream(path)?;
 
-        Ok(PageListReader::new(member)?)
+        Ok(PageListReader::with_source(member, path)?)
     }
 
     /// The paths of the WARC files, in unspecified order.
@@ -245,7 +245,7 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// Read a CDXJ index by path, decompressing files with a `.gz` extension.
     pub fn index(&mut self, path: &str) -> Result<IndexReader<MemberReader<'_>>, Error> {
-        Ok(IndexReader::new(self.member_stream(path)?))
+        Ok(IndexReader::with_source(self.member_stream(path)?, path))
     }
 
     /// Read a WARC file by path, decompressing files with a `.gz` extension.
