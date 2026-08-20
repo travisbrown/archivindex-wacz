@@ -12,7 +12,8 @@ Tools for capturing web pages and packaging them as web archive collections.
 | Crate | Description |
 | --- | --- |
 | [`archivindex-wacz`](wacz/) | Reading and writing web archive collections in the [WACZ][wacz-spec] format |
-| [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into the WACZ format |
+| [`archivindex-packager`](packager/) | Packaging WARC captures as indexed WACZ distributions |
+| [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into WARC files |
 | [`archivindex-archiver-cli`](archiver-cli/) | An `archivindex-archiver` command-line front end |
 | [`archivindex-warc-revisit-index`](warc-revisit-index/) | Persistent WARC payload-revisit and HTTP resource state |
 
@@ -21,11 +22,11 @@ The WARC reading and writing core these crates are built on lives in a separate 
 
 ## Usage
 
-The `archive` command reads one URL per line from standard input and writes a single WACZ file:
+The `archive` command reads one URL per line from standard input and writes a single WARC file:
 
 ```bash
 echo https://example.com/ \
-  | cargo run --bin archivindex-archiver -- archive --output example.wacz
+  | cargo run --bin archivindex-archiver -- archive --output example.warc.gz
 ```
 
 The `archive-wp-comments` command captures comment batches from a WordPress REST API into a crawl
@@ -36,7 +37,7 @@ can stop after a fixed number of successful batches (including validation recapt
 ```bash
 cargo run --bin archivindex-archiver -- archive-wp-comments \
   --base-url https://example.com/ \
-  --output comments.wacz \
+  --output comments.warc.gz \
   --session-name comments-2026 \
   --operator "A. Archivist" \
   --operator-email archivist@example.com \
@@ -48,12 +49,14 @@ The `read-wp-comments` command writes the archived comments as JSON Lines in asc
 order. Conflicting captures of the same comment are reported through the warning log:
 
 ```bash
-cargo run --bin archivindex-archiver -- read-wp-comments comments.wacz > comments.jsonl
+cargo run --bin archivindex-archiver -- read-wp-comments comments.warc.gz > comments.jsonl
 ```
 
 The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A
 metadata record's `title` field supplies the linked page title. Captures whose metadata contains a
-`via` field are written to `extraPages.jsonl`; all others are written to `pages.jsonl`:
+`via` field are written to `extraPages.jsonl`; all others are written to `pages.jsonl`. The first
+`warcinfo` record's title and description become package metadata, and additional warcinfo record
+IDs are reported as conversion warnings:
 
 ```bash
 cargo run --bin archivindex-archiver -- warc-to-wacz capture.warc.gz \

@@ -48,7 +48,7 @@ const COMMENTS_PER_PAGE: usize = 100;
 ///         email: None,
 ///     },
 ///     [first],
-///     "wordpress-comments.wacz",
+///     "wordpress-comments.warc.gz",
 /// )?
 /// .processor(processor)
 /// .run()?;

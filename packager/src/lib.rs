@@ -1,8 +1,12 @@
-//! Conversion of existing WARC files into indexed WACZ packages.
+//! Packaging existing WARC files as indexed WACZ distributions.
+#![deny(missing_docs)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
+#![allow(clippy::missing_errors_doc)]
+#![forbid(unsafe_code)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{BufRead, BufWriter, Seek, Write};
+use std::io::{BufRead, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use archivindex_wacz::ExtraProperties;
@@ -20,13 +24,30 @@ use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
 use url::Url;
 
-use crate::config::IndexFormat;
-use crate::response;
-use crate::session::{Capture, CaptureProcessor};
+pub use archivindex_wacz::writer::IndexFormat;
 
 const INDEX_NAME: &str = "index.cdx";
 const EXTRA_PAGES_NAME: &str = "extraPages.jsonl";
 const REVISIT_MIME: &str = "warc/revisit";
+
+/// An HTTP capture presented to a fallback page-title generator.
+#[derive(Clone, Copy, Debug)]
+pub struct Capture<'a> {
+    /// The captured target URL.
+    pub url: &'a str,
+    /// The HTTP response status.
+    pub status: u16,
+    /// The decoded entity body, or stored body bytes when decoding fails.
+    pub payload: &'a [u8],
+    /// The complete recorded HTTP response.
+    pub response: &'a [u8],
+}
+
+/// Generate a fallback page title from an existing captured response.
+pub trait PageTitleGenerator {
+    /// Return a title for `capture`, or `None` when no title can be derived.
+    fn title(&mut self, capture: &Capture<'_>) -> Option<String>;
+}
 
 /// An error converting an existing WARC file into a WACZ package.
 #[derive(Debug, thiserror::Error)]
@@ -97,11 +118,13 @@ pub struct ConversionSummary {
 /// lengths independently addressable even when the input was a continuously compressed gzip
 /// stream. Metadata fields linked by `WARC-Refers-To` or `WARC-Concurrent-To` classify captures:
 /// those with `via` enter `extraPages.jsonl`, while the rest enter the required page list. A
-/// metadata `title` takes precedence over one supplied by an optional [`CaptureProcessor`].
+/// metadata `title` takes precedence over one supplied by an optional [`PageTitleGenerator`].
+/// WARCs declaring `pageList: metadata` in their first `warcinfo` include only captures whose
+/// linked metadata has a `pageUrl`; other WARCs retain the legacy one-page-per-capture behavior.
 pub struct WarcToWacz<'a> {
     input: PathBuf,
     output: PathBuf,
-    processor: Option<Box<dyn CaptureProcessor + 'a>>,
+    title_generator: Option<Box<dyn PageTitleGenerator + 'a>>,
     index_format: IndexFormat,
 }
 
@@ -112,18 +135,17 @@ impl<'a> WarcToWacz<'a> {
         Self {
             input: input.into(),
             output: output.into(),
-            processor: None,
+            title_generator: None,
             index_format: IndexFormat::Plain,
         }
     }
 
-    /// Use `processor` to generate fallback page titles from captured HTTP responses.
+    /// Use `generator` to generate fallback page titles from captured HTTP responses.
     ///
-    /// Links and recaptures returned by the processor are ignored because conversion has no crawl
-    /// queue. A title recorded in linked WARC metadata always replaces the generated title.
+    /// A title recorded in linked WARC metadata always replaces the generated title.
     #[must_use]
-    pub fn processor<P: CaptureProcessor + 'a>(mut self, processor: P) -> Self {
-        self.processor = Some(Box::new(processor));
+    pub fn title_generator<G: PageTitleGenerator + 'a>(mut self, generator: G) -> Self {
+        self.title_generator = Some(Box::new(generator));
         self
     }
 
@@ -136,7 +158,7 @@ impl<'a> WarcToWacz<'a> {
 
     /// Parse the WARC and write the completed WACZ, refusing to overwrite `output`.
     pub fn run(mut self) -> Result<ConversionSummary, Error> {
-        let gzip = is_gzip_path(&self.input);
+        let gzip = is_gzip_file(&self.input)?;
         let warc_name = if gzip { "data.warc.gz" } else { "data.warc" };
 
         if gzip {
@@ -165,7 +187,7 @@ impl<'a> WarcToWacz<'a> {
             let record = record?;
             package_info.inspect(&record);
             collect_metadata(&record, &mut annotations);
-            let capture = capture_info(&record, self.processor.as_deref_mut());
+            let capture = capture_info(&record, self.title_generator.as_deref_mut());
             let raw = record.into_raw()?;
             let written = if gzip {
                 warc.write_gzip(&raw)?
@@ -180,14 +202,24 @@ impl<'a> WarcToWacz<'a> {
             }
         }
 
-        for page in &mut pages {
-            if let Some(annotation) = annotations.get(&page.record_id) {
+        pages.retain_mut(|page| {
+            let annotation = annotations.get(&page.record_id);
+            if package_info.pages_from_metadata
+                && annotation.is_none_or(|item| item.page_url.is_none())
+            {
+                return false;
+            }
+            if let Some(annotation) = annotation {
                 if let Some(title) = &annotation.title {
                     page.title = Some(title.clone());
                 }
+                if let Some(url) = &annotation.page_url {
+                    page.url.clone_from(url);
+                }
                 page.extra = annotation.via;
             }
-        }
+            true
+        });
 
         let mut file = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
         file.rewind()?;
@@ -243,6 +275,7 @@ struct PackageInfo {
     description: Option<String>,
     warcinfo_count: usize,
     duplicate_warcinfo_record_ids: Vec<String>,
+    pages_from_metadata: bool,
 }
 
 impl PackageInfo {
@@ -265,6 +298,9 @@ impl PackageInfo {
         self.description = fields
             .get(&WarcinfoField::Dcmi(DcmiTerm::Description))
             .map(str::to_owned);
+        self.pages_from_metadata = fields
+            .get(&WarcinfoField::Other("pagelist".to_owned()))
+            .is_some_and(|value| value == "metadata");
     }
 
     fn warnings(&self) -> Vec<ConversionWarning> {
@@ -351,7 +387,7 @@ impl PageDraft {
 
 fn capture_info(
     record: &Record,
-    processor: Option<&mut (dyn CaptureProcessor + '_)>,
+    generator: Option<&mut (dyn PageTitleGenerator + '_)>,
 ) -> Option<CaptureInfo> {
     match record {
         Record::Response { header, body } => capture_info_from_http(
@@ -366,7 +402,7 @@ fn capture_info(
                 .map(ToString::to_string),
             body,
             false,
-            processor,
+            generator,
         ),
         Record::Revisit { header, body } => capture_info_from_http(
             header.core.record_id.as_str(),
@@ -376,7 +412,7 @@ fn capture_info(
             Some(REVISIT_MIME.to_owned()),
             body,
             true,
-            processor,
+            generator,
         ),
         _ => None,
     }
@@ -391,14 +427,14 @@ fn capture_info_from_http(
     mime: Option<String>,
     message: &[u8],
     revisit: bool,
-    processor: Option<&mut (dyn CaptureProcessor + '_)>,
+    generator: Option<&mut (dyn PageTitleGenerator + '_)>,
 ) -> Option<CaptureInfo> {
     let url = Url::parse(target_uri).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
     let key = cdxj::search_key(target_uri).ok()?;
-    let head = response::head(message);
+    let head = response_head(message);
     let status = head.as_ref().map(|head| head.status);
     let entity: Cow<'_, [u8]> = if revisit {
         Cow::Borrowed(&[])
@@ -409,17 +445,14 @@ fn capture_info_from_http(
             })
         })
     };
-    let generated_title = processor.and_then(|processor| {
+    let generated_title = generator.and_then(|generator| {
         status.and_then(|status| {
-            processor
-                .inspect(&Capture {
-                    url: target_uri,
-                    final_url: target_uri,
-                    status,
-                    payload: &entity,
-                    response: message,
-                })
-                .title
+            generator.title(&Capture {
+                url: target_uri,
+                status,
+                payload: &entity,
+                response: message,
+            })
         })
     });
 
@@ -440,6 +473,7 @@ fn capture_info_from_http(
 struct MetadataAnnotation {
     title: Option<String>,
     via: bool,
+    page_url: Option<String>,
 }
 
 fn collect_metadata(record: &Record, annotations: &mut HashMap<String, MetadataAnnotation>) {
@@ -455,6 +489,9 @@ fn collect_metadata(record: &Record, annotations: &mut HashMap<String, MetadataA
         .filter(|title| !title.is_empty())
         .map(str::to_owned);
     let via = fields.via().is_some();
+    let page_url = fields
+        .get(&MetadataField::Other("pageurl".to_owned()))
+        .map(str::to_owned);
 
     for record_id in header.refers_to.iter().chain(&header.concurrent_to) {
         let annotation = annotations
@@ -464,6 +501,9 @@ fn collect_metadata(record: &Record, annotations: &mut HashMap<String, MetadataA
             annotation.title.clone_from(&title);
         }
         annotation.via |= via;
+        if page_url.is_some() {
+            annotation.page_url.clone_from(&page_url);
+        }
     }
 }
 
@@ -485,8 +525,29 @@ fn stored_digest(written: &Written) -> Option<Sha256Digest> {
         .map(Sha256Digest)
 }
 
-fn is_gzip_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
+fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {
+    let mut file = std::fs::File::open(path)?;
+    let mut magic = [0; 2];
+    Ok(file.read(&mut magic)? == magic.len() && magic == [0x1f, 0x8b])
+}
+
+struct ResponseHead {
+    status: u16,
+    body_offset: usize,
+}
+
+fn response_head(message: &[u8]) -> Option<ResponseHead> {
+    let first_line_end = message.windows(2).position(|bytes| bytes == b"\r\n")?;
+    let first_line = std::str::from_utf8(&message[..first_line_end]).ok()?;
+    let mut parts = first_line.split_ascii_whitespace();
+    let version = parts.next()?;
+    let status = parts.next()?.parse().ok()?;
+    if !version.starts_with("HTTP/") {
+        return None;
+    }
+    let body_offset = message.windows(4).position(|bytes| bytes == b"\r\n\r\n")? + 4;
+    Some(ResponseHead {
+        status,
+        body_offset,
+    })
 }

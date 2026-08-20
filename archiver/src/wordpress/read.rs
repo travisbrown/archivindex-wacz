@@ -1,10 +1,10 @@
-//! Reading comments captured from the `WordPress` REST API v2 from WACZ files.
+//! Reading comments captured from the `WordPress` REST API v2 from WARC files.
 
 use std::collections::BTreeMap;
+use std::io::BufRead;
 use std::path::Path;
 
-use archivindex_wacz::reader::WaczReader;
-use archivindex_warc::io::read as warc_read;
+use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::{Record, payload};
 use serde::Serialize;
@@ -36,13 +36,13 @@ pub struct CommentConflict {
 /// An error produced while reading archived `WordPress` comments.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The WACZ or one of its files could not be read.
+    /// The WARC file could not be opened.
     #[error(transparent)]
-    Wacz(#[from] archivindex_wacz::reader::Error),
-    /// A WARC file could not be parsed.
-    #[error("invalid WARC member {path}")]
+    Io(#[from] std::io::Error),
+    /// A WARC record could not be parsed.
+    #[error("invalid WARC file {path}")]
     Warc {
-        /// The WARC file's path within the WACZ.
+        /// The source WARC file's path.
         path: String,
         /// The parsing failure.
         #[source]
@@ -80,57 +80,74 @@ pub enum Error {
     },
 }
 
-/// Read all comments captured in a WACZ file.
+/// Read all comments captured in a plain or gzip-compressed WARC file.
 ///
 /// Successful HTTP responses whose target path ends in `/wp-json/wp/v2/comments` are parsed as
 /// comment batches. Redirect responses and captures of other endpoints are ignored. The returned
 /// comments are sorted by numeric ID and deduplicated, retaining the first archived object for each
 /// ID. Every pair of unequal objects sharing an ID is included in the warnings.
 pub fn read_comments(path: impl AsRef<Path>) -> Result<CommentReadResult, Error> {
-    let mut reader = WaczReader::open(path)?;
-    let warc_paths = reader.warc_paths().map(str::to_owned).collect::<Vec<_>>();
+    let path = path.as_ref();
+    let display_path = path.display().to_string();
     let mut comments = CommentCollector::default();
 
-    for path in warc_paths {
-        let records = reader.warc(&path)?.iter_records::<NoExtension>();
-
-        for record in records {
-            let record = record.map_err(|source| Error::Warc {
-                path: path.clone(),
-                source,
-            })?;
-
-            let Record::Response { header, body } = record else {
-                continue;
-            };
-            let url = header.target_uri.into_string();
-
-            if !is_comment_endpoint(&url) {
-                continue;
-            }
-
-            let response = crate::response::head(&body)
-                .ok_or_else(|| Error::InvalidResponse { url: url.clone() })?;
-
-            if !(200..300).contains(&response.status) {
-                continue;
-            }
-
-            let entity = payload::entity_body(&body).map_err(|source| Error::Payload {
-                url: url.clone(),
-                source,
-            })?;
-            let batch =
-                serde_json::from_slice::<Vec<Value>>(&entity).map_err(|source| Error::Json {
-                    url: url.clone(),
-                    source,
-                })?;
-
-            comments.extend(batch, &url)?;
-        }
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
+    {
+        collect_records(
+            WarcReader::from_path_gzip(path)?,
+            &display_path,
+            &mut comments,
+        )?;
+    } else {
+        collect_records(WarcReader::from_path(path)?, &display_path, &mut comments)?;
     }
 
     Ok(comments.finish())
+}
+
+fn collect_records<R: BufRead>(
+    reader: WarcReader<R>,
+    path: &str,
+    comments: &mut CommentCollector,
+) -> Result<(), Error> {
+    for record in reader.iter_records::<NoExtension>() {
+        let record = record.map_err(|source| Error::Warc {
+            path: path.to_owned(),
+            source,
+        })?;
+
+        let Record::Response { header, body } = record else {
+            continue;
+        };
+        let url = header.target_uri.into_string();
+
+        if !is_comment_endpoint(&url) {
+            continue;
+        }
+
+        let response = crate::response::head(&body)
+            .ok_or_else(|| Error::InvalidResponse { url: url.clone() })?;
+
+        if !(200..300).contains(&response.status) {
+            continue;
+        }
+
+        let entity = payload::entity_body(&body).map_err(|source| Error::Payload {
+            url: url.clone(),
+            source,
+        })?;
+        let batch =
+            serde_json::from_slice::<Vec<Value>>(&entity).map_err(|source| Error::Json {
+                url: url.clone(),
+                source,
+            })?;
+
+        comments.extend(batch, &url)?;
+    }
+    Ok(())
 }
 
 /// Whether a captured URL targets the comments collection endpoint (with any query string).
@@ -195,7 +212,6 @@ impl CommentCollector {
 
 #[cfg(test)]
 mod tests {
-    use archivindex_wacz::writer::{PackageMetadata, WaczWriter};
     use archivindex_warc::io::write::WarcWriter;
     use archivindex_warc::record::Record;
     use chrono::Utc;
@@ -203,12 +219,13 @@ mod tests {
 
     use super::{CommentConflict, read_comments};
 
-    /// Write response records into a minimal WACZ fixture and return its temporary directory.
+    /// Write response records into a WARC fixture and return its temporary directory.
     fn fixture(
         responses: &[(&str, &str, &str)],
     ) -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
-        let mut warc = Vec::new();
-        let mut warc_writer = WarcWriter::new(&mut warc);
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("comments.warc");
+        let mut warc_writer = WarcWriter::new(std::fs::File::create(&path)?);
 
         for (url, status, body) in responses {
             let message = format!(
@@ -220,12 +237,6 @@ mod tests {
             warc_writer.write(&record.into_raw()?)?;
         }
         warc_writer.flush()?;
-
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("comments.wacz");
-        let mut writer = WaczWriter::create(&path)?;
-        writer.add_warc("comments.warc", warc.as_slice())?;
-        writer.finish(PackageMetadata::default())?;
 
         Ok((directory, path))
     }

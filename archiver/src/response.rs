@@ -5,7 +5,7 @@
 //! always complete: the recorder fails a fetch that ends before the header terminator, truncating
 //! only bodies.
 
-/// The recorded response fields used for indexing and redirect handling.
+/// The recorded response fields used for payload extraction and redirect handling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Head {
     /// The status code from the final status line.

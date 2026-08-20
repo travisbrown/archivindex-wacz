@@ -99,7 +99,7 @@ pub struct SessionSummary {
     pub extra_captures: Vec<CaptureSummary>,
     /// URLs that exhausted capture attempts.
     pub failures: Vec<Failure>,
-    /// The error that ended crawling early, if the partial WACZ could still be written.
+    /// The error that ended crawling early, if the partial WARC could still be written.
     pub fatal_error: Option<Error>,
 }
 
@@ -195,8 +195,8 @@ impl<'a> Session<'a> {
     /// Existing payload entries make matching responses revisits, and existing resource state
     /// supplies conditional request headers. New records enter a private in-memory overlay during
     /// the crawl, so later captures in the same session can use them without exposing records that
-    /// are not durable yet. After the WACZ is complete, its WARC is indexed into this database in
-    /// one transaction. Without this option, the in-memory index simply lasts for the run.
+    /// are not durable yet. After the WARC is atomically published, it is indexed into this
+    /// database in one transaction. Without this option, the in-memory index lasts for the run.
     #[must_use]
     pub fn revisit_index(mut self, path: impl Into<PathBuf>) -> Self {
         self.revisit_index = Some(path.into());

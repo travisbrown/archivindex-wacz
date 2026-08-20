@@ -11,6 +11,7 @@ use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
+use archivindex_packager::WarcToWacz;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::reader::{ValidationOptions, WaczReader};
 use archivindex_warc::record::extension::NoExtension;
@@ -25,6 +26,43 @@ use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDa
 use archivindex_warc::version::WarcVersion;
 use archivindex_warc_revisit_index::{Index, ResourceKey, ResourceStateUpdate, RevisitTarget};
 use fluent_uri::Uri;
+
+struct PackagedWarc {
+    _directory: tempfile::TempDir,
+    reader: WaczReader<std::io::BufReader<std::fs::File>>,
+}
+
+impl std::ops::Deref for PackagedWarc {
+    type Target = WaczReader<std::io::BufReader<std::fs::File>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl std::ops::DerefMut for PackagedWarc {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.reader
+    }
+}
+
+fn package_path(path: &std::path::Path) -> Result<PackagedWarc, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let directory = tempfile::tempdir()?;
+    let warc = directory.path().join(if bytes.starts_with(&[0x1f, 0x8b]) {
+        "capture.warc.gz"
+    } else {
+        "capture.warc"
+    });
+    let wacz = directory.path().join("capture.wacz");
+    std::fs::write(&warc, bytes)?;
+    WarcToWacz::new(&warc, &wacz).run()?;
+    let reader = WaczReader::open(&wacz)?;
+    Ok(PackagedWarc {
+        _directory: directory,
+        reader,
+    })
+}
 
 /// The operator most tests run their sessions as.
 fn operator() -> Operator {
@@ -329,7 +367,7 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
     let historical_url = format!("http://127.0.0.1:{port}/historical");
     let new_a_url = format!("http://127.0.0.1:{port}/new-a");
     let new_b_url = format!("http://127.0.0.1:{port}/new-b");
-    let output = directory.path().join("persistent-revisits.wacz");
+    let output = directory.path().join("persistent-revisits.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -347,9 +385,9 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
     );
     assert!(summary.is_complete());
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let mut reader = package_path(&output)?;
     let records = reader
-        .warc("archive/persistent-revisits.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
@@ -415,7 +453,7 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
     let url = format!("http://127.0.0.1:{port}/page");
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("resource-state.sqlite3");
-    let output = directory.path().join("persistent-revalidation.wacz");
+    let output = directory.path().join("persistent-revalidation.warc.gz");
     let digest = sha256(b"<html>version 1</html>");
     let original_date = warc_date("2025-01-01T00:00:00Z");
     let index = Index::open(&database)?;
@@ -459,9 +497,9 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
     );
     assert_eq!(summary.seed_captures[0].status, 304);
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let mut reader = package_path(&output)?;
     let records = reader
-        .warc("archive/persistent-revalidation.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
     let Record::Revisit { header, .. } = &records[2] else {
@@ -487,7 +525,7 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
     let (port, server) = serve(2)?;
     let url = format!("http://127.0.0.1:{port}/about");
     let directory = tempfile::tempdir()?;
-    let output = directory.path().join("recapture.wacz");
+    let output = directory.path().join("recapture.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -508,12 +546,12 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
 
     // The second capture's payload matches the first, so it is stored as a revisit record while
     // the collection remains fully conformant.
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let mut reader = package_path(&output)?;
 
     assert!(reader.validate(ValidationOptions::all())?.is_conformant());
 
     let records = reader
-        .warc("archive/recapture.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -593,7 +631,7 @@ fn recapture_of_a_validated_response_is_a_server_not_modified_revisit()
     let (port, server) = serve_with(2, |head| (respond_versioned(head, 1), head.to_owned()))?;
     let url = format!("http://127.0.0.1:{port}/page");
     let directory = tempfile::tempdir()?;
-    let output = directory.path().join("revalidate.wacz");
+    let output = directory.path().join("revalidate.warc.gz");
     let mut observed = Vec::new();
 
     let summary = Session::new(
@@ -641,12 +679,12 @@ fn recapture_of_a_validated_response_is_a_server_not_modified_revisit()
         [200, 304]
     );
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let mut reader = package_path(&output)?;
 
     assert!(reader.validate(ValidationOptions::all())?.is_conformant());
 
     let records = reader
-        .warc("archive/revalidate.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -720,7 +758,7 @@ fn changed_content_is_recaptured_in_full_and_revalidated_by_its_new_validators()
     let (port, server) = serve_with(3, |head| (respond_versioned(head, 2), head.to_owned()))?;
     let url = format!("http://127.0.0.1:{port}/page");
     let directory = tempfile::tempdir()?;
-    let output = directory.path().join("changed.wacz");
+    let output = directory.path().join("changed.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -755,12 +793,12 @@ fn changed_content_is_recaptured_in_full_and_revalidated_by_its_new_validators()
         [200, 200, 304]
     );
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&output)?))?;
+    let mut reader = package_path(&output)?;
 
     assert!(reader.validate(ValidationOptions::all())?.is_conformant());
 
     let records = reader
-        .warc("archive/changed.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -825,7 +863,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     ];
 
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
         archiver(Config {
@@ -870,7 +908,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
         ]
     );
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
+    let mut reader = package_path(&path)?;
 
     assert!(reader.verify_fixity()?.is_success());
     assert!(reader.validate(ValidationOptions::all())?.is_conformant());
@@ -878,7 +916,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     // The WARC file is named after the session identifier.
     assert_eq!(
         reader.warc_paths().collect::<Vec<_>>(),
-        ["archive/crawl-2026.08.warc.gz"]
+        ["archive/data.warc.gz"]
     );
 
     // The manifest is titled by the identifier, and the main page is the first seed.
@@ -924,7 +962,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
 
     // The warcinfo record names the session and the User-Agent sent with every request.
     let records = reader
-        .warc("archive/crawl-2026.08.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -947,6 +985,8 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
             "operator",
             "http-header-user-agent",
             "isPartOf",
+            "title",
+            "pagelist",
         ]
     );
 
@@ -960,6 +1000,10 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     assert_eq!(fields.http_header_user_agent(), Some("session-test/1.0"));
     assert_eq!(
         fields.get(&WarcinfoField::Dcmi(DcmiTerm::IsPartOf)),
+        Some("crawl-2026.08")
+    );
+    assert_eq!(
+        fields.get(&WarcinfoField::Dcmi(DcmiTerm::Title)),
         Some("crawl-2026.08")
     );
     assert_eq!(fields.software(), Some("session-test-crawler/9.9"));
@@ -1022,7 +1066,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     assert!(
         items
             .iter()
-            .all(|item| item.fields.filename.as_deref() == Some("crawl-2026.08.warc.gz"))
+            .all(|item| item.fields.filename.as_deref() == Some("data.warc.gz"))
     );
 
     Ok(())
@@ -1040,7 +1084,7 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -1061,7 +1105,7 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(summary.seed_captures.len(), 2);
     assert!(summary.extra_captures.is_empty());
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
+    let mut reader = package_path(&path)?;
     let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(
@@ -1077,7 +1121,7 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
 
     // An operator without an email is recorded by name alone; the software defaults to this crate.
     let records = reader
-        .warc("archive/dedup.warc.gz")?
+        .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
         .collect::<Result<Vec<_>, _>>()?;
     let Record::Warcinfo {
@@ -1104,7 +1148,7 @@ fn session_limit_stops_with_discoveries_still_queued() -> Result<(), Box<dyn std
     let url = format!("http://127.0.0.1:{port}/");
 
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("limited.wacz");
+    let path = directory.path().join("limited.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -1123,7 +1167,7 @@ fn session_limit_stops_with_discoveries_still_queued() -> Result<(), Box<dyn std
     assert_eq!(summary.seed_captures.len(), 1);
     assert_eq!(summary.extra_captures.len(), 0);
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
+    let mut reader = package_path(&path)?;
 
     assert_eq!(reader.pages()?.count(), 1);
     assert!(reader.page_list("pages/extraPages.jsonl").is_err());
@@ -1137,7 +1181,7 @@ fn session_rejects_an_unwritable_operator_before_writing() -> Result<(), Box<dyn
     // Reject the invalid operator before creating output or contacting the deliberately unreachable
     // seed.
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let result = Session::new(
         archiver(Config::default()),
@@ -1192,7 +1236,7 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
 
     let url = format!("http://127.0.0.1:{port}/");
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
         archiver(Config {
@@ -1217,12 +1261,12 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
     assert_eq!(summary.seed_captures[0].status, 200);
 
     // The failed attempt leaves no trace: one warcinfo record plus one exchange's records.
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
+    let mut reader = package_path(&path)?;
 
     assert!(reader.verify_fixity()?.is_success());
     assert_eq!(
         reader
-            .warc("archive/retry.warc.gz")?
+            .warc("archive/data.warc.gz")?
             .iter_records::<NoExtension>()
             .count(),
         4
@@ -1238,7 +1282,7 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
     let url = format!("http://127.0.0.1:{port}/");
 
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -1260,7 +1304,7 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
     assert_eq!(summary.failures[0].url, url);
 
     // The collection is still written and internally consistent.
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
+    let mut reader = package_path(&path)?;
 
     assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
@@ -1272,7 +1316,7 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
 fn session_does_not_retry_permanent_failures() -> Result<(), Box<dyn std::error::Error>> {
     // A hostless URL is a permanent error, regardless of the retry settings.
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
         archiver(Config::default()),
@@ -1306,7 +1350,7 @@ fn session_rejects_invalid_identifiers() {
                     id,
                     operator(),
                     seeds,
-                    "out.wacz"
+                    "out.warc.gz"
                 ),
                 Err(Error::InvalidSessionId(_))
             ),
@@ -1320,7 +1364,7 @@ fn session_rejects_invalid_identifiers() {
             "ok-id_1.2~3",
             operator(),
             seeds,
-            "out.wacz"
+            "out.warc.gz"
         )
         .is_ok()
     );
@@ -1329,20 +1373,26 @@ fn session_rejects_invalid_identifiers() {
 #[test]
 fn session_refuses_an_existing_output() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
+    let database = directory.path().join("state.sqlite3");
     std::fs::write(&path, b"existing")?;
+    let (port, server) = serve(1)?;
+    let url = format!("http://127.0.0.1:{port}/");
 
-    let seeds: [&str; 0] = [];
     let result = Session::new(
         archiver(Config::default()),
         "existing",
         operator(),
-        seeds,
+        [&url],
         &path,
     )?
+    .revisit_index(&database)
     .run();
+    server.join().expect("server thread should not panic");
 
     assert!(result.is_err());
+    let key = ResourceKey::new(Uri::parse(url.as_str())?.to_owned());
+    assert!(Index::open(database)?.lookup_resource(&key)?.is_none());
 
     Ok(())
 }
@@ -1350,7 +1400,7 @@ fn session_refuses_an_existing_output() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let seeds: [&str; 0] = [];
     let summary = Session::new(
@@ -1365,7 +1415,7 @@ fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std:
     assert!(summary.is_complete());
     assert!(summary.seed_captures.is_empty());
 
-    let mut reader = WaczReader::new(std::io::Cursor::new(std::fs::read(&path)?))?;
+    let mut reader = package_path(&path)?;
 
     assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
@@ -1382,7 +1432,7 @@ fn session_processor_sees_the_final_response_of_a_chain() -> Result<(), Box<dyn 
     let url = format!("http://127.0.0.1:{port}/redirect");
 
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let mut observed = Vec::new();
     let summary = Session::new(
@@ -1420,7 +1470,7 @@ fn session_seed_set_is_by_requested_url() -> Result<(), Box<dyn std::error::Erro
     let seed_set = seeds.iter().cloned().collect::<HashSet<_>>();
 
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("session.wacz");
+    let path = directory.path().join("session.warc.gz");
 
     let about = seeds[1].clone();
     let missing = format!("http://127.0.0.1:{port}/missing");

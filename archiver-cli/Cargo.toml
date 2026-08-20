@@ -15,6 +15,7 @@ doc = false
 
 [dependencies]
 archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
+archivindex-packager = { version = "0.1.0", path = "../packager/" }
 cli-helpers.workspace = true
 indicatif.workspace = true
 serde_json.workspace = true

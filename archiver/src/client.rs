@@ -1,11 +1,8 @@
 //! The public archiving client facade and outcome types.
 
-use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::Write;
 use std::path::Path;
 
-use archivindex_wacz::cdxj;
-use archivindex_wacz::writer::{WaczWriter, WriterConfig};
 use archivindex_warc::record::BlockError;
 use archivindex_warc::recorder::Recorder;
 use archivindex_warc_revisit_index::Index as RevisitIndex;
@@ -60,9 +57,6 @@ pub enum Error {
     /// A session identifier is empty or contains a non-URI-unreserved character.
     #[error("invalid session identifier: {0:?}")]
     InvalidSessionId(String),
-    /// A CDXJ search key could not be derived for a URL.
-    #[error(transparent)]
-    Index(#[from] cdxj::Error),
     /// A revisit index could not be opened, queried, or updated.
     #[error(transparent)]
     RevisitIndex(#[from] archivindex_warc_revisit_index::Error),
@@ -84,9 +78,6 @@ pub enum Error {
     /// A completed WARC record could not be read for persistent indexing.
     #[error(transparent)]
     WarcRead(#[from] archivindex_warc::io::read::Error),
-    /// The WACZ file could not be written.
-    #[error(transparent)]
-    Wacz(#[from] archivindex_wacz::writer::Error),
 }
 
 impl From<archivindex_warc::record::fields::serde::Error> for Error {
@@ -141,11 +132,11 @@ pub struct Failure {
     pub error: Error,
 }
 
-/// An HTTP client that captures lists of URLs in WACZ files.
+/// An HTTP client that captures lists of URLs in WARC files.
 ///
 /// Each URL is fetched synchronously over HTTP/1.1. Redirect hops, wire-format messages, capture
-/// metadata, CDXJ entries, and page-list entries are all retained. One-shot lists request every
-/// URL unconditionally; only crawl sessions revalidate earlier captures.
+/// metadata are retained. One-shot lists request every URL unconditionally; only crawl sessions
+/// revalidate earlier captures.
 #[derive(Clone, Debug)]
 pub struct Archiver {
     recorder: Recorder,
@@ -176,25 +167,37 @@ impl Archiver {
         })
     }
 
-    /// Download URLs and write a new WACZ at `path`, refusing to overwrite an existing file.
+    /// Download URLs and atomically publish a new WARC at `path`, refusing to overwrite it.
     pub fn archive_to_path<P: AsRef<Path>, I: IntoIterator<Item = S>, S: AsRef<str>>(
         &self,
         urls: I,
         path: P,
     ) -> Result<ArchiveSummary, Error> {
-        self.archive_into(
-            urls,
-            WaczWriter::create_with_config(path, self.writer_config())?,
-        )
+        let path = path.as_ref();
+        let warc_name =
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(if self.config.gzip_warc {
+                    GZIP_WARC_NAME
+                } else {
+                    WARC_NAME
+                });
+        self.archive_collection(urls, warc_name)?
+            .finish_to_path(path)
     }
 
-    /// Download URLs and write a WACZ to `writer`.
-    pub fn archive<W: Write + Seek, I: IntoIterator<Item = S>, S: AsRef<str>>(
+    /// Download URLs and write a WARC stream to `writer`.
+    pub fn archive<W: Write, I: IntoIterator<Item = S>, S: AsRef<str>>(
         &self,
         urls: I,
         writer: W,
     ) -> Result<ArchiveSummary, Error> {
-        self.archive_into(urls, WaczWriter::with_config(writer, self.writer_config()))
+        let warc_name = if self.config.gzip_warc {
+            GZIP_WARC_NAME
+        } else {
+            WARC_NAME
+        };
+        self.archive_collection(urls, warc_name)?.finish(writer)
     }
 
     /// Start the collection used by a crawl session.
@@ -209,7 +212,7 @@ impl Archiver {
         let suffix = if gzip { ".warc.gz" } else { ".warc" };
 
         Collection::new(
-            format!("{id}{suffix}"),
+            &format!("{id}{suffix}"),
             gzip,
             &WarcinfoOptions {
                 user_agent: &self.config.user_agent,
@@ -221,31 +224,14 @@ impl Archiver {
         )
     }
 
-    /// Create a WACZ writer using this client's output configuration.
-    pub(crate) fn wacz_to_path(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> Result<WaczWriter<BufWriter<File>>, Error> {
-        Ok(WaczWriter::create_with_config(path, self.writer_config())?)
-    }
-
-    /// The WACZ configuration derived from this client.
-    pub(crate) fn writer_config(&self) -> WriterConfig {
-        WriterConfig {
-            index_format: self.config.index_format,
-            ..WriterConfig::default()
-        }
-    }
-
-    fn archive_into<W: Write + Seek, I: IntoIterator<Item = S>, S: AsRef<str>>(
+    fn archive_collection<I: IntoIterator<Item = S>, S: AsRef<str>>(
         &self,
         urls: I,
-        wacz: WaczWriter<W>,
-    ) -> Result<ArchiveSummary, Error> {
+        warc_name: &str,
+    ) -> Result<Collection, Error> {
         let gzip = self.config.gzip_warc;
-        let warc_name = if gzip { GZIP_WARC_NAME } else { WARC_NAME };
         let mut collection = Collection::new(
-            warc_name.to_owned(),
+            warc_name,
             gzip,
             &WarcinfoOptions::archiver(&self.config.user_agent),
             None,
@@ -256,12 +242,12 @@ impl Archiver {
             for url in urls {
                 let url = url.as_ref();
                 let (exchanges, error) = self.capture(url, None);
-                collection.record(url.to_owned(), exchanges, error, None, false, None)?;
+                collection.record(url.to_owned(), exchanges, error, None, None)?;
             }
         } else {
             self.capture_concurrently(urls, concurrency, &mut collection)?;
         }
 
-        collection.finish(wacz, None)
+        Ok(collection)
     }
 }

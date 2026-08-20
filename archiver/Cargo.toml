@@ -1,10 +1,10 @@
 [package]
 name = "archivindex-archiver"
-description = "Archiving web pages over HTTP into the WACZ format"
+description = "Archiving web pages over HTTP into WARC files"
 authors.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/crate/archivindex-archiver/"
-keywords = ["warc", "wacz", "web", "archive", "http"]
+keywords = ["warc", "web", "archive", "http"]
 edition.workspace = true
 readme.workspace = true
 license.workspace = true
@@ -12,7 +12,6 @@ version.workspace = true
 
 [dependencies]
 archivindex-warc-revisit-index = { version = "0.1.0", path = "../warc-revisit-index/" }
-archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
 archivindex-warc.workspace = true
 chrono.workspace = true
 flate2.workspace = true
@@ -20,9 +19,11 @@ fluent-uri.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-zip.workspace = true
+archivindex-packager = { version = "0.1.0", path = "../packager/" }
+archivindex-wacz = { version = "0.1.0", path = "../wacz/" }

@@ -83,6 +83,7 @@ dependencies = [
 name = "archivindex-archiver"
 version = "0.1.0"
 dependencies = [
+ "archivindex-packager",
  "archivindex-wacz",
  "archivindex-warc",
  "archivindex-warc-revisit-index",
@@ -92,10 +93,10 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "url",
- "zip",
 ]
 
 [[package]]
@@ -103,9 +104,23 @@ name = "archivindex-archiver-cli"
 version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
+ "archivindex-packager",
  "cli-helpers",
  "indicatif",
  "serde_json",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
+name = "archivindex-packager"
+version = "0.1.0"
+dependencies = [
+ "archivindex-wacz",
+ "archivindex-warc",
+ "chrono",
+ "flate2",
+ "tempfile",
  "thiserror 2.0.20",
  "url",
 ]

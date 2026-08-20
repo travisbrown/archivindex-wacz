@@ -6,12 +6,14 @@ use std::thread;
 use std::time::Duration;
 
 use archivindex_archiver::client::{Archiver, Error};
-use archivindex_archiver::config::{Config, IndexFormat};
+use archivindex_archiver::config::Config;
+use archivindex_packager::WarcToWacz;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::reader::WaczReader;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
+use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::DigestAlgorithm;
@@ -20,6 +22,46 @@ use archivindex_warc::version::WarcVersion;
 use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
 use fluent_uri::Uri;
+
+struct PackagedWarc {
+    _directory: tempfile::TempDir,
+    reader: WaczReader<std::io::BufReader<std::fs::File>>,
+}
+
+impl std::ops::Deref for PackagedWarc {
+    type Target = WaczReader<std::io::BufReader<std::fs::File>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl std::ops::DerefMut for PackagedWarc {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.reader
+    }
+}
+
+fn package_bytes(bytes: &[u8]) -> Result<PackagedWarc, Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let warc = directory.path().join(if bytes.starts_with(&[0x1f, 0x8b]) {
+        "capture.warc.gz"
+    } else {
+        "capture.warc"
+    });
+    let wacz = directory.path().join("capture.wacz");
+    std::fs::write(&warc, bytes)?;
+    WarcToWacz::new(&warc, &wacz).run()?;
+    let reader = WaczReader::open(&wacz)?;
+    Ok(PackagedWarc {
+        _directory: directory,
+        reader,
+    })
+}
+
+fn package_path(path: &std::path::Path) -> Result<PackagedWarc, Box<dyn std::error::Error>> {
+    package_bytes(&std::fs::read(path)?)
+}
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
 const PNG_PAYLOAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
@@ -176,7 +218,7 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
         vec![(200, 0), (200, 1), (404, 0)]
     );
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
 
     assert!(reader.verify_fixity()?.is_success());
 
@@ -316,8 +358,12 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
         panic!("the metadata body should parse as warc-fields");
     };
 
-    assert_eq!(metadata_body.len(), 1);
+    assert_eq!(metadata_body.len(), 2);
     assert!(metadata_body.fetch_time_ms().is_some());
+    assert_eq!(
+        metadata_body.get(&MetadataField::Other("pageurl".to_owned())),
+        Some(urls[0].as_str())
+    );
 
     // Records of one capture event share a single WARC-Date, recorded at exactly microsecond
     // precision: the archiver stores every date with six fractional digits.
@@ -408,10 +454,7 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
 
     // Every index entry's offset and length must frame exactly one complete gzip member,
     // decompressible on its own, holding one parseable response record.
-    let mut warc_bytes = Vec::new();
-    zip::ZipArchive::new(Cursor::new(&bytes))?
-        .by_name("archive/data.warc.gz")?
-        .read_to_end(&mut warc_bytes)?;
+    let warc_bytes = &bytes;
 
     for item in &items {
         assert_eq!(item.fields.filename.as_deref(), Some("data.warc.gz"));
@@ -458,7 +501,7 @@ fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(summary.is_complete());
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
 
     assert!(reader.verify_fixity()?.is_success());
 
@@ -477,10 +520,7 @@ fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(items[0].fields.filename.as_deref(), Some("data.warc"));
 
     // The offset and length frame the uncompressed response record directly.
-    let mut warc_bytes = Vec::new();
-    zip::ZipArchive::new(Cursor::new(&bytes))?
-        .by_name("archive/data.warc")?
-        .read_to_end(&mut warc_bytes)?;
+    let warc_bytes = &bytes;
 
     let offset = usize::try_from(items[0].fields.offset.expect("offset should be indexed"))?;
     let length = usize::try_from(items[0].fields.length.expect("length should be indexed"))?;
@@ -502,50 +542,6 @@ fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn archive_with_compressed_index() -> Result<(), Box<dyn std::error::Error>> {
-    let (port, server) = serve(1)?;
-    let url = format!("http://127.0.0.1:{port}/");
-
-    let archiver = Archiver::new(Config {
-        index_format: IndexFormat::zipnum(),
-        ..Config::default()
-    })?;
-    let mut bytes = Vec::new();
-    let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
-    server.join().expect("server thread should not panic");
-
-    assert!(summary.is_complete());
-
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
-
-    assert!(reader.verify_fixity()?.is_success());
-
-    // The compressed data file holds the full index; the summary locates its single block.
-    let items = reader
-        .index("indexes/index.cdx.gz")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].fields.url.as_ref(), url);
-
-    let mut summary_member = String::new();
-    zip::ZipArchive::new(Cursor::new(&bytes))?
-        .by_name("indexes/index.idx")?
-        .read_to_string(&mut summary_member)?;
-
-    let lines = summary_member.lines().collect::<Vec<_>>();
-
-    assert_eq!(
-        lines[0],
-        "!meta 0 {\"format\": \"cdxj-gzip-1.0\", \"filename\": \"index.cdx.gz\"}"
-    );
-    assert_eq!(lines.len(), 2);
-    assert!(lines[1].starts_with(&format!("{} ", items[0].key)));
-
-    Ok(())
-}
-
-#[test]
 fn archive_records_unreachable_urls_as_failures() -> Result<(), Box<dyn std::error::Error>> {
     // Bind and immediately drop a listener so that the port refuses connections.
     let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
@@ -561,7 +557,7 @@ fn archive_records_unreachable_urls_as_failures() -> Result<(), Box<dyn std::err
     assert_eq!(summary.failures[0].url, url);
 
     // The collection is still written and internally consistent.
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
 
     assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
@@ -586,7 +582,7 @@ fn archive_stops_following_at_the_redirect_limit() -> Result<(), Box<dyn std::er
     assert_eq!(summary.captures[0].status, 302);
     assert_eq!(summary.captures[0].redirects, 0);
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let items = reader
         .index("indexes/index.cdx")?
         .collect::<Result<Vec<_>, _>>()?;
@@ -600,7 +596,7 @@ fn archive_stops_following_at_the_redirect_limit() -> Result<(), Box<dyn std::er
 #[test]
 fn archive_to_path_refuses_an_existing_output() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("test.wacz");
+    let path = directory.path().join("test.warc.gz");
     std::fs::write(&path, b"existing")?;
 
     let archiver = Archiver::new(Config::default())?;
@@ -614,7 +610,7 @@ fn archive_to_path_refuses_an_existing_output() -> Result<(), Box<dyn std::error
 fn archive_to_path_writes_a_collection() -> Result<(), Box<dyn std::error::Error>> {
     let (port, server) = serve(1)?;
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("test.wacz");
+    let path = directory.path().join("test.warc.gz");
 
     let archiver = Archiver::new(Config::default())?;
     let summary = archiver.archive_to_path([format!("http://127.0.0.1:{port}/")], &path)?;
@@ -622,7 +618,7 @@ fn archive_to_path_writes_a_collection() -> Result<(), Box<dyn std::error::Error
 
     assert!(summary.is_complete());
 
-    let mut reader = WaczReader::new(std::fs::File::open(&path)?)?;
+    let mut reader = package_path(&path)?;
 
     assert!(reader.verify_fixity()?.is_success());
 
@@ -645,7 +641,7 @@ fn recorded_request_matches_the_wire_bytes() -> Result<(), Box<dyn std::error::E
 
     assert!(summary.is_complete());
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc")?
         .iter_records::<NoExtension>()
@@ -676,7 +672,7 @@ fn archive_records_chunked_responses_verbatim() -> Result<(), Box<dyn std::error
     assert!(summary.is_complete());
     assert_eq!(summary.captures[0].size, "hello world".len() as u64);
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc")?
         .iter_records::<NoExtension>()
@@ -736,7 +732,7 @@ fn archive_records_hops_captured_before_a_failure() -> Result<(), Box<dyn std::e
     assert!(summary.captures.is_empty());
     assert_eq!(summary.failures[0].url, url);
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
 
     // The URL failed, so it gets no page entry, but the hop captured before the failure is still
     // recorded and indexed.
@@ -785,7 +781,7 @@ fn archive_treats_multiple_choices_and_not_modified_as_final()
         vec![(300, 0), (304, 0)]
     );
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
@@ -816,7 +812,7 @@ fn archive_preserves_a_nonstandard_reason_phrase() -> Result<(), Box<dyn std::er
     assert!(summary.is_complete());
     assert_eq!(summary.captures[0].status, 520);
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
@@ -842,7 +838,7 @@ fn archive_preserves_repeated_set_cookie_headers() -> Result<(), Box<dyn std::er
 
     assert!(summary.is_complete());
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
@@ -870,7 +866,7 @@ fn archive_records_binary_bodies() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(summary.captures[0].size, 256);
 
     let body = (0u8..=255).collect::<Vec<_>>();
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
@@ -901,7 +897,7 @@ fn archive_identifies_payload_types_from_content() -> Result<(), Box<dyn std::er
 
     assert!(summary.is_complete());
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc.gz")?
         .iter_records::<NoExtension>()
@@ -978,7 +974,7 @@ fn archive_truncates_responses_at_the_configured_limit() -> Result<(), Box<dyn s
         "<html>home</html>".len() as u64 - 5
     );
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let records = reader
         .warc("archive/data.warc")?
         .iter_records::<NoExtension>()
@@ -1011,7 +1007,7 @@ fn archive_stops_following_a_redirect_cycle() -> Result<(), Box<dyn std::error::
     assert_eq!(summary.captures[0].status, 302);
     assert_eq!(summary.captures[0].redirects, 2);
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
     let items = reader
         .index("indexes/index.cdx")?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1097,7 +1093,7 @@ fn archive_concurrently_preserves_input_order() -> Result<(), Box<dyn std::error
         urls.iter().map(String::as_str).collect::<Vec<_>>()
     );
 
-    let mut reader = WaczReader::new(Cursor::new(&bytes))?;
+    let mut reader = package_bytes(&bytes)?;
 
     assert!(reader.verify_fixity()?.is_success());
 

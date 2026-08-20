@@ -1,11 +1,7 @@
-//! Mapping captured HTTP exchanges to WARC records and CDXJ entries.
+//! Mapping captured HTTP exchanges to WARC records.
 
-use std::borrow::Cow;
 use std::io::Write;
 
-use archivindex_wacz::ExtraProperties;
-use archivindex_wacz::cdxj;
-use archivindex_wacz::digest::Sha256Digest;
 use archivindex_warc::io::write::{WarcWriter, Written};
 use archivindex_warc::record::Record;
 use archivindex_warc::record::capture::{CaptureEvent, CaptureRecords};
@@ -17,18 +13,16 @@ use archivindex_warc_revisit_index::RevisitTarget;
 use fluent_uri::Uri;
 
 use super::capture::labelled_digest;
-use super::warc_fields::metadata_record;
+use super::warc_fields::{MetadataValues, metadata_record};
 use super::{Error, Exchange};
 use crate::response;
-
-/// The conventional CDXJ media type for an entry backed by a `revisit` record.
-const REVISIT_MIME: &str = "warc/revisit";
 
 /// Optional fields added to the metadata record accompanying an exchange.
 #[derive(Clone, Copy)]
 pub(super) struct MetadataOptions<'a> {
     pub(super) via: Option<&'a str>,
     pub(super) title: Option<&'a str>,
+    pub(super) page_url: Option<&'a str>,
 }
 
 /// Write a record, optionally as an independent gzip member.
@@ -46,7 +40,7 @@ pub(super) fn write_record<W: Write>(
     .map_err(Error::from)
 }
 
-/// Write one exchange's request, response, and metadata records and build its CDXJ item.
+/// Write one exchange's request, response, and metadata records.
 ///
 /// When `revisit_of` names the earlier capture whose payload this exchange revisits, the response
 /// is stored as a `revisit` record holding only the response head: under the `server-not-modified`
@@ -58,15 +52,13 @@ pub(super) fn write_exchange<W: Write>(
     writer: &mut WarcWriter<W>,
     exchange: Exchange,
     warcinfo_id: &Uri<String>,
-    warc_name: &str,
     gzip: bool,
     metadata: MetadataOptions<'_>,
     revisit_of: Option<&RevisitTarget>,
-) -> Result<(cdxj::Item<'static>, Option<RevisitTarget>), Error> {
+) -> Result<Option<RevisitTarget>, Error> {
     let Exchange {
-        key,
         date,
-        status,
+        status: _,
         payload_digest,
         payload_length,
         revalidated,
@@ -80,42 +72,24 @@ pub(super) fn write_exchange<W: Write>(
             RevisitProfile::IDENTICAL_PAYLOAD_DIGEST
         };
 
-        revisit_records(
-            captured,
-            date,
-            warcinfo_id,
-            original,
-            profile,
-            metadata.via,
-            metadata.title,
-        )?
+        revisit_records(captured, date, warcinfo_id, original, profile, metadata)?
     } else {
         full_records(
             captured,
             date,
             warcinfo_id,
             payload_digest.as_ref(),
-            metadata.via,
-            metadata.title,
+            metadata,
         )?
     };
 
-    let mime = if revisit_of.is_some() {
-        Some(Cow::Borrowed(REVISIT_MIME))
-    } else {
-        records
-            .response
-            .payload()
-            .and_then(|payload| payload.identified_payload_type.as_ref())
-            .map(|media_type| Cow::Owned(media_type.to_string()))
-    };
     // A revisit's payload is the original's, whatever the revisiting response itself carried.
     let digest = revisit_of
         .map(|original| original.payload_digest.clone())
         .or_else(|| payload_digest.map(labelled_digest));
     let target = revisit_of
         .is_none()
-        .then_some(digest.clone())
+        .then_some(digest)
         .flatten()
         .map(|payload_digest| RevisitTarget {
             record_id: records.response.core().record_id.clone(),
@@ -125,29 +99,12 @@ pub(super) fn write_exchange<W: Write>(
             payload_length: Some(payload_length),
         });
     write_record(writer, records.request, gzip)?;
-    let written = write_record(writer, records.response, gzip)?;
+    write_record(writer, records.response, gzip)?;
     if let Some(metadata) = records.metadata {
         write_record(writer, metadata, gzip)?;
     }
 
-    Ok((
-        cdxj::Item {
-            key: Cow::Owned(key),
-            timestamp: cdxj::Timestamp::with_milliseconds(date.date_time()),
-            fields: cdxj::Fields {
-                url: Cow::Owned(target_uri.into_string()),
-                digest: digest.map(|digest| Cow::Owned(digest.to_string())),
-                mime,
-                status: Some(status),
-                offset: Some(written.offset),
-                length: Some(written.length),
-                filename: Some(Cow::Owned(warc_name.to_owned())),
-                record_digest: Some(stored_digest(&written)),
-                extra: ExtraProperties::default(),
-            },
-        },
-        target,
-    ))
+    Ok(target)
 }
 
 /// Build a capture's request, response, and metadata records, returning its target URI.
@@ -155,9 +112,8 @@ fn full_records(
     captured: CapturedExchange,
     date: WarcDate,
     warcinfo_id: &Uri<String>,
-    payload_digest: Option<&Sha256Digest>,
-    via: Option<&str>,
-    title: Option<&str>,
+    payload_digest: Option<&[u8; 32]>,
+    metadata: MetadataOptions<'_>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
         request,
@@ -174,10 +130,7 @@ fn full_records(
         .identify_payload_type();
 
     if let Some(digest) = payload_digest {
-        event = event.payload_digest(LabelledDigest::from_digest(
-            DigestAlgorithm::Sha256,
-            &digest.0,
-        ));
+        event = event.payload_digest(LabelledDigest::from_digest(DigestAlgorithm::Sha256, digest));
     }
     if let Some(reason) = truncated {
         event = event.truncated(reason);
@@ -189,9 +142,12 @@ fn full_records(
         target_uri.clone(),
         records.response.core().record_id.clone(),
         warcinfo_id,
-        fetch_time,
-        via,
-        title,
+        MetadataValues {
+            fetch_time,
+            via: metadata.via,
+            title: metadata.title,
+            page_url: metadata.page_url,
+        },
     )?);
 
     Ok((records, target_uri))
@@ -206,8 +162,7 @@ fn revisit_records(
     warcinfo_id: &Uri<String>,
     original: &RevisitTarget,
     profile: RevisitProfile,
-    via: Option<&str>,
-    title: Option<&str>,
+    metadata_options: MetadataOptions<'_>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
         request,
@@ -249,9 +204,12 @@ fn revisit_records(
         target_uri.clone(),
         revisit.core().record_id.clone(),
         warcinfo_id,
-        fetch_time,
-        via,
-        title,
+        MetadataValues {
+            fetch_time,
+            via: metadata_options.via,
+            title: metadata_options.title,
+            page_url: metadata_options.page_url,
+        },
     )?;
 
     Ok((
@@ -262,14 +220,4 @@ fn revisit_records(
         },
         target_uri,
     ))
-}
-
-fn stored_digest(written: &Written) -> Sha256Digest {
-    written
-        .digest
-        .as_ref()
-        .and_then(LabelledDigest::decoded)
-        .and_then(|bytes| bytes.try_into().ok())
-        .map(Sha256Digest)
-        .expect("invariant violation: a digesting writer reports a 32-byte SHA-256 digest")
 }

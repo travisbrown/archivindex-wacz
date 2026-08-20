@@ -2,8 +2,7 @@
 
 use std::io::Write;
 
-use archivindex_archiver::conversion::{ConversionWarning, WarcToWacz};
-use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection};
+use archivindex_packager::{Capture, ConversionWarning, PageTitleGenerator, WarcToWacz};
 use archivindex_wacz::reader::{ValidationOptions, WaczReader};
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::extension::NoExtension;
@@ -17,15 +16,12 @@ use flate2::write::GzEncoder;
 
 struct PayloadTitle;
 
-impl CaptureProcessor for PayloadTitle {
-    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        Inspection {
-            title: Some(format!(
-                "Generated: {}",
-                String::from_utf8_lossy(capture.payload)
-            )),
-            ..Inspection::default()
-        }
+impl PageTitleGenerator for PayloadTitle {
+    fn title(&mut self, capture: &Capture<'_>) -> Option<String> {
+        Some(format!(
+            "Generated: {}",
+            String::from_utf8_lossy(capture.payload)
+        ))
     }
 }
 
@@ -121,7 +117,7 @@ fn conversion_fixture(gzip: bool) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let summary = WarcToWacz::new(&input, &output)
-        .processor(PayloadTitle)
+        .title_generator(PayloadTitle)
         .run()?;
     assert_eq!(summary.records, 7);
     assert_eq!(summary.captures, 2);

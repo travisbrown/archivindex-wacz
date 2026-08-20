@@ -1,0 +1,22 @@
+[package]
+name = "archivindex-packager"
+description = "Packaging WARC captures as indexed WACZ distributions"
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/crate/archivindex-packager/"
+keywords = ["warc", "wacz", "web", "archive"]
+edition.workspace = true
+readme.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
+archivindex-warc.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+flate2.workspace = true

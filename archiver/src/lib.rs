@@ -1,12 +1,10 @@
-//! Archiving web pages over HTTP into WACZ files.
+//! Archiving web pages over HTTP into WARC files.
 //!
-//! This crate provides a small client that captures a list of URLs in a
-//! [WACZ](https://specs.webrecorder.net/wacz/1.1.1/): a WARC file recording the exact wire bytes of
-//! the HTTP request and response for every exchange (including each hop of a redirect chain) along
-//! with the time each response took to collect, a CDXJ index over the responses, and a page list
-//! entry for every archived URL. A response whose payload duplicates an earlier capture in the
-//! same WACZ is stored as a `revisit` record referencing the original instead of repeating the
-//! payload.
+//! This crate provides a small client that captures URLs in WARC files, recording the exact wire
+//! bytes of every HTTP request and response, including redirect hops. A response whose payload
+//! duplicates an earlier capture is stored as a `revisit` record referencing the original instead
+//! of repeating the payload. WARC files can subsequently be packaged as WACZ distributions with
+//! the `archivindex-packager` crate.
 //!
 //! # Examples
 //!
@@ -16,7 +14,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let archiver = Archiver::new(Config::default())?;
-//! let summary = archiver.archive_to_path(["https://www.example.com/"], "example.wacz")?;
+//! let summary = archiver.archive_to_path(["https://www.example.com/"], "example.warc.gz")?;
 //!
 //! assert!(summary.is_complete());
 //! # Ok(())
@@ -35,7 +33,6 @@
 //!
 //! * [`client`]: the archiving client and its outcome types
 //! * [`config`]: client configuration
-//! * [`conversion`]: converting existing WARC files into indexed WACZ packages
 //! * [`session`]: queue-driven crawl sessions
 //! * [`wordpress`]: capturing and reading resources from the `WordPress` REST API
 #![deny(missing_docs)]
@@ -45,7 +42,6 @@
 
 pub mod client;
 pub mod config;
-pub mod conversion;
 mod response;
 pub mod session;
 pub mod wordpress;

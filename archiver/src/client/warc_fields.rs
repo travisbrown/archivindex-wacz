@@ -51,6 +51,8 @@ struct Warcinfo<'a> {
     #[serde(rename = "http-header-user-agent")]
     http_header_user_agent: &'a str,
     is_part_of: Option<&'a str>,
+    title: Option<&'a str>,
+    page_list: &'static str,
 }
 
 impl<'a> Warcinfo<'a> {
@@ -69,6 +71,8 @@ impl<'a> Warcinfo<'a> {
             operator,
             http_header_user_agent: options.user_agent,
             is_part_of: options.session_id,
+            title: options.session_id,
+            page_list: "metadata",
         }
     }
 }
@@ -80,6 +84,16 @@ struct Metadata<'a> {
     via: Option<&'a str>,
     fetch_time_ms: u128,
     title: Option<&'a str>,
+    page_url: Option<&'a str>,
+}
+
+/// Values recorded in the `warc-fields` metadata accompanying one capture.
+#[derive(Clone, Copy)]
+pub(super) struct MetadataValues<'a> {
+    pub(super) fetch_time: Duration,
+    pub(super) via: Option<&'a str>,
+    pub(super) title: Option<&'a str>,
+    pub(super) page_url: Option<&'a str>,
 }
 
 /// Build the `warcinfo` record at the start of a WARC file.
@@ -107,14 +121,13 @@ pub(super) fn metadata_record(
     target_uri: Uri<String>,
     record_id: Uri<String>,
     warcinfo_id: &Uri<String>,
-    fetch_time: Duration,
-    via: Option<&str>,
-    title: Option<&str>,
+    values: MetadataValues<'_>,
 ) -> Result<Record, Error> {
     let fields: MetadataBody = to_body(&Metadata {
-        via,
-        fetch_time_ms: fetch_time.as_millis(),
-        title,
+        via: values.via,
+        fetch_time_ms: values.fetch_time.as_millis(),
+        title: values.title,
+        page_url: values.page_url,
     })?;
     let mut record = Record::metadata(date)
         .target_uri(target_uri)

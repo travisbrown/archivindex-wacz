@@ -1,4 +1,4 @@
-//! Command-line tools for writing WACZ archives and crawl sessions.
+//! Command-line tools for writing WARC captures and packaging WACZ distributions.
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use archivindex_archiver::client::Archiver;
-use archivindex_archiver::config::{Config, IndexFormat};
-use archivindex_archiver::conversion::WarcToWacz;
+use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Operator, RetryConfig, Session};
 use archivindex_archiver::wordpress::CommentCaptureProcessor;
 use archivindex_archiver::wordpress::read::read_comments;
+use archivindex_packager::{IndexFormat, WarcToWacz};
 use cli_helpers::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -139,9 +139,9 @@ fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
     Ok(())
 }
 
-/// Read, sort, and deduplicate `WordPress` comments captured in a WACZ file.
+/// Read, sort, and deduplicate `WordPress` comments captured in a WARC file.
 fn read_wp_comments(options: ReadWpCommentsOptions) -> Result<(), Error> {
-    let result = read_comments(options.wacz)?;
+    let result = read_comments(options.warc)?;
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
 
@@ -202,7 +202,7 @@ enum Error {
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::client::Error),
     #[error("WARC conversion error: {0}")]
-    Convert(#[from] archivindex_archiver::conversion::Error),
+    Convert(#[from] archivindex_packager::Error),
     #[error("WordPress comment reading error: {0}")]
     ReadComments(#[from] archivindex_archiver::wordpress::read::Error),
     #[error("JSON writing error: {0}")]
@@ -227,7 +227,7 @@ enum Command {
     ArchiveWpComments(ArchiveWpCommentsOptions),
     /// Convert an existing WARC file into an indexed WACZ package.
     WarcToWacz(WarcToWaczOptions),
-    /// Read comments captured from the `WordPress` REST API in a WACZ file.
+    /// Read comments captured from the `WordPress` REST API in a WARC file.
     ReadWpComments(ReadWpCommentsOptions),
 }
 
@@ -236,7 +236,7 @@ enum Command {
 struct ArchiveOptions {
     #[clap(flatten)]
     config: ConfigOptions,
-    /// Path of the WACZ file to write (an existing file is not overwritten).
+    /// Path of the WARC file to write (an existing file is not overwritten).
     #[clap(long)]
     output: PathBuf,
     /// The number of URLs downloaded concurrently (defaults to 1).
@@ -252,7 +252,7 @@ struct ArchiveWpCommentsOptions {
     /// Base URL of the `WordPress` site.
     #[clap(long)]
     base_url: String,
-    /// Path of the WACZ file to write (an existing file is not overwritten).
+    /// Path of the WARC file to write (an existing file is not overwritten).
     #[clap(long)]
     output: PathBuf,
     /// URL-safe name identifying the session and its WARC file.
@@ -294,11 +294,11 @@ struct WarcToWaczOptions {
     compressed_index: bool,
 }
 
-/// Options for reading comments from a WACZ file.
+/// Options for reading comments from a WARC file.
 #[derive(Debug, clap::Args)]
 struct ReadWpCommentsOptions {
-    /// Path of the WACZ file to read.
-    wacz: PathBuf,
+    /// Path of the plain or gzip-compressed WARC file to read.
+    warc: PathBuf,
 }
 
 /// Capture settings shared by both workflows.
@@ -307,10 +307,6 @@ struct ConfigOptions {
     /// Store the WARC file uncompressed instead of gzip-compressed.
     #[clap(long)]
     no_gzip: bool,
-    /// Write the index as a compressed `ZipNum` pair (`index.cdx.gz` and `index.idx`) instead of a
-    /// plain-text index.cdx.
-    #[clap(long)]
-    compressed_index: bool,
     /// The User-Agent header value sent with every request (defaults to the archiver's own).
     #[clap(long)]
     user_agent: Option<String>,
@@ -338,11 +334,6 @@ impl ConfigOptions {
             concurrency: concurrency.unwrap_or(defaults.concurrency),
             max_response_length: self.max_response_length,
             gzip_warc: !self.no_gzip,
-            index_format: if self.compressed_index {
-                IndexFormat::zipnum()
-            } else {
-                IndexFormat::Plain
-            },
         }
     }
 }
@@ -372,7 +363,7 @@ mod tests {
             "--base-url",
             "https://example.com/",
             "--output",
-            "comments.wacz",
+            "comments.warc.gz",
             "--session-name",
             "comments-2026",
             "--operator",
@@ -389,7 +380,7 @@ mod tests {
         };
 
         assert_eq!(options.base_url, "https://example.com/");
-        assert_eq!(options.output, PathBuf::from("comments.wacz"));
+        assert_eq!(options.output, PathBuf::from("comments.warc.gz"));
         assert_eq!(options.session_name, "comments-2026");
         assert_eq!(options.operator, "A. Archivist");
         assert_eq!(
@@ -400,16 +391,19 @@ mod tests {
     }
 
     #[test]
-    fn read_wordpress_comments_command_takes_a_wacz_path() {
-        let options =
-            Opts::try_parse_from(["archivindex-archiver", "read-wp-comments", "comments.wacz"])
-                .expect("valid options");
+    fn read_wordpress_comments_command_takes_a_warc_path() {
+        let options = Opts::try_parse_from([
+            "archivindex-archiver",
+            "read-wp-comments",
+            "comments.warc.gz",
+        ])
+        .expect("valid options");
 
         let Command::ReadWpComments(options) = options.command else {
             panic!("expected the WordPress reading command");
         };
 
-        assert_eq!(options.wacz, PathBuf::from("comments.wacz"));
+        assert_eq!(options.warc, PathBuf::from("comments.warc.gz"));
     }
 
     #[test]

@@ -2,9 +2,6 @@
 
 use std::time::Duration;
 
-// Re-exported so callers can construct `Config` without depending on `archivindex-wacz`.
-pub use archivindex_wacz::writer::IndexFormat;
-
 /// The default `User-Agent` header value, identifying this crate and its version.
 pub const DEFAULT_USER_AGENT: &str =
     concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -34,9 +31,6 @@ pub struct Config {
     /// that the index offsets frame complete members that replay tools can decompress without
     /// reading the rest of the file.
     pub gzip_warc: bool,
-    /// The CDXJ index format: a plain-text `index.cdx`, or a `ZipNum` compressed `index.cdx.gz` and
-    /// `index.idx` pair.
-    pub index_format: IndexFormat,
     /// The number of URLs downloaded concurrently.
     ///
     /// Captures are always written to the archive in input order; raising this only allows up to
@@ -54,14 +48,13 @@ pub struct Config {
 impl Default for Config {
     /// The default configuration: this crate's `User-Agent`, a 30-second timeout, at most ten
     /// redirects per URL, one download at a time, unbounded response sizes, a gzip-compressed WARC
-    /// file, and a plain-text index.
+    /// file.
     fn default() -> Self {
         Self {
             user_agent: DEFAULT_USER_AGENT.to_owned(),
             timeout: Duration::from_secs(30),
             max_redirects: 10,
             gzip_warc: true,
-            index_format: IndexFormat::Plain,
             concurrency: 1,
             max_response_length: None,
         }

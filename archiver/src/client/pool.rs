@@ -68,9 +68,7 @@ impl Archiver {
 
                     pending.insert(index, (url, exchanges, error));
                     while let Some((url, exchanges, error)) = pending.remove(&next_to_record) {
-                        if let Err(error) =
-                            collection.record(url, exchanges, error, None, false, None)
-                        {
+                        if let Err(error) = collection.record(url, exchanges, error, None, None) {
                             result = Err(error);
                             break;
                         }

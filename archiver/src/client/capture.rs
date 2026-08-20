@@ -2,14 +2,13 @@
 
 use std::borrow::Cow;
 
-use archivindex_wacz::cdxj;
-use archivindex_wacz::digest::Sha256Digest;
 use archivindex_warc::record::payload;
 use archivindex_warc::recorder::CapturedExchange;
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate, WarcDatePrecision};
 use archivindex_warc_revisit_index::{ResourceKey, ResourceState, RevisitTarget};
 use http::StatusCode;
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
+use sha2::{Digest, Sha256};
 use url::{Position, Url};
 
 use super::{Archiver, Collection, Error};
@@ -18,14 +17,13 @@ use crate::response;
 /// The precision at which `WARC-Date` fields are recorded.
 const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
 
-/// A single captured exchange, indexed but not yet written.
+/// A single captured exchange not yet written.
 pub struct Exchange {
-    pub(super) key: String,
-    /// The capture date at the recorded precision, shared by the WARC records and index entry.
+    /// The capture date at the recorded precision, shared by the WARC records.
     pub(super) date: WarcDate,
     pub(crate) status: u16,
     /// The response entity-body digest, absent when transfer decoding fails.
-    pub(super) payload_digest: Option<Sha256Digest>,
+    pub(super) payload_digest: Option<[u8; 32]>,
     pub(super) payload_length: u64,
     /// The earlier capture that this `304 Not Modified` response, answering a conditional request,
     /// confirms unchanged.
@@ -166,7 +164,6 @@ impl Archiver {
             return Err(Error::MissingHost(url.to_string()));
         }
 
-        let key = cdxj::search_key(url.as_str())?;
         let target = url
             .as_str()
             .parse::<http::Uri>()
@@ -194,13 +191,12 @@ impl Archiver {
             .filter(|_| head.status == StatusCode::NOT_MODIFIED.as_u16())
             .map(|original| original.target);
         let (payload_digest, payload_length) = match payload::entity_body(&captured.response) {
-            Ok(payload) => (Some(Sha256Digest::compute(&payload)), payload.len() as u64),
+            Ok(payload) => (Some(Sha256::digest(&payload).into()), payload.len() as u64),
             Err(_) => (None, (captured.response.len() - head.body_offset) as u64),
         };
 
         Ok((
             Exchange {
-                key,
                 date: WarcDate::new(captured.date, DATE_PRECISION),
                 status: head.status,
                 payload_digest,
@@ -214,8 +210,8 @@ impl Archiver {
 }
 
 /// Express the archiver's fixed SHA-256 payload digest in WARC's labelled representation.
-pub(super) fn labelled_digest(digest: Sha256Digest) -> LabelledDigest {
-    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest.0)
+pub(super) fn labelled_digest(digest: [u8; 32]) -> LabelledDigest {
+    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest)
 }
 
 /// Whether a status redirects to the response's `Location`.

@@ -12,7 +12,7 @@ use crate::client::{Collection, Error, Exchange};
 use crate::response;
 
 impl Session<'_> {
-    /// Run the crawl to the end of its queue and write the WACZ file.
+    /// Run the crawl to the end of its queue and atomically publish its WARC file.
     pub fn run(mut self) -> Result<SessionSummary, Error> {
         let persistent_index = self
             .revisit_index
@@ -25,7 +25,6 @@ impl Session<'_> {
             (&self.operator.name, self.operator.email.as_deref()),
             persistent_index,
         )?;
-        let wacz = self.archiver.wacz_to_path(&self.output)?;
         let mut seen = HashSet::new();
         let mut queue = VecDeque::new();
 
@@ -48,10 +47,8 @@ impl Session<'_> {
             let title = captured
                 .then(|| self.process_capture(&url, &exchanges, &mut seen, &mut queue))
                 .flatten();
-            let extra = !seeds.contains(&url);
-
             if let Err(error) =
-                collection.record(url, exchanges, error, title, extra, via.as_deref())
+                collection.record(url, exchanges, error, title.as_deref(), via.as_deref())
             {
                 fatal_error = Some(error);
                 break;
@@ -59,7 +56,7 @@ impl Session<'_> {
             capture_count += usize::from(captured);
         }
 
-        match collection.finish(wacz, Some(self.id)) {
+        match collection.finish_to_path(&self.output) {
             Ok(summary) => {
                 let (seed_captures, extra_captures) = summary
                     .captures
