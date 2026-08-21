@@ -79,6 +79,7 @@ impl Session<'_> {
             &self.id,
             &self.software,
             &self.operator,
+            self.titles.then_some(self.id.as_str()),
             persistent_index,
         )?;
         let mut seen = HashSet::new();
@@ -125,6 +126,7 @@ impl Session<'_> {
                 }
                 CaptureOutcome::Failed { .. } => (None, None),
             };
+            let title = title.filter(|_| self.titles);
             let stop_after_write = processor_error.is_some();
             if let Some(error) = processor_error {
                 outcome = outcome.fail(error);

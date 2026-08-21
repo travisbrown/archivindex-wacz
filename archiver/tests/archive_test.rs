@@ -17,7 +17,6 @@ use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::io::read::WaczReader;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
-use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::DigestAlgorithm;
@@ -200,9 +199,14 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|page| page.url.as_ref())
             .collect::<Vec<_>>(),
-        urls.iter().map(String::as_str).collect::<Vec<_>>()
+        [
+            urls[0].as_str(),
+            urls[1].as_str(),
+            format!("http://127.0.0.1:{port}/target").as_str(),
+            urls[2].as_str(),
+        ]
     );
-    assert_eq!(pages[1].size, Some("arrived".len() as u64));
+    assert_eq!(pages[2].size, Some("arrived".len() as u64));
     // Every page receives a synthetic id of the default 24-character length.
     assert!(
         pages
@@ -325,12 +329,8 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
         panic!("the metadata body should parse as warc-fields");
     };
 
-    assert_eq!(metadata_body.len(), 2);
+    assert_eq!(metadata_body.len(), 1);
     assert!(metadata_body.fetch_time_ms().is_some());
-    assert_eq!(
-        metadata_body.get(&MetadataField::Other("pageurl".to_owned())),
-        Some(urls[0].as_str())
-    );
 
     // Records of one capture event share a single WARC-Date, recorded at exactly microsecond
     // precision: the archiver stores every date with six fractional digits.
@@ -743,9 +743,11 @@ fn archive_records_hops_captured_before_a_failure() -> Result<(), Box<dyn std::e
 
     let mut reader = package_bytes(&bytes)?;
 
-    // The URL failed, so it gets no page entry, but the hop captured before the failure is still
-    // recorded and indexed.
-    assert_eq!(reader.pages()?.count(), 0);
+    // Generic WARC conversion records the completed redirect hop as a page and index entry even
+    // though the following request failed.
+    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].url, url);
 
     let items = reader
         .index("indexes/index.cdx")?

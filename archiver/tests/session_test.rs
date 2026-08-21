@@ -829,6 +829,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     )?
     .software("session-test-crawler", "9.9")
     .processor(SiteProcessor { port })
+    .titles()
     .run()?;
     let request_paths = server.join().expect("server thread should not panic");
 
@@ -877,8 +878,8 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     assert_eq!(package.title.as_deref(), Some("crawl-2026.08"));
     assert_eq!(package.main_page_url.as_deref(), Some(seeds[0].as_str()));
 
-    // Only the seeds appear in the required page list, with their titles; the pages discovered
-    // during the crawl are listed in `extraPages.jsonl`.
+    // Captures without discovery metadata enter the required page list. The redirect and its
+    // destination remain separate captures because the WARC contains no page-list directives.
     let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(
@@ -888,7 +889,11 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
             .collect::<Vec<_>>(),
         vec![
             (seeds[0].as_str(), Some("Home")),
-            (seeds[1].as_str(), Some("About")),
+            (seeds[1].as_str(), None),
+            (
+                format!("http://127.0.0.1:{port}/about").as_str(),
+                Some("About")
+            ),
         ]
     );
 
@@ -938,7 +943,6 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
             "http-header-user-agent",
             "isPartOf",
             "title",
-            "pagelist",
         ]
     );
 
@@ -1123,6 +1127,33 @@ fn session_limit_stops_with_discoveries_still_queued() -> Result<(), Box<dyn std
 
     assert_eq!(reader.pages()?.count(), 1);
     assert!(reader.page_list("pages/extraPages.jsonl").is_err());
+
+    let records = reader
+        .warc("archive/data.warc.gz")?
+        .iter_records::<NoExtension>()
+        .collect::<Result<Vec<_>, _>>()?;
+    let Record::Warcinfo {
+        body: FieldsBlock::Fields(warcinfo),
+        ..
+    } = &records[0]
+    else {
+        panic!("the first record should be a warcinfo record with warc-fields");
+    };
+    assert!(
+        warcinfo
+            .get(&WarcinfoField::Dcmi(DcmiTerm::Title))
+            .is_none()
+    );
+    assert!(records.iter().all(|record| {
+        let Record::Metadata {
+            body: FieldsBlock::Fields(fields),
+            ..
+        } = record
+        else {
+            return true;
+        };
+        fields.get(&MetadataField::Dcmi(DcmiTerm::Title)).is_none()
+    }));
 
     Ok(())
 }

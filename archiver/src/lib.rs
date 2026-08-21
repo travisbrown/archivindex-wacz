@@ -22,8 +22,9 @@
 //! ```
 //!
 //! Beyond one-shot lists, the [`session`] module offers crawl sessions: a queue of seed URLs grown
-//! and titled by a user-supplied capture processor inspecting each response, captured (with retries
-//! for transient network failures) into a single WARC file named after the session identifier. A
+//! by a user-supplied capture processor inspecting each response, captured (with retries for
+//! transient network failures) into a single WARC file named after the session identifier. The
+//! processor may also propose titles that an explicitly configured session records in metadata. A
 //! session recapturing a URL asks the server to revalidate the earlier response, storing a `304 Not
 //! Modified` answer as a `revisit` record under the `server-not-modified` profile. A session may
 //! use a persistent revisit index to deduplicate against earlier WARC captures and reuse their HTTP

@@ -1,10 +1,10 @@
 //! Queue-driven crawl sessions written to a single WARC file.
 //!
-//! A processor may inspect successful responses, title pages, discover deduplicated URLs, and
-//! deliberately request recaptures. A recapture of a URL whose earlier response carried an `ETag`
-//! or `Last-Modified` validator is requested conditionally, so that the server may answer `304 Not
-//! Modified` instead of repeating the payload. Sessions retry transient failures and preserve
-//! completed work when a later recording failure ends the crawl.
+//! A processor may inspect successful responses, propose page titles, discover deduplicated URLs,
+//! and deliberately request recaptures. A recapture of a URL whose earlier response carried an
+//! `ETag` or `Last-Modified` validator is requested conditionally, so that the server may answer
+//! `304 Not Modified` instead of repeating the payload. Sessions retry transient failures and
+//! preserve completed work when a later recording failure ends the crawl.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -72,7 +72,7 @@ pub struct Inspection {
     /// a `304 Not Modified` answer reaches the processor with an empty payload. A processor that
     /// returns recaptures forever creates an infinite crawl.
     pub recaptures: Vec<String>,
-    /// The page-list title for this capture, also retained in its WARC metadata record.
+    /// A proposed title, retained in WARC metadata when title recording is enabled.
     pub title: Option<String>,
     /// A failure that makes the traversal incomplete and stops the session after recording this
     /// capture.
@@ -162,6 +162,7 @@ pub struct Session<'a> {
     limit: Option<usize>,
     revisit_index: Option<PathBuf>,
     events: Option<Box<dyn CaptureEventSink + 'a>>,
+    titles: bool,
 }
 
 impl<'a> Session<'a> {
@@ -199,6 +200,7 @@ impl<'a> Session<'a> {
             limit: None,
             revisit_index: None,
             events: None,
+            titles: false,
         })
     }
 
@@ -216,6 +218,13 @@ impl<'a> Session<'a> {
     #[must_use]
     pub fn processor<P: CaptureProcessor + 'a>(mut self, processor: P) -> Self {
         self.processor = Some(Box::new(processor));
+        self
+    }
+
+    /// Record the session identifier as the `warcinfo` title and processor titles in metadata.
+    #[must_use]
+    pub const fn titles(mut self) -> Self {
+        self.titles = true;
         self
     }
 

@@ -326,6 +326,7 @@ impl Archiver {
         id: &str,
         software: &crate::session::Software,
         operator: &crate::session::Operator,
+        title: Option<&str>,
         persistent_index: Option<RevisitIndex>,
     ) -> Result<Collection, Error> {
         let gzip = self.config.gzip_warc;
@@ -339,6 +340,7 @@ impl Archiver {
                 software: Some(software),
                 operator: Some(operator),
                 session_id: Some(id),
+                title,
             },
             persistent_index,
         )

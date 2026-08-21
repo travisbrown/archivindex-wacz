@@ -131,8 +131,7 @@ impl Collection {
         match outcome {
             CaptureOutcome::Captured(exchanges) => {
                 let redirects = exchanges.len().saturating_sub(1);
-                let last =
-                    self.record_exchanges(exchanges, title, via, Some(url.as_str()), redirects)?;
+                let last = self.record_exchanges(exchanges, title, via, redirects)?;
                 let (date, status, size) =
                     last.expect("a successful capture has at least one exchange");
                 self.summary.captures.push(CaptureSummary {
@@ -145,7 +144,7 @@ impl Collection {
             }
             CaptureOutcome::Failed { exchanges, error } => {
                 let redirects = exchanges.len().saturating_sub(1);
-                self.record_exchanges(exchanges, title, via, None, redirects)?;
+                self.record_exchanges(exchanges, title, via, redirects)?;
                 self.summary.failures.push(Failure { url, error });
             }
         }
@@ -158,7 +157,6 @@ impl Collection {
         exchanges: Vec<Exchange>,
         title: Option<&str>,
         via: Option<&str>,
-        page_url: Option<&str>,
         redirects: usize,
     ) -> Result<Option<(chrono::DateTime<chrono::Utc>, u16, u64)>, Error> {
         let mut last = None;
@@ -191,7 +189,6 @@ impl Collection {
                 MetadataOptions {
                     via: via.filter(|_| hop == 0),
                     title: title.filter(|_| hop == redirects),
-                    page_url: page_url.filter(|_| hop == redirects),
                 },
                 revisit_of.as_ref(),
             )?;

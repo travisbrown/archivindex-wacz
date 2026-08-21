@@ -21,7 +21,6 @@ use super::{Error, Exchange};
 pub(super) struct MetadataOptions<'a> {
     pub(super) via: Option<&'a str>,
     pub(super) title: Option<&'a str>,
-    pub(super) page_url: Option<&'a str>,
 }
 
 /// Write a record, optionally as an independent gzip member.
@@ -146,7 +145,6 @@ fn full_records(
             fetch_time,
             via: metadata.via,
             title: metadata.title,
-            page_url: metadata.page_url,
         },
     )?);
 
@@ -208,7 +206,6 @@ fn revisit_records(
             fetch_time,
             via: metadata_options.via,
             title: metadata_options.title,
-            page_url: metadata_options.page_url,
         },
     )?;
 

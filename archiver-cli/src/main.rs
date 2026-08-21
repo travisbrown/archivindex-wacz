@@ -84,6 +84,7 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
 
 /// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
 fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
+    let titles = options.titles;
     let processor =
         CommentCaptureProcessor::new(&options.base_url)?.second_sweep(options.second_sweep);
     let first_url = processor.first_comment_url();
@@ -120,6 +121,10 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
         CaptureControl::Continue
     })
     .retry(retry);
+
+    if titles {
+        session = session.titles();
+    }
 
     if let Some(revisit_index) = options.revisit_index {
         session = session.revisit_index(revisit_index);
@@ -325,6 +330,9 @@ struct ArchiveWpCommentsOptions {
     /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
     #[clap(long)]
     second_sweep: bool,
+    /// Record titles in the session's `warcinfo` and per-capture metadata records.
+    #[clap(long)]
+    titles: bool,
     /// Total attempts for a transiently failing URL (defaults to 3; zero is treated as one).
     #[clap(long)]
     retry_attempts: Option<usize>,
@@ -470,6 +478,31 @@ mod tests {
         );
         assert_eq!(options.limit, Some(12));
         assert!(options.second_sweep);
+        assert!(!options.titles);
+    }
+
+    #[test]
+    fn wordpress_command_enables_titles_explicitly() {
+        let options = Opts::try_parse_from([
+            "archivindex-archiver",
+            "archive-wp-comments",
+            "--base-url",
+            "https://example.com/",
+            "--output",
+            "comments.warc.gz",
+            "--session-name",
+            "comments-2026",
+            "--operator",
+            "A. Archivist",
+            "--titles",
+        ])
+        .expect("valid options");
+
+        let Command::ArchiveWpComments(options) = options.command else {
+            panic!("expected the WordPress command");
+        };
+
+        assert!(options.titles);
     }
 
     #[test]

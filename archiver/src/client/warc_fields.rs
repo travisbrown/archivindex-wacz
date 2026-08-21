@@ -24,6 +24,7 @@ pub(super) struct WarcinfoOptions<'a> {
     pub(super) software: Option<&'a Software>,
     pub(super) operator: Option<&'a Operator>,
     pub(super) session_id: Option<&'a str>,
+    pub(super) title: Option<&'a str>,
 }
 
 impl<'a> WarcinfoOptions<'a> {
@@ -34,6 +35,7 @@ impl<'a> WarcinfoOptions<'a> {
             software: None,
             operator: None,
             session_id: None,
+            title: None,
         }
     }
 }
@@ -53,7 +55,6 @@ struct Warcinfo<'a> {
     http_header_user_agent: &'a str,
     is_part_of: Option<&'a str>,
     title: Option<&'a str>,
-    page_list: &'static str,
 }
 
 impl<'a> Warcinfo<'a> {
@@ -76,8 +77,7 @@ impl<'a> Warcinfo<'a> {
             operator,
             http_header_user_agent: options.user_agent,
             is_part_of: options.session_id,
-            title: options.session_id,
-            page_list: "metadata",
+            title: options.title,
         }
     }
 }
@@ -89,7 +89,6 @@ struct Metadata<'a> {
     via: Option<&'a str>,
     fetch_time_ms: u128,
     title: Option<&'a str>,
-    page_url: Option<&'a str>,
 }
 
 /// Values recorded in the `warc-fields` metadata accompanying one capture.
@@ -98,7 +97,6 @@ pub(super) struct MetadataValues<'a> {
     pub(super) fetch_time: Duration,
     pub(super) via: Option<&'a str>,
     pub(super) title: Option<&'a str>,
-    pub(super) page_url: Option<&'a str>,
 }
 
 /// Build the `warcinfo` record at the start of a WARC file.
@@ -132,7 +130,6 @@ pub(super) fn metadata_record(
         via: values.via,
         fetch_time_ms: values.fetch_time.as_millis(),
         title: values.title,
-        page_url: values.page_url,
     })?;
     let mut record = Record::metadata(date)
         .target_uri(target_uri)
