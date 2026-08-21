@@ -15,7 +15,7 @@ version.workspace = true
 archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
 archivindex-warc = { workspace = true, features = ["gzip", "http"] }
 chrono.workspace = true
-rusqlite.workspace = true
+redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

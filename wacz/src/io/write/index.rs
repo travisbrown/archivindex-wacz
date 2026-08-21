@@ -70,12 +70,17 @@ impl<W: Write + Seek> WaczWriter<W> {
         items: I,
         validate: impl Fn(&cdxj::Item<'a, F>) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut sorter = LineSorter::new();
+        let mut sorter = IndexSpool::new();
         for item in items {
             validate(item)?;
-            sorter.push(format!("{item}\n"))?;
+            sorter.push(item)?;
         }
         self.add_sorted_index_file(name, BufReader::new(sorter.finish()?))
+    }
+
+    /// Add an index accumulated by an [`IndexSpool`].
+    pub fn add_spooled_index(&mut self, name: &str, spool: IndexSpool) -> Result<(), Error> {
+        self.add_sorted_index_file(name, BufReader::new(spool.finish()?))
     }
 
     fn add_zipnum_stream(
@@ -152,20 +157,34 @@ impl<W: Write + Seek> WaczWriter<W> {
 const SORT_CHUNK_LINES: usize = 4096;
 const SORT_MERGE_FAN_IN: usize = 64;
 
-struct LineSorter {
+/// A disk-backed, incrementally populated CDXJ sorter.
+///
+/// Lines are sorted and deduplicated in bounded-memory runs. The completed spool can be passed to
+/// [`WaczWriter::add_spooled_index`] after another streaming member has released the writer.
+pub struct IndexSpool {
     chunk: Vec<String>,
     runs: Vec<std::fs::File>,
 }
 
-impl LineSorter {
-    fn new() -> Self {
+impl IndexSpool {
+    /// Create an empty index spool.
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             chunk: Vec::with_capacity(SORT_CHUNK_LINES),
             runs: Vec::new(),
         }
     }
 
-    fn push(&mut self, line: String) -> Result<(), std::io::Error> {
+    /// Add one CDXJ item.
+    pub fn push<F: serde::Serialize>(
+        &mut self,
+        item: &cdxj::Item<'_, F>,
+    ) -> Result<(), std::io::Error> {
+        self.push_line(format!("{item}\n"))
+    }
+
+    fn push_line(&mut self, line: String) -> Result<(), std::io::Error> {
         self.chunk.push(line);
         if self.chunk.len() == SORT_CHUNK_LINES {
             self.flush_run()?;
@@ -206,6 +225,12 @@ impl LineSorter {
     }
 }
 
+impl Default for IndexSpool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn merge_runs(runs: Vec<std::fs::File>) -> Result<std::fs::File, std::io::Error> {
     let mut readers = runs.into_iter().map(BufReader::new).collect::<Vec<_>>();
     let mut heap = BinaryHeap::new();
@@ -239,11 +264,11 @@ mod tests {
 
     #[test]
     fn external_sort_crosses_run_boundaries_and_deduplicates() {
-        let mut sorter = LineSorter::new();
+        let mut sorter = IndexSpool::new();
         for value in (0..5000).rev() {
-            sorter.push(format!("{value:04}\n")).unwrap();
+            sorter.push_line(format!("{value:04}\n")).unwrap();
         }
-        sorter.push("2500\n".to_owned()).unwrap();
+        sorter.push_line("2500\n".to_owned()).unwrap();
         let mut output = String::new();
         sorter
             .finish()

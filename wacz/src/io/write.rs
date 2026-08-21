@@ -10,7 +10,7 @@ use crate::frictionless::resource::Resource;
 use crate::pages::{self, Page, PageListHeader};
 use crate::{ARCHIVE_PREFIX, PAGES_PREFIX};
 
-mod index;
+pub mod index;
 mod manifest;
 mod resource;
 pub mod warc;
