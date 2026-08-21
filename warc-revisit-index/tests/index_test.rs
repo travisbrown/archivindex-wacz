@@ -157,13 +157,13 @@ fn resource_validators_digest_and_warc_identity_round_trip() -> Result<(), Box<d
     let digest = sha256(b"representation");
     index.update_resource(
         &resource_key,
-        ResourceStateUpdate::representation(
-            Some("W/\"opaque, value\"".to_owned()),
-            Some("Wed, 21 Oct 2015 07:28:00 GMT".to_owned()),
-            Some(digest.clone()),
-            Some(uri(RECORD_A)),
-            Some(date("2025-01-01T01:02:03.456789Z")),
-        ),
+        ResourceStateUpdate::Representation {
+            etag: Some("W/\"opaque, value\"".to_owned()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_owned()),
+            payload_digest: Some(digest.clone()),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(date("2025-01-01T01:02:03.456789Z")),
+        },
     )?;
 
     let state = index.lookup_resource(&resource_key)?.expect("stored state");
@@ -185,23 +185,23 @@ fn new_representation_replaces_state_and_clears_omitted_validators() -> Result<(
     let resource_key = key(URI_A);
     index.update_resource(
         &resource_key,
-        ResourceStateUpdate::representation(
-            Some("\"old\"".to_owned()),
-            Some("old date".to_owned()),
-            Some(sha256(b"old")),
-            Some(uri(RECORD_A)),
-            Some(date("2025-01-01T00:00:00Z")),
-        ),
+        ResourceStateUpdate::Representation {
+            etag: Some("\"old\"".to_owned()),
+            last_modified: Some("old date".to_owned()),
+            payload_digest: Some(sha256(b"old")),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(date("2025-01-01T00:00:00Z")),
+        },
     )?;
     index.update_resource(
         &resource_key,
-        ResourceStateUpdate::representation(
-            None,
-            None,
-            Some(sha256(b"new")),
-            Some(uri(RECORD_B)),
-            Some(date("2025-01-02T00:00:00Z")),
-        ),
+        ResourceStateUpdate::Representation {
+            etag: None,
+            last_modified: None,
+            payload_digest: Some(sha256(b"new")),
+            record_id: Some(uri(RECORD_B)),
+            warc_date: Some(date("2025-01-02T00:00:00Z")),
+        },
     )?;
 
     let state = index.lookup_resource(&resource_key)?.expect("stored state");
@@ -221,17 +221,20 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
     let original_date = date("2025-01-01T00:00:00Z");
     index.update_resource(
         &resource_key,
-        ResourceStateUpdate::representation(
-            Some("\"old\"".to_owned()),
-            Some("old date".to_owned()),
-            Some(digest.clone()),
-            Some(uri(RECORD_A)),
-            Some(original_date),
-        ),
+        ResourceStateUpdate::Representation {
+            etag: Some("\"old\"".to_owned()),
+            last_modified: Some("old date".to_owned()),
+            payload_digest: Some(digest.clone()),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(original_date),
+        },
     )?;
     index.update_resource(
         &resource_key,
-        ResourceStateUpdate::not_modified(Some("\"new\"".to_owned()), None),
+        ResourceStateUpdate::NotModified {
+            etag: Some("\"new\"".to_owned()),
+            last_modified: None,
+        },
     )?;
 
     let state = index.lookup_resource(&resource_key)?.expect("stored state");
@@ -242,7 +245,13 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
     assert_eq!(state.warc_date, Some(original_date));
     assert!(
         index
-            .update_resource(&key(URI_B), ResourceStateUpdate::not_modified(None, None))?
+            .update_resource(
+                &key(URI_B),
+                ResourceStateUpdate::NotModified {
+                    etag: None,
+                    last_modified: None,
+                },
+            )?
             .is_none()
     );
     Ok(())
@@ -262,13 +271,13 @@ fn two_resources_share_a_payload_but_keep_independent_state() -> Result<(), Box<
     for (resource, etag, record) in [(URI_A, "\"a\"", RECORD_A), (URI_B, "\"b\"", RECORD_B)] {
         index.update_resource(
             &key(resource),
-            ResourceStateUpdate::representation(
-                Some(etag.to_owned()),
-                None,
-                Some(digest.clone()),
-                Some(uri(record)),
-                Some(date("2025-01-01T00:00:00Z")),
-            ),
+            ResourceStateUpdate::Representation {
+                etag: Some(etag.to_owned()),
+                last_modified: None,
+                payload_digest: Some(digest.clone()),
+                record_id: Some(uri(record)),
+                warc_date: Some(date("2025-01-01T00:00:00Z")),
+            },
         )?;
     }
 
@@ -294,18 +303,18 @@ fn malformed_persisted_state_returns_an_error() -> Result<(), Box<dyn StdError>>
     let index = Index::open(&path)?;
     index.update_resource(
         &key(URI_A),
-        ResourceStateUpdate::representation(
-            None,
-            None,
-            Some(sha256(b"body")),
-            Some(uri(RECORD_A)),
-            Some(date("2025-01-01T00:00:00Z")),
-        ),
+        ResourceStateUpdate::Representation {
+            etag: None,
+            last_modified: None,
+            payload_digest: Some(sha256(b"body")),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(date("2025-01-01T00:00:00Z")),
+        },
     )?;
     drop(index);
     let connection = rusqlite::Connection::open(&path)?;
     connection.execute(
-        "UPDATE resource_state SET digest_algorithm = 99 WHERE target_uri = ?1",
+        "UPDATE resource_state SET digest_algorithm = 'bogus' WHERE target_uri = ?1",
         [URI_A],
     )?;
     drop(connection);
@@ -328,7 +337,7 @@ fn incompatible_schema_version_is_rejected_clearly() -> Result<(), Box<dyn StdEr
     assert!(matches!(
         Index::open(path),
         Err(Error::SchemaVersion {
-            expected: 1,
+            expected: 2,
             found: 99
         })
     ));

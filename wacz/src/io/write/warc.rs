@@ -26,28 +26,18 @@ pub struct WarcSink<'a, W: Write + Seek> {
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Start a WARC member that accepts records directly without an intermediate WARC file.
-    pub fn start_warc(
-        &mut self,
-        name: &str,
-        gzip_compression_level: u32,
-    ) -> Result<WarcSink<'_, W>, Error> {
+    pub fn start_warc(&mut self, name: &str) -> Result<WarcSink<'_, W>, Error> {
         let Some(gzip) = crate::paths::warc_gzip(name) else {
             return Err(Error::InvalidWarcName(name.to_owned()));
         };
-        if gzip && gzip_compression_level > archivindex_warc::io::write::MAX_GZIP_COMPRESSION_LEVEL
-        {
-            return Err(Error::InvalidGzipCompressionLevel(gzip_compression_level));
-        }
         let path = format!("{ARCHIVE_PREFIX}{name}");
         if self.poisoned {
             return Err(Error::Poisoned);
         }
         self.validate_path(&path)?;
         self.poisoned = true;
-        self.zip.start_file(
-            &path,
-            options_for(&path, self.config.zip_compression_level)?,
-        )?;
+        self.zip
+            .start_file(&path, options_for(&path, self.config.zip_compression_level))?;
         let writer = WarcWriter::new(HashingWriter::new(&mut self.zip)).with_digests();
         Ok(WarcSink {
             writer,
@@ -55,7 +45,7 @@ impl<W: Write + Seek> WaczWriter<W> {
             poisoned: &mut self.poisoned,
             path,
             gzip,
-            gzip_compression_level,
+            gzip_compression_level: self.config.gzip_compression_level,
         })
     }
 }

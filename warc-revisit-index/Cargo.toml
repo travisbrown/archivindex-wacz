@@ -12,7 +12,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-archivindex-warc.workspace = true
+archivindex-warc = { workspace = true, features = ["http"] }
 fluent-uri.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true

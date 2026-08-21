@@ -10,16 +10,23 @@ use crate::error::Error;
 use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
-/// A persistent payload and conditional-request state index.
-pub struct Index {
-    pub(super) connection: Connection,
+/// A database connection view shared by persistent indexes and bulk transactions.
+pub struct Store<C> {
+    connection: C,
+    connection_ref: fn(&C) -> &Connection,
 }
 
-impl Index {
+/// A persistent payload and conditional-request state index.
+pub type Index = Store<Connection>;
+
+/// A bulk indexing transaction.
+pub type Transaction<'connection> = Store<rusqlite::Transaction<'connection>>;
+
+impl Store<Connection> {
     /// Open a database at `path`, initialize a new schema, and reject incompatible versions.
     ///
     /// # Errors
@@ -68,54 +75,10 @@ impl Index {
             });
         }
 
-        Ok(Self { connection })
-    }
-
-    /// Find the canonical payload-bearing WARC record for `digest`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unsupported or malformed digests, query failures, or malformed
-    /// persisted values.
-    pub fn lookup_payload(&self, digest: &LabelledDigest) -> Result<Option<RevisitTarget>, Error> {
-        lookup_payload(&self.connection, digest)
-    }
-
-    /// Insert a canonical payload source without replacing an existing source for the digest.
-    ///
-    /// Returns `true` when a row was inserted and `false` when the digest was already indexed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unsupported or malformed digest, an out-of-range payload length,
-    /// or a SQLite write failure.
-    pub fn insert_payload(&self, target: &RevisitTarget) -> Result<bool, Error> {
-        insert_payload(&self.connection, target)
-    }
-
-    /// Find conditional-request state for `key`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the query fails or persisted state is malformed.
-    pub fn lookup_resource(&self, key: &ResourceKey) -> Result<Option<ResourceState>, Error> {
-        lookup_resource(&self.connection, key)
-    }
-
-    /// Apply a representation or not-modified update and return the resulting state.
-    ///
-    /// A not-modified update against an unknown key is a no-op and returns `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid digest data, a SQLite query failure, or malformed resulting
-    /// state.
-    pub fn update_resource(
-        &self,
-        key: &ResourceKey,
-        update: ResourceStateUpdate,
-    ) -> Result<Option<ResourceState>, Error> {
-        update_resource(&self.connection, key, update)
+        Ok(Self {
+            connection,
+            connection_ref: |connection| connection,
+        })
     }
 
     /// Begin a transaction for bulk WARC ingestion.
@@ -128,24 +91,26 @@ impl Index {
             .connection
             .transaction()
             .map_err(Error::database("begin transaction"))?;
-        Ok(Transaction { transaction })
+        Ok(Store {
+            connection: transaction,
+            connection_ref: |transaction| transaction,
+        })
     }
 }
 
-/// A bulk indexing transaction.
-pub struct Transaction<'connection> {
-    pub(super) transaction: rusqlite::Transaction<'connection>,
-}
+impl<C> Store<C> {
+    pub(super) fn connection(&self) -> &Connection {
+        (self.connection_ref)(&self.connection)
+    }
 
-impl Transaction<'_> {
-    /// Find a canonical payload within the transaction.
+    /// Find the canonical payload-bearing WARC record for `digest`.
     ///
     /// # Errors
     ///
     /// Returns an error for unsupported or malformed digests, query failures, or malformed
     /// persisted values.
     pub fn lookup_payload(&self, digest: &LabelledDigest) -> Result<Option<RevisitTarget>, Error> {
-        lookup_payload(&self.transaction, digest)
+        lookup_payload(self.connection(), digest)
     }
 
     /// Insert a canonical payload source without replacing an existing source.
@@ -154,7 +119,7 @@ impl Transaction<'_> {
     ///
     /// Returns an error for invalid input or when SQLite cannot write the row.
     pub fn insert_payload(&self, target: &RevisitTarget) -> Result<bool, Error> {
-        insert_payload(&self.transaction, target)
+        insert_payload(self.connection(), target)
     }
 
     /// Find resource state within the transaction.
@@ -163,7 +128,7 @@ impl Transaction<'_> {
     ///
     /// Returns an error when the query fails or persisted state is malformed.
     pub fn lookup_resource(&self, key: &ResourceKey) -> Result<Option<ResourceState>, Error> {
-        lookup_resource(&self.transaction, key)
+        lookup_resource(self.connection(), key)
     }
 
     /// Apply a resource-state update within the transaction.
@@ -177,16 +142,18 @@ impl Transaction<'_> {
         key: &ResourceKey,
         update: ResourceStateUpdate,
     ) -> Result<Option<ResourceState>, Error> {
-        update_resource(&self.transaction, key, update)
+        update_resource(self.connection(), key, update)
     }
+}
 
+impl Transaction<'_> {
     /// Commit all changes atomically.
     ///
     /// # Errors
     ///
     /// Returns an error when SQLite cannot commit the transaction.
     pub fn commit(self) -> Result<(), Error> {
-        self.transaction
+        self.connection
             .commit()
             .map_err(Error::database("commit transaction"))
     }
@@ -217,7 +184,7 @@ pub(crate) fn lookup_payload(
     stored
         .map(|(length, record_id, target_uri, warc_date)| {
             Ok(RevisitTarget {
-                payload_digest: digest_from_parts(algorithm, &bytes)?,
+                payload_digest: digest_from_parts(&algorithm, &bytes)?,
                 payload_length: length
                     .map(|value| unsigned("payload_length", value))
                     .transpose()?,
@@ -264,7 +231,7 @@ pub(crate) fn lookup_resource(
     type Stored = (
         Option<String>,
         Option<String>,
-        Option<i64>,
+        Option<String>,
         Option<Vec<u8>>,
         Option<String>,
         Option<String>,
@@ -293,7 +260,9 @@ pub(crate) fn lookup_resource(
         .map(
             |(etag, last_modified, algorithm, digest, record_id, warc_date)| {
                 let payload_digest = match (algorithm, digest) {
-                    (Some(algorithm), Some(digest)) => Some(digest_from_parts(algorithm, &digest)?),
+                    (Some(algorithm), Some(digest)) => {
+                        Some(digest_from_parts(&algorithm, &digest)?)
+                    }
                     (None, None) => None,
                     _ => return Err(Error::IncompleteDigest),
                 };
@@ -379,37 +348,19 @@ pub(crate) fn update_resource(
     lookup_resource(connection, key)
 }
 
-fn digest_parts(digest: &LabelledDigest) -> Result<(i64, Vec<u8>), Error> {
-    let algorithm = algorithm_code(digest.algorithm())?;
+fn digest_parts(digest: &LabelledDigest) -> Result<(String, Vec<u8>), Error> {
     let bytes = digest
         .decoded()
         .ok_or_else(|| Error::UndecodableDigest(digest.to_string()))?;
     validate_digest_length(digest.algorithm(), bytes.len())?;
+    let algorithm = digest.algorithm().label().to_owned();
     Ok((algorithm, bytes))
 }
 
-fn algorithm_code(algorithm: &DigestAlgorithm) -> Result<i64, Error> {
-    match algorithm {
-        DigestAlgorithm::Md5 => Ok(1),
-        DigestAlgorithm::Sha1 => Ok(2),
-        DigestAlgorithm::Sha256 => Ok(3),
-        DigestAlgorithm::Other(label) => Err(Error::UnsupportedDigestAlgorithm(label.to_string())),
-    }
-}
-
-fn algorithm_from_code(code: i64) -> Result<DigestAlgorithm, Error> {
-    match code {
-        1 => Ok(DigestAlgorithm::Md5),
-        2 => Ok(DigestAlgorithm::Sha1),
-        3 => Ok(DigestAlgorithm::Sha256),
-        _ => Err(Error::UnsupportedDigestAlgorithm(format!(
-            "database code {code}"
-        ))),
-    }
-}
-
-fn digest_from_parts(code: i64, bytes: &[u8]) -> Result<LabelledDigest, Error> {
-    let algorithm = algorithm_from_code(code)?;
+fn digest_from_parts(label: &str, bytes: &[u8]) -> Result<LabelledDigest, Error> {
+    let algorithm = label
+        .parse::<DigestAlgorithm>()
+        .map_err(|_| Error::UnsupportedDigestAlgorithm(label.to_owned()))?;
     validate_digest_length(&algorithm, bytes.len())?;
     Ok(LabelledDigest::from_digest(algorithm, bytes))
 }

@@ -79,32 +79,3 @@ pub enum ResourceStateUpdate {
         last_modified: Option<String>,
     },
 }
-
-impl ResourceStateUpdate {
-    /// Construct a new-representation update.
-    #[must_use]
-    pub const fn representation(
-        etag: Option<String>,
-        last_modified: Option<String>,
-        payload_digest: Option<LabelledDigest>,
-        record_id: Option<Uri<String>>,
-        warc_date: Option<WarcDate>,
-    ) -> Self {
-        Self::Representation {
-            etag,
-            last_modified,
-            payload_digest,
-            record_id,
-            warc_date,
-        }
-    }
-
-    /// Construct a not-modified update.
-    #[must_use]
-    pub const fn not_modified(etag: Option<String>, last_modified: Option<String>) -> Self {
-        Self::NotModified {
-            etag,
-            last_modified,
-        }
-    }
-}

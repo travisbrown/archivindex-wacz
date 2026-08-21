@@ -55,8 +55,13 @@ pub enum Error {
     #[error("index is not UTF-8: {0}")]
     InvalidIndexEncoding(String),
     /// A `ZipNum` summary is malformed or names an unsupported format.
-    #[error("invalid ZipNum summary: {0}")]
-    InvalidZipNum(String),
+    #[error("invalid ZipNum summary at {context}: {message}")]
+    InvalidZipNum {
+        /// Bounded source context.
+        context: crate::LineContext,
+        /// Description of the malformed summary line.
+        message: String,
+    },
     /// A byte range cannot be read because the ZIP member is compressed.
     #[error("random access requires a stored ZIP member: {0}")]
     CompressedMember(String),
@@ -149,6 +154,12 @@ impl Fixity {
     }
 }
 
+pub(super) enum DigestFile {
+    Absent,
+    Parsed(Box<DataPackageDigest<'static>>),
+    Unparseable(serde_json::Error),
+}
+
 /// A reader over the files in a WACZ.
 ///
 /// The underlying ZIP reader yields one decompressed stream at a time, so the file accessors borrow
@@ -190,12 +201,10 @@ impl<R: Read + Seek> WaczReader<R> {
     ///
     /// Returns `None` when the file is absent, since the specification only recommends it.
     pub fn data_package_digest(&mut self) -> Result<Option<DataPackageDigest<'static>>, Error> {
-        match self.member_bytes(DATA_PACKAGE_DIGEST_PATH) {
-            Ok(bytes) => serde_json::from_slice::<DataPackageDigest<'_>>(&bytes)
-                .map(|digest| Some(digest.into_static()))
-                .map_err(Error::InvalidDataPackageDigest),
-            Err(Error::MissingMember(_)) => Ok(None),
-            Err(error) => Err(error),
+        match self.digest_file()? {
+            DigestFile::Absent => Ok(None),
+            DigestFile::Parsed(digest) => Ok(Some(*digest)),
+            DigestFile::Unparseable(error) => Err(Error::InvalidDataPackageDigest(error)),
         }
     }
 
@@ -257,25 +266,46 @@ impl<R: Read + Seek> WaczReader<R> {
     pub fn verify_fixity(&mut self) -> Result<Fixity, Error> {
         let manifest_bytes = self.member_bytes(DATA_PACKAGE_PATH)?;
         let package = parse_data_package(&manifest_bytes)?;
+        let digest_file = self.digest_file()?;
+        self.verify_fixity_for(&package, &manifest_bytes, &digest_file)
+    }
 
+    pub(super) fn digest_file(&mut self) -> Result<DigestFile, Error> {
+        match self.member_bytes(DATA_PACKAGE_DIGEST_PATH) {
+            Ok(bytes) => Ok(
+                match serde_json::from_slice::<DataPackageDigest<'_>>(&bytes) {
+                    Ok(digest) => DigestFile::Parsed(Box::new(digest.into_static())),
+                    Err(error) => DigestFile::Unparseable(error),
+                },
+            ),
+            Err(Error::MissingMember(_)) => Ok(DigestFile::Absent),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn verify_fixity_for(
+        &mut self,
+        package: &DataPackage<'_>,
+        manifest_bytes: &[u8],
+        digest_file: &DigestFile,
+    ) -> Result<Fixity, Error> {
         let mut fixity = Fixity::default();
 
-        match self.data_package_digest() {
-            Ok(Some(digest)) => {
+        match digest_file {
+            DigestFile::Parsed(digest) => {
                 if digest.path == DATA_PACKAGE_PATH
-                    && digest.hash == Sha256Digest::compute(&manifest_bytes)
+                    && digest.hash == Sha256Digest::compute(manifest_bytes)
                 {
                     fixity.verified.push(DATA_PACKAGE_PATH.to_owned());
                 } else {
                     fixity.mismatched.push(DATA_PACKAGE_PATH.to_owned());
                 }
             }
-            Ok(None) => {}
+            DigestFile::Absent => {}
             // A digest file that cannot be parsed cannot corroborate the manifest.
-            Err(Error::InvalidDataPackageDigest(_)) => {
+            DigestFile::Unparseable(_) => {
                 fixity.mismatched.push(DATA_PACKAGE_PATH.to_owned());
             }
-            Err(error) => return Err(error),
         }
 
         for resource in &package.resources {

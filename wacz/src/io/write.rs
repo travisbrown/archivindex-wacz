@@ -57,6 +57,10 @@ pub struct WriterConfig {
     /// Levels 1 through 9 use `miniz_oxide`; levels 10 through 264 use Zopfli. This setting does
     /// not affect members stored with ZIP `STORE`, including WARC and gzip-compressed members.
     pub zip_compression_level: Option<u32>,
+    /// Gzip compression level used by streaming `.warc.gz` members.
+    ///
+    /// Levels range from 0 (no compression) through 9 (best compression).
+    pub gzip_compression_level: u32,
 }
 
 impl Default for WriterConfig {
@@ -65,7 +69,24 @@ impl Default for WriterConfig {
             page_id_length: DEFAULT_PAGE_ID_LENGTH,
             index_format: IndexFormat::Plain,
             zip_compression_level: None,
+            gzip_compression_level: archivindex_warc::io::write::DEFAULT_GZIP_COMPRESSION_LEVEL,
         }
+    }
+}
+
+impl WriterConfig {
+    fn validate(&self) -> Result<(), Error> {
+        if let Some(level) = self.zip_compression_level
+            && !(MIN_ZIP_COMPRESSION_LEVEL..=MAX_ZIP_COMPRESSION_LEVEL).contains(&level)
+        {
+            return Err(Error::InvalidZipCompressionLevel(level));
+        }
+        if self.gzip_compression_level > archivindex_warc::io::write::MAX_GZIP_COMPRESSION_LEVEL {
+            return Err(Error::InvalidGzipCompressionLevel(
+                self.gzip_compression_level,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -162,6 +183,7 @@ impl WaczWriter<BufWriter<File>> {
         path: P,
         config: WriterConfig,
     ) -> Result<Self, Error> {
+        config.validate()?;
         let path = path.as_ref();
         if path.extension().and_then(|extension| extension.to_str()) != Some("wacz") {
             return Err(Error::InvalidWaczExtension(path.to_owned()));
@@ -179,7 +201,7 @@ impl WaczWriter<BufWriter<File>> {
             .unwrap_or_else(|| Path::new("."));
         let temporary = tempfile::NamedTempFile::new_in(parent)?;
         let writer = BufWriter::new(temporary.reopen()?);
-        let mut wacz = Self::with_config(writer, config);
+        let mut wacz = Self::from_config(writer, config);
         wacz.publication = Some(AtomicPublication {
             temporary,
             target: path.to_owned(),
@@ -192,12 +214,16 @@ impl<W: Write + Seek> WaczWriter<W> {
     /// Create a writer with default configuration.
     #[must_use]
     pub fn new(writer: W) -> Self {
-        Self::with_config(writer, WriterConfig::default())
+        Self::from_config(writer, WriterConfig::default())
     }
 
     /// Create a writer with explicit configuration.
-    #[must_use]
-    pub fn with_config(writer: W, config: WriterConfig) -> Self {
+    pub fn with_config(writer: W, config: WriterConfig) -> Result<Self, Error> {
+        config.validate()?;
+        Ok(Self::from_config(writer, config))
+    }
+
+    fn from_config(writer: W, config: WriterConfig) -> Self {
         Self {
             zip: ZipWriter::new(writer),
             resources: Vec::new(),
@@ -258,7 +284,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         let id_length = self.config.page_id_length;
         let compression_level = self.config.zip_compression_level;
         let path = format!("{PAGES_PREFIX}{name}");
-        self.add_member(&path, options_for(&path, compression_level)?, |writer| {
+        self.add_member(&path, options_for(&path, compression_level), |writer| {
             Ok(pages::write_page_list_with_synthetic_ids(
                 writer, header, pages, id_length,
             )?)

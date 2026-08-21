@@ -17,7 +17,7 @@ mod pool;
 mod warc_fields;
 mod warc_mapping;
 
-pub(crate) use capture::Exchange;
+pub(crate) use capture::{CaptureOutcome, Exchange};
 pub(crate) use collection::Collection;
 use warc_fields::WarcinfoOptions;
 
@@ -319,8 +319,8 @@ impl Archiver {
     pub(crate) fn session_collection(
         &self,
         id: &str,
-        software: (&str, &str),
-        operator: (&str, Option<&str>),
+        software: &crate::session::Software,
+        operator: &crate::session::Operator,
         persistent_index: Option<RevisitIndex>,
     ) -> Result<Collection, Error> {
         let gzip = self.config.gzip_warc;
@@ -363,7 +363,7 @@ impl Archiver {
                     cancelled = true;
                     break;
                 }
-                let (exchanges, error) = self.capture(url, None);
+                let (exchanges, error) = self.capture(url, None).parts();
                 cancelled |= notify_outcome(events, url, &exchanges, error.as_ref());
                 collection.record(url.to_owned(), exchanges, error, None, None)?;
                 cancelled |= events.event(CaptureEvent::Written { url }) == CaptureControl::Cancel;

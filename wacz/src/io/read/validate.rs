@@ -14,10 +14,10 @@ use std::io::{Read, Seek};
 
 use crate::cdxj::{Item, Timestamp};
 use crate::digest::Sha256Digest;
-use crate::frictionless::{DataPackage, DataPackageDigest, PROFILE, WACZ_VERSION};
+use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
 use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, PAGES_PATH, PAGES_PREFIX};
 
-use super::{Error, Fixity, WaczReader};
+use super::{DigestFile, Error, Fixity, WaczReader};
 
 /// The layers of [`WaczReader::validate`] that read complete members.
 ///
@@ -206,46 +206,60 @@ pub enum SignatureProblem {
 ///
 /// Only the first problem in each member is reported, keeping the report bounded and
 /// deterministic for members with cascading parse failures.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, thiserror::Error)]
-pub enum ContentProblem {
-    /// A member under `pages/` is not a valid page list.
-    #[error("{path}: {message}")]
-    Pages {
-        /// The member path.
-        path: String,
-        /// A description of the first failure.
-        message: String,
-    },
-    /// A member under `indexes/` is not valid CDXJ.
-    #[error("{path}: {message}")]
-    Index {
-        /// The member path.
-        path: String,
-        /// A description of the first failure.
-        message: String,
-    },
-    /// A CDXJ index's lines are not sorted by search key and timestamp.
-    #[error("{path}: lines are not sorted by search key and timestamp")]
-    IndexOrder {
-        /// The member path.
-        path: String,
-    },
-    /// A `.idx` member is not a valid `ZipNum` summary.
-    #[error("{path}: {message}")]
-    ZipNum {
-        /// The member path.
-        path: String,
-        /// A description of the first failure.
-        message: String,
-    },
-    /// A member under `archive/` is not a well-formed WARC file.
-    #[error("{path}: {message}")]
-    Warc {
-        /// The member path.
-        path: String,
-        /// A description of the first failure.
-        message: String,
-    },
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ContentProblem {
+    /// The member path.
+    pub path: String,
+    /// The format rule the member violated.
+    pub kind: ContentKind,
+    /// A description of the first failure, when the kind does not describe it completely.
+    pub message: Option<String>,
+}
+
+/// The kind of content expected at a WACZ member path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub enum ContentKind {
+    /// A page list.
+    Pages,
+    /// A CDXJ index.
+    Index,
+    /// Sorted CDXJ index lines.
+    IndexOrder,
+    /// A `ZipNum` summary.
+    ZipNum,
+    /// A WARC file.
+    Warc,
+}
+
+impl std::fmt::Display for ContentProblem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: ", self.path)?;
+        if let Some(message) = &self.message {
+            message.fmt(formatter)
+        } else {
+            formatter.write_str("lines are not sorted by search key and timestamp")
+        }
+    }
+}
+
+impl std::error::Error for ContentProblem {}
+
+impl ContentProblem {
+    fn new(path: &str, kind: ContentKind, message: impl Into<String>) -> Self {
+        Self {
+            path: path.to_owned(),
+            kind,
+            message: Some(message.into()),
+        }
+    }
+
+    fn index_order(path: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            kind: ContentKind::IndexOrder,
+            message: None,
+        }
+    }
 }
 
 /// An index entry or `ZipNum` block that does not resolve to the data it describes.
@@ -311,10 +325,16 @@ impl<R: Read + Seek> WaczReader<R> {
             self.manifest_problems(package, &mut manifest);
         }
 
-        let signature = self.signature_status(manifest_bytes.as_deref())?;
+        let digest_file = self.digest_file()?;
+        let signature = Self::signature_status(manifest_bytes.as_deref(), &digest_file);
 
-        let fixity = if options.fixity && package.is_some() {
-            Some(self.verify_fixity()?)
+        let fixity = if options.fixity {
+            match (package.as_ref(), manifest_bytes.as_deref()) {
+                (Some(package), Some(manifest_bytes)) => {
+                    Some(self.verify_fixity_for(package, manifest_bytes, &digest_file)?)
+                }
+                _ => None,
+            }
         } else {
             None
         };
@@ -451,22 +471,17 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// Check the digest file's internal consistency and its claim about the manifest bytes.
     fn signature_status(
-        &mut self,
         manifest_bytes: Option<&[u8]>,
-    ) -> Result<SignatureStatus, Error> {
-        let bytes = match self.member_bytes(DATA_PACKAGE_DIGEST_PATH) {
-            Ok(bytes) => bytes,
-            Err(Error::MissingMember(_)) => return Ok(SignatureStatus::Absent),
-            Err(error) => return Err(error),
-        };
-
-        let digest = match serde_json::from_slice::<DataPackageDigest<'_>>(&bytes) {
-            Ok(digest) => digest,
-            Err(error) => {
-                return Ok(SignatureStatus::Invalid(vec![
-                    SignatureProblem::Unparseable(error.to_string()),
-                ]));
+        digest_file: &DigestFile,
+    ) -> SignatureStatus {
+        let digest = match digest_file {
+            DigestFile::Absent => return SignatureStatus::Absent,
+            DigestFile::Unparseable(error) => {
+                return SignatureStatus::Invalid(vec![SignatureProblem::Unparseable(
+                    error.to_string(),
+                )]);
             }
+            DigestFile::Parsed(digest) => digest,
         };
 
         let mut problems = Vec::new();
@@ -495,13 +510,13 @@ impl<R: Read + Seek> WaczReader<R> {
             });
         }
 
-        Ok(if !problems.is_empty() {
+        if !problems.is_empty() {
             SignatureStatus::Invalid(problems)
         } else if signed.is_some() {
             SignatureStatus::Unverified
         } else {
             SignatureStatus::Unsigned
-        })
+        }
     }
 
     /// Parse every page list, index, and WARC member, collecting the first problem in each.
@@ -538,10 +553,7 @@ impl<R: Read + Seek> WaczReader<R> {
             Err(error) => Some(error.to_string()),
         };
 
-        message.map(|message| ContentProblem::Pages {
-            path: path.to_owned(),
-            message,
-        })
+        message.map(|message| ContentProblem::new(path, ContentKind::Pages, message))
     }
 
     /// The first failure parsing a member as a `ZipNum` summary or a sorted CDXJ index, if any.
@@ -550,19 +562,17 @@ impl<R: Read + Seek> WaczReader<R> {
             return self
                 .zipnum_summary(path)
                 .err()
-                .map(|error| ContentProblem::ZipNum {
-                    path: path.to_owned(),
-                    message: error.to_string(),
-                });
+                .map(|error| ContentProblem::new(path, ContentKind::ZipNum, error.to_string()));
         }
 
         let items = match self.index(path) {
             Ok(items) => items,
             Err(error) => {
-                return Some(ContentProblem::Index {
-                    path: path.to_owned(),
-                    message: error.to_string(),
-                });
+                return Some(ContentProblem::new(
+                    path,
+                    ContentKind::Index,
+                    error.to_string(),
+                ));
             }
         };
 
@@ -572,17 +582,16 @@ impl<R: Read + Seek> WaczReader<R> {
                 Ok(item) => {
                     let current = (item.key.into_owned(), item.timestamp);
                     if previous.is_some_and(|previous| previous > current) {
-                        return Some(ContentProblem::IndexOrder {
-                            path: path.to_owned(),
-                        });
+                        return Some(ContentProblem::index_order(path));
                     }
                     previous = Some(current);
                 }
                 Err(error) => {
-                    return Some(ContentProblem::Index {
-                        path: path.to_owned(),
-                        message: error.to_string(),
-                    });
+                    return Some(ContentProblem::new(
+                        path,
+                        ContentKind::Index,
+                        error.to_string(),
+                    ));
                 }
             }
         }
@@ -602,10 +611,7 @@ impl<R: Read + Seek> WaczReader<R> {
             Err(error) => Some(error.to_string()),
         };
 
-        message.map(|message| ContentProblem::Warc {
-            path: path.to_owned(),
-            message,
-        })
+        message.map(|message| ContentProblem::new(path, ContentKind::Warc, message))
     }
 
     /// Resolve every index entry to its WARC record and verify every `ZipNum` block digest.

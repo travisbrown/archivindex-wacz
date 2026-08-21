@@ -275,6 +275,50 @@ pub fn write_page_list<'p, W: Write, I: IntoIterator<Item = &'p Page<'p>>>(
     write_page_list_with_policy(writer, header, pages, IdPolicy::Preserve)
 }
 
+/// A streaming page-list writer that emits the header on construction and one page per call.
+pub struct PageListWriter<W> {
+    writer: W,
+    id_policy: IdPolicy,
+}
+
+impl<W: Write> PageListWriter<W> {
+    /// Start a page list that preserves page identifiers as supplied.
+    pub fn new(writer: W, header: &PageListHeader<'_>) -> Result<Self, Error> {
+        Self::with_policy(writer, header, IdPolicy::Preserve)
+    }
+
+    fn with_policy(
+        mut writer: W,
+        header: &PageListHeader<'_>,
+        id_policy: IdPolicy,
+    ) -> Result<Self, Error> {
+        header.validate()?;
+        write_line(&mut writer, header)?;
+        Ok(Self { writer, id_policy })
+    }
+
+    /// Write one validated page entry.
+    pub fn write(&mut self, page: &Page<'_>) -> Result<(), Error> {
+        page.validate()?;
+        self.write_validated(page)
+    }
+
+    fn write_validated(&mut self, page: &Page<'_>) -> Result<(), Error> {
+        match self.id_policy {
+            IdPolicy::Synthetic(id_length) if page.id.is_none() => {
+                let id = synthetic_id(&page.ts, &page.url, id_length);
+                write_line(&mut self.writer, &IdentifiedPage { id: &id, page })
+            }
+            IdPolicy::Preserve | IdPolicy::Synthetic(_) => write_line(&mut self.writer, page),
+        }
+    }
+
+    /// Return the underlying writer.
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
 /// A page entry serialized with a synthetic identifier when it has none of its own.
 #[derive(serde::Serialize)]
 struct IdentifiedPage<'a> {
@@ -305,7 +349,7 @@ enum IdPolicy {
 }
 
 fn write_page_list_with_policy<'p, W: Write, I: IntoIterator<Item = &'p Page<'p>>>(
-    mut writer: W,
+    writer: W,
     header: &PageListHeader<'_>,
     pages: I,
     id_policy: IdPolicy,
@@ -315,16 +359,9 @@ fn write_page_list_with_policy<'p, W: Write, I: IntoIterator<Item = &'p Page<'p>
     for page in &pages {
         page.validate()?;
     }
-    write_line(&mut writer, header)?;
-
+    let mut writer = PageListWriter::with_policy(writer, header, id_policy)?;
     for page in pages {
-        match id_policy {
-            IdPolicy::Synthetic(id_length) if page.id.is_none() => {
-                let id = synthetic_id(&page.ts, &page.url, id_length);
-                write_line(&mut writer, &IdentifiedPage { id: &id, page })?;
-            }
-            IdPolicy::Preserve | IdPolicy::Synthetic(_) => write_line(&mut writer, page)?,
-        }
+        writer.write_validated(page)?;
     }
 
     Ok(())

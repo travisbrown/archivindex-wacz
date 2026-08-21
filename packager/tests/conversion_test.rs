@@ -263,7 +263,10 @@ fn rejects_an_invalid_gzip_compression_level() -> Result<(), Box<dyn std::error:
         .run()
         .expect_err("level 10 must be rejected");
 
-    assert!(matches!(error, Error::InvalidGzipCompressionLevel(10)));
+    assert!(matches!(
+        error,
+        Error::Wacz(archivindex_wacz::io::write::Error::InvalidGzipCompressionLevel(10))
+    ));
     assert!(!output.exists());
     Ok(())
 }
@@ -284,7 +287,10 @@ fn rejects_an_invalid_zip_compression_level() -> Result<(), Box<dyn std::error::
         .run()
         .expect_err("level 265 must be rejected");
 
-    assert!(matches!(error, Error::InvalidZipCompressionLevel(265)));
+    assert!(matches!(
+        error,
+        Error::Wacz(archivindex_wacz::io::write::Error::InvalidZipCompressionLevel(265))
+    ));
     assert!(!output.exists());
     Ok(())
 }

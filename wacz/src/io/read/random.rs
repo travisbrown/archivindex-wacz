@@ -14,8 +14,9 @@ use zip::CompressionMethod;
 use super::{Error, WaczReader};
 use crate::cdxj::{self, Item, ParsedFields, Timestamp};
 use crate::digest::Sha256Digest;
+use crate::lines::Lines;
 use crate::zipnum::{FORMAT, SummaryEntry, SummaryHeader};
-use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION};
+use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION, LineContext};
 
 /// A capture found in a WACZ index, together with the index that described it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,15 +73,13 @@ impl<R: Read + Seek> WaczReader<R> {
         }
 
         let size = metadata.size;
-        let end = offset
-            .checked_add(length)
-            .ok_or_else(|| Error::RangeOutOfBounds {
-                path: path.to_owned(),
-                offset,
-                end: u64::MAX,
-                size,
-            })?;
-
+        let end = offset.saturating_add(length);
+        let length = usize::try_from(length).map_err(|_| Error::RangeOutOfBounds {
+            path: path.to_owned(),
+            offset,
+            end,
+            size,
+        })?;
         if end > size {
             return Err(Error::RangeOutOfBounds {
                 path: path.to_owned(),
@@ -92,12 +91,6 @@ impl<R: Read + Seek> WaczReader<R> {
 
         let mut member = self.archive.by_name_seek(path)?;
         member.seek(SeekFrom::Start(offset))?;
-        let length = usize::try_from(length).map_err(|_| Error::RangeOutOfBounds {
-            path: path.to_owned(),
-            offset,
-            end,
-            size,
-        })?;
         let mut bytes = vec![0; length];
         member.read_exact(&mut bytes)?;
 
@@ -132,16 +125,17 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
+        let key = cdxj::search_key(url)?;
         let partition = self.partition_indexes();
         let mut captures = Vec::new();
 
         for (_, summary) in partition.summaries {
             let summary = summary?;
-            captures.extend(self.lookup_zipnum(&summary, url, &time_range)?);
+            captures.extend(self.lookup_zipnum(&summary, &key, &time_range)?);
         }
 
         for path in partition.plain {
-            captures.extend(self.lookup_plain(&path, url, &time_range)?);
+            captures.extend(self.lookup_plain(&path, &key, &time_range)?);
         }
 
         captures.sort_by(|left, right| {
@@ -162,11 +156,21 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
+        let key = cdxj::search_key(url)?;
+        self.lookup_index_key(path, &key, &time_range)
+    }
+
+    fn lookup_index_key<B: RangeBounds<Timestamp>>(
+        &mut self,
+        path: &str,
+        key: &str,
+        time_range: &B,
+    ) -> Result<Vec<Capture>, Error> {
         if crate::paths::is_zipnum_summary(path) {
             let summary = self.zipnum_summary(path)?;
-            self.lookup_zipnum(&summary, url, &time_range)
+            self.lookup_zipnum(&summary, key, time_range)
         } else {
-            self.lookup_plain(path, url, &time_range)
+            self.lookup_plain(path, key, time_range)
         }
     }
 
@@ -175,6 +179,13 @@ impl<R: Read + Seek> WaczReader<R> {
     /// For `.warc.gz` members, the returned bytes are the complete compressed gzip member. For
     /// uncompressed WARC members, they are the complete serialized WARC record.
     pub fn capture_bytes(&mut self, fields: &ParsedFields<'_>) -> Result<Vec<u8>, Error> {
+        self.capture_bytes_with_path(fields).map(|(_, bytes)| bytes)
+    }
+
+    fn capture_bytes_with_path(
+        &mut self,
+        fields: &ParsedFields<'_>,
+    ) -> Result<(String, Vec<u8>), Error> {
         let filename = fields
             .filename
             .as_deref()
@@ -188,23 +199,13 @@ impl<R: Read + Seek> WaczReader<R> {
             verify_digest(&path, &bytes, expected)?;
         }
 
-        Ok(bytes)
+        Ok((path, bytes))
     }
 
     /// Resolve CDXJ fields to exactly one byte-preserving raw WARC record.
     pub fn read_capture_raw(&mut self, fields: &ParsedFields<'_>) -> Result<raw::Record, Error> {
         let bytes = self.decoded_capture_bytes(fields)?;
-        let mut records = WarcReader::new(Cursor::new(bytes)).iter_raw_records();
-        let record = records.next().transpose()?;
-
-        match (record, records.next()) {
-            (Some(record), None) => Ok(record),
-            (None, _) => Err(Error::CaptureRecordCount(0)),
-            (Some(_), Some(second)) => {
-                second?;
-                Err(Error::CaptureRecordCount(2))
-            }
-        }
+        single(WarcReader::new(Cursor::new(bytes)).iter_raw_records())
     }
 
     /// Resolve CDXJ fields to exactly one semantically validated WARC record.
@@ -213,39 +214,27 @@ impl<R: Read + Seek> WaczReader<R> {
         fields: &ParsedFields<'_>,
     ) -> Result<Record<NoExtension>, Error> {
         let bytes = self.decoded_capture_bytes(fields)?;
-        let mut records = WarcReader::new(Cursor::new(bytes)).iter_records::<NoExtension>();
-        let record = records.next().transpose()?;
-
-        match (record, records.next()) {
-            (Some(record), None) => Ok(record),
-            (None, _) => Err(Error::CaptureRecordCount(0)),
-            (Some(_), Some(second)) => {
-                second?;
-                Err(Error::CaptureRecordCount(2))
-            }
-        }
+        single(WarcReader::new(Cursor::new(bytes)).iter_records::<NoExtension>())
     }
 
     fn lookup_plain<B: RangeBounds<Timestamp>>(
         &mut self,
         path: &str,
-        url: &str,
+        key: &str,
         time_range: &B,
     ) -> Result<Vec<Capture>, Error> {
         let bytes = self.decoded_member_bytes(path)?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| Error::InvalidIndexEncoding(path.to_owned()))?;
-        let key = cdxj::search_key(url)?;
         let lines = text
             .lines()
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>();
-        let first =
-            lines.partition_point(|line| line_key(line).is_some_and(|found| found < key.as_str()));
+        let first = lines.partition_point(|line| line_key(line).is_some_and(|found| found < key));
         let mut captures = Vec::new();
 
         for line in &lines[first..] {
-            if line_key(line) != Some(key.as_str()) {
+            if line_key(line) != Some(key) {
                 break;
             }
 
@@ -264,16 +253,17 @@ impl<R: Read + Seek> WaczReader<R> {
     fn lookup_zipnum<B: RangeBounds<Timestamp>>(
         &mut self,
         summary: &ZipNumSummary,
-        url: &str,
+        key: &str,
         time_range: &B,
     ) -> Result<Vec<Capture>, Error> {
-        let key = cdxj::search_key(url)?;
-        let insertion = summary.blocks.partition_point(|block| block.key < key);
+        let insertion = summary
+            .blocks
+            .partition_point(|block| block.key.as_str() < key);
         let first = insertion.saturating_sub(1);
         let mut captures = Vec::new();
 
         for block in &summary.blocks[first..] {
-            if block.key > key {
+            if block.key.as_str() > key {
                 break;
             }
 
@@ -282,7 +272,7 @@ impl<R: Read + Seek> WaczReader<R> {
                 .map_err(|_| Error::InvalidIndexEncoding(summary.data_path.clone()))?;
 
             for line in text.lines().filter(|line| !line.is_empty()) {
-                if line_key(line) == Some(key.as_str()) {
+                if line_key(line) == Some(key) {
                     let item = Item::parse(line)?.into_static();
                     if time_range.contains(&item.timestamp) {
                         captures.push(Capture {
@@ -298,13 +288,9 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 
     fn decoded_capture_bytes(&mut self, fields: &ParsedFields<'_>) -> Result<Vec<u8>, Error> {
-        let filename = fields
-            .filename
-            .as_deref()
-            .ok_or(Error::MissingCaptureField("filename"))?;
-        let bytes = self.capture_bytes(fields)?;
+        let (path, bytes) = self.capture_bytes_with_path(fields)?;
 
-        if filename.ends_with(GZIP_EXTENSION) {
+        if path.ends_with(GZIP_EXTENSION) {
             let mut decoded = Vec::new();
             GzDecoder::new(bytes.as_slice()).read_to_end(&mut decoded)?;
             Ok(decoded)
@@ -340,65 +326,85 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 }
 
+fn single<T>(
+    mut records: impl Iterator<Item = Result<T, archivindex_warc::io::read::Error>>,
+) -> Result<T, Error> {
+    let record = records.next().transpose()?;
+
+    match (record, records.next()) {
+        (Some(record), None) => Ok(record),
+        (None, _) => Err(Error::CaptureRecordCount(0)),
+        (Some(_), Some(second)) => {
+            second?;
+            Err(Error::CaptureRecordCount(2))
+        }
+    }
+}
+
 fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
-    let mut lines = text.lines().filter(|line| !line.is_empty());
-    let header_line = lines
-        .next()
-        .ok_or_else(|| Error::InvalidZipNum(format!("{path}: missing !meta header")))?;
+    let mut lines = Lines::with_source(text.as_bytes(), path);
+    let (header_context, header_line) =
+        lines
+            .next_content()
+            .map_err(zipnum_io_error)?
+            .ok_or_else(|| {
+                zipnum_error(
+                    LineContext {
+                        source: path.to_owned(),
+                        line: 1,
+                        excerpt: None,
+                    },
+                    "missing !meta header",
+                )
+            })?;
     let (header_key, header_json) = cdxj::split_prefix(header_line)
-        .ok_or_else(|| Error::InvalidZipNum(format!("{path}: malformed !meta header")))?;
+        .ok_or_else(|| zipnum_error(header_context.clone(), "malformed !meta header"))?;
 
     if header_key != "!meta 0" {
-        return Err(Error::InvalidZipNum(format!(
-            "{path}: expected !meta 0 header"
-        )));
+        return Err(zipnum_error(
+            header_context.clone(),
+            "expected !meta 0 header",
+        ));
     }
 
     let header: SummaryHeader<'_> = serde_json::from_str(header_json)
-        .map_err(|error| Error::InvalidZipNum(format!("{path}: {error}")))?;
+        .map_err(|error| zipnum_error(header_context.clone(), error.to_string()))?;
     if header.format != FORMAT {
-        return Err(Error::InvalidZipNum(format!(
-            "{path}: unsupported format {}",
-            header.format
-        )));
+        return Err(zipnum_error(
+            header_context,
+            format!("unsupported format {}", header.format),
+        ));
     }
 
     let data_path = sibling_path(path, &header.filename);
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<ZipNumBlock> = Vec::new();
 
-    for (line_number, line) in lines.enumerate() {
-        let (prefix, json) = cdxj::split_prefix(line).ok_or_else(|| {
-            Error::InvalidZipNum(format!("{path}: malformed line {}", line_number + 2))
-        })?;
-        let (key, timestamp) = prefix.rsplit_once(' ').ok_or_else(|| {
-            Error::InvalidZipNum(format!(
-                "{path}: malformed prefix on line {}",
-                line_number + 2
-            ))
-        })?;
-        let entry: SummaryEntry = serde_json::from_str(json).map_err(|error| {
-            Error::InvalidZipNum(format!("{path}: line {}: {error}", line_number + 2))
-        })?;
-        let timestamp = timestamp.parse().map_err(|error| {
-            Error::InvalidZipNum(format!("{path}: line {}: {error}", line_number + 2))
-        })?;
+    while let Some((context, line)) = lines.next_content().map_err(zipnum_io_error)? {
+        let (prefix, json) = cdxj::split_prefix(line)
+            .ok_or_else(|| zipnum_error(context.clone(), "malformed line"))?;
+        let (key, timestamp) = prefix
+            .rsplit_once(' ')
+            .ok_or_else(|| zipnum_error(context.clone(), "malformed prefix"))?;
+        let entry: SummaryEntry = serde_json::from_str(json)
+            .map_err(|error| zipnum_error(context.clone(), error.to_string()))?;
+        let timestamp = timestamp
+            .parse::<Timestamp>()
+            .map_err(|error| zipnum_error(context.clone(), error.to_string()))?;
 
-        blocks.push(ZipNumBlock {
+        let block = ZipNumBlock {
             key: key.to_owned(),
             timestamp,
             data_path: data_path.clone(),
             offset: entry.offset,
             length: entry.length,
             digest: entry.digest,
-        });
-    }
-
-    if !blocks.windows(2).all(|pair| {
-        (pair[0].key.as_str(), pair[0].timestamp) <= (pair[1].key.as_str(), pair[1].timestamp)
-    }) {
-        return Err(Error::InvalidZipNum(format!(
-            "{path}: block prefixes are not sorted"
-        )));
+        };
+        if blocks.last().is_some_and(|previous| {
+            (previous.key.as_str(), previous.timestamp) > (block.key.as_str(), block.timestamp)
+        }) {
+            return Err(zipnum_error(context, "block prefixes are not sorted"));
+        }
+        blocks.push(block);
     }
 
     Ok(ZipNumSummary {
@@ -406,6 +412,17 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
         data_path,
         blocks,
     })
+}
+
+fn zipnum_error(context: LineContext, message: impl Into<String>) -> Error {
+    Error::InvalidZipNum {
+        context,
+        message: message.into(),
+    }
+}
+
+fn zipnum_io_error(error: crate::lines::Error) -> Error {
+    zipnum_error(error.context, error.source.to_string())
 }
 
 fn sibling_path(path: &str, filename: &str) -> String {
@@ -437,5 +454,27 @@ fn verify_digest(path: &str, bytes: &[u8], expected: Sha256Digest) -> Result<(),
             expected,
             actual,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zipnum_errors_carry_line_context() {
+        let error = parse_summary(
+            "indexes/index.idx",
+            "!meta 0 {\"format\":\"cdxj-gzip-1.0\",\"filename\":\"index.cdx.gz\"}\ninvalid\n",
+        )
+        .expect_err("the second line is malformed");
+
+        assert!(matches!(
+            error,
+            Error::InvalidZipNum { context, .. }
+                if context.source == "indexes/index.idx"
+                    && context.line == 2
+                    && context.excerpt.as_deref() == Some("invalid")
+        ));
     }
 }

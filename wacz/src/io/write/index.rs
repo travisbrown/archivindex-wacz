@@ -22,9 +22,6 @@ impl<W: Write + Seek> WaczWriter<W> {
         name: &str,
         items: I,
     ) -> Result<(), Error> {
-        if !crate::paths::valid_index_name(name) {
-            return Err(Error::InvalidIndexName(name.to_owned()));
-        }
         self.write_index(name, items, |item| {
             Ok(crate::cdxj::validate_cdxj_extra(&item.fields.extra)?)
         })
@@ -36,9 +33,6 @@ impl<W: Write + Seek> WaczWriter<W> {
         name: &str,
         items: I,
     ) -> Result<(), Error> {
-        if !crate::paths::valid_index_name(name) {
-            return Err(Error::InvalidIndexName(name.to_owned()));
-        }
         self.write_index(name, items, |_| Ok(()))
     }
 
@@ -100,7 +94,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         };
         let header = zipnum::to_json(&header).expect("summary header serialization cannot fail");
         writeln!(summary, "!meta 0 {header}")?;
-        let data_options = options_for(&data_path, self.config.zip_compression_level)?;
+        let data_options = options_for(&data_path, self.config.zip_compression_level);
         self.add_member(&data_path, data_options, |writer| {
             let mut offset = 0_u64;
             let mut block = Vec::with_capacity(lines_per_block.max(1));

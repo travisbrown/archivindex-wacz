@@ -24,6 +24,15 @@ pub struct Operator {
     pub email: Option<String>,
 }
 
+/// Crawling software named in a session's `warcinfo` record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Software {
+    /// Software name.
+    pub name: String,
+    /// Software version.
+    pub version: String,
+}
+
 /// A successfully captured page shown to a [`CaptureProcessor`].
 #[derive(Clone, Debug)]
 pub struct Capture<'a> {
@@ -68,6 +77,26 @@ pub struct Inspection {
     /// A failure that makes the traversal incomplete and stops the session after recording this
     /// capture.
     pub error: Option<String>,
+}
+
+impl Inspection {
+    /// Stop traversal with a processor error after recording the current capture.
+    #[must_use]
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            error: Some(message.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Request a deliberate recapture of `url`.
+    #[must_use]
+    pub fn recapture(url: impl Into<String>) -> Self {
+        Self {
+            recaptures: vec![url.into()],
+            ..Self::default()
+        }
+    }
 }
 
 /// Inspect successful captures to discover URLs, request recaptures, and supply titles.
@@ -125,7 +154,7 @@ pub struct Session<'a> {
     archiver: Archiver,
     id: String,
     operator: Operator,
-    software: (String, String),
+    software: Software,
     seeds: Vec<String>,
     output: PathBuf,
     processor: Option<Box<dyn CaptureProcessor + 'a>>,
@@ -156,10 +185,10 @@ impl<'a> Session<'a> {
             archiver,
             id: id.to_owned(),
             operator,
-            software: (
-                env!("CARGO_PKG_NAME").to_owned(),
-                env!("CARGO_PKG_VERSION").to_owned(),
-            ),
+            software: Software {
+                name: env!("CARGO_PKG_NAME").to_owned(),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
             seeds: seeds
                 .into_iter()
                 .map(|seed| seed.as_ref().to_owned())
@@ -176,7 +205,10 @@ impl<'a> Session<'a> {
     /// Override the crawling software name and version recorded in `warcinfo`.
     #[must_use]
     pub fn software(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
-        self.software = (name.into(), version.into());
+        self.software = Software {
+            name: name.into(),
+            version: version.into(),
+        };
         self
     }
 

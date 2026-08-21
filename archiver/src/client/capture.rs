@@ -13,6 +13,28 @@ use url::{Position, Url};
 
 use super::{Archiver, Collection, Error};
 
+/// Captured exchanges, with any terminal fetch failure represented explicitly.
+pub enum CaptureOutcome {
+    /// The redirect chain completed.
+    Captured(Vec<Exchange>),
+    /// Fetching stopped after zero or more recorded exchanges.
+    Failed {
+        /// Exchanges completed before the failure.
+        exchanges: Vec<Exchange>,
+        /// The terminal failure.
+        error: Error,
+    },
+}
+
+impl CaptureOutcome {
+    pub(super) fn parts(self) -> (Vec<Exchange>, Option<Error>) {
+        match self {
+            Self::Captured(exchanges) => (exchanges, None),
+            Self::Failed { exchanges, error } => (exchanges, Some(error)),
+        }
+    }
+}
+
 /// The precision at which `WARC-Date` fields are recorded.
 const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
 
@@ -130,15 +152,16 @@ impl Archiver {
     /// Given a collection, a hop whose URL it already holds a complete capture of is requested
     /// conditionally on that capture's validators, so that the server may answer `304 Not
     /// Modified`, which the collection then stores as a revisit of the earlier capture.
-    pub(crate) fn capture(
-        &self,
-        url: &str,
-        revalidate: Option<&Collection>,
-    ) -> (Vec<Exchange>, Option<Error>) {
+    pub(crate) fn capture(&self, url: &str, revalidate: Option<&Collection>) -> CaptureOutcome {
         let mut exchanges = Vec::new();
         let mut current = match Url::parse(url) {
             Ok(url) => url,
-            Err(error) => return (exchanges, Some(error.into())),
+            Err(error) => {
+                return CaptureOutcome::Failed {
+                    exchanges,
+                    error: error.into(),
+                };
+            }
         };
 
         loop {
@@ -150,10 +173,10 @@ impl Archiver {
                         Some(next) if exchanges.len() <= self.config.max_redirects => {
                             current = next;
                         }
-                        _ => return (exchanges, None),
+                        _ => return CaptureOutcome::Captured(exchanges),
                     }
                 }
-                Err(error) => return (exchanges, Some(error)),
+                Err(error) => return CaptureOutcome::Failed { exchanges, error },
             }
         }
     }

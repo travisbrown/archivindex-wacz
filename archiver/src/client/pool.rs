@@ -5,11 +5,11 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 
 use super::{
-    Archiver, CaptureControl, CaptureEvent, CaptureEventSink, Collection, Error, Exchange,
+    Archiver, CaptureControl, CaptureEvent, CaptureEventSink, CaptureOutcome, Collection, Error,
     notify_outcome,
 };
 
-type CaptureOutcome = (usize, String, Vec<Exchange>, Option<Error>);
+type IndexedOutcome = (usize, String, CaptureOutcome);
 
 impl Archiver {
     /// Capture URLs with a pool of worker threads, recording outcomes in input order.
@@ -23,7 +23,7 @@ impl Archiver {
         let mut urls = urls.into_iter();
         let (task_sender, task_receiver) = mpsc::channel::<(usize, String)>();
         let task_receiver = Mutex::new(task_receiver);
-        let (outcome_sender, outcome_receiver) = mpsc::sync_channel::<CaptureOutcome>(concurrency);
+        let (outcome_sender, outcome_receiver) = mpsc::sync_channel::<IndexedOutcome>(concurrency);
 
         thread::scope(|scope| {
             for _ in 0..concurrency {
@@ -37,9 +37,9 @@ impl Archiver {
                             .ok()
                             .and_then(|receiver| receiver.recv().ok());
                         let Some((index, url)) = task else { return };
-                        let (exchanges, error) = self.capture(&url, None);
+                        let outcome = self.capture(&url, None);
 
-                        if outcome_sender.send((index, url, exchanges, error)).is_err() {
+                        if outcome_sender.send((index, url, outcome)).is_err() {
                             return;
                         }
                     }
@@ -69,9 +69,10 @@ impl Archiver {
             let mut pending = BTreeMap::new();
 
             while completed < dispatched {
-                let (index, url, exchanges, error) = outcome_receiver
+                let (index, url, outcome) = outcome_receiver
                     .recv()
                     .expect("workers always report an outcome before exiting");
+                let (exchanges, error) = outcome.parts();
                 completed += 1;
 
                 if result.is_ok() {

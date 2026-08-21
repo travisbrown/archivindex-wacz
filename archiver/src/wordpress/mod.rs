@@ -62,14 +62,45 @@ pub struct CommentCaptureProcessor {
     site_name: String,
     before: DateTime<Utc>,
     seen_ids: HashSet<u64>,
-    page: usize,
-    sweeps_completed: usize,
+    sweep: Sweep,
     force_second_sweep: bool,
-    total_comments: Option<usize>,
-    previous_sweep_total: Option<usize>,
+}
+
+struct Sweep {
+    number: usize,
+    page: usize,
+    total: Option<usize>,
+    previous_total: Option<usize>,
     totals_consistent: bool,
-    /// The page count most recently advertised by `X-WP-TotalPages`.
     total_pages: Option<usize>,
+}
+
+impl Sweep {
+    const fn first() -> Self {
+        Self {
+            number: 1,
+            page: 1,
+            total: None,
+            previous_total: None,
+            totals_consistent: true,
+            total_pages: None,
+        }
+    }
+
+    fn next(&self) -> Self {
+        Self {
+            number: self.number + 1,
+            page: 1,
+            total: None,
+            previous_total: self.total.or(self.previous_total),
+            totals_consistent: true,
+            total_pages: self.total_pages,
+        }
+    }
+
+    fn effective_total(&self) -> Option<usize> {
+        self.total.or(self.previous_total)
+    }
 }
 
 impl CommentCaptureProcessor {
@@ -107,13 +138,8 @@ impl CommentCaptureProcessor {
             site_name,
             before,
             seen_ids: HashSet::new(),
-            page: 1,
-            sweeps_completed: 0,
+            sweep: Sweep::first(),
             force_second_sweep: false,
-            total_comments: None,
-            previous_sweep_total: None,
-            totals_consistent: true,
-            total_pages: None,
         })
     }
 
@@ -139,36 +165,25 @@ impl CommentCaptureProcessor {
 
     /// Finish a sweep, optionally scheduling one validation sweep.
     fn finish_sweep(&mut self) -> Inspection {
-        self.sweeps_completed += 1;
-        self.page = 1;
-
-        let total = self.total_comments.or(self.previous_sweep_total);
-        let counts_match = self.totals_consistent && total == Some(self.seen_ids.len());
-        if self.sweeps_completed == 1 && (self.force_second_sweep || !counts_match) {
-            self.previous_sweep_total = self.total_comments;
-            self.total_comments = None;
-            self.totals_consistent = true;
-            return Inspection {
-                recaptures: vec![self.comment_url(1)],
-                ..Inspection::default()
-            };
+        let total = self.sweep.effective_total();
+        let counts_match = self.sweep.totals_consistent && total == Some(self.seen_ids.len());
+        if self.sweep.number == 1 && (self.force_second_sweep || !counts_match) {
+            self.sweep = self.sweep.next();
+            return Inspection::recapture(self.comment_url(1));
         }
 
         if !counts_match {
-            return Inspection {
-                error: Some(format!(
-                    "WordPress reported {} comments after sweep {}, but {} distinct IDs were captured{}",
-                    total.map_or_else(|| "no total".to_owned(), |value| value.to_string()),
-                    self.sweeps_completed,
-                    self.seen_ids.len(),
-                    if self.totals_consistent {
-                        ""
-                    } else {
-                        " and totals changed during the sweep"
-                    }
-                )),
-                ..Inspection::default()
-            };
+            return Inspection::error(format!(
+                "WordPress reported {} comments after sweep {}, but {} distinct IDs were captured{}",
+                total.map_or_else(|| "no total".to_owned(), |value| value.to_string()),
+                self.sweep.number,
+                self.seen_ids.len(),
+                if self.sweep.totals_consistent {
+                    ""
+                } else {
+                    " and totals changed during the sweep"
+                }
+            ));
         }
 
         Inspection::default()
@@ -201,18 +216,15 @@ impl CaptureProcessor for CommentCaptureProcessor {
         // A page can disappear between requests when deletions reduce the page count. WordPress
         // reports that as a 400 `rest_post_invalid_page_number`; treat it as the end of this sweep
         // and validate again from page one when the sweep found anything new.
-        if capture.status == 400 && self.page > 1 {
+        if capture.status == 400 && self.sweep.page > 1 {
             return self.finish_sweep();
         }
 
         if !matches!(capture.status, 200 | 304) {
-            return Inspection {
-                error: Some(format!(
-                    "unexpected WordPress comments response status {} on page {}",
-                    capture.status, self.page
-                )),
-                ..Inspection::default()
-            };
+            return Inspection::error(format!(
+                "unexpected WordPress comments response status {} on page {}",
+                capture.status, self.sweep.page
+            ));
         }
 
         // A revalidated recapture carries no batch and no fresh page count: the page is unchanged
@@ -222,34 +234,29 @@ impl CaptureProcessor for CommentCaptureProcessor {
             Vec::new()
         } else {
             let Ok(comments) = serde_json::from_slice::<Vec<Comment>>(capture.payload) else {
-                return Inspection {
-                    error: Some(format!(
-                        "invalid WordPress comments response on page {}",
-                        self.page
-                    )),
-                    ..Inspection::default()
-                };
+                return Inspection::error(format!(
+                    "invalid WordPress comments response on page {}",
+                    self.sweep.page
+                ));
             };
             let Some(total_comments) = capture
                 .header("x-wp-total")
                 .and_then(|value| value.parse::<usize>().ok())
             else {
-                return Inspection {
-                    error: Some(format!(
-                        "missing or invalid X-WP-Total on WordPress comments page {}",
-                        self.page
-                    )),
-                    ..Inspection::default()
-                };
+                return Inspection::error(format!(
+                    "missing or invalid X-WP-Total on WordPress comments page {}",
+                    self.sweep.page
+                ));
             };
             if self
-                .total_comments
+                .sweep
+                .total
                 .is_some_and(|total| total != total_comments)
             {
-                self.totals_consistent = false;
+                self.sweep.totals_consistent = false;
             }
-            self.total_comments = Some(total_comments);
-            self.total_pages = capture
+            self.sweep.total = Some(total_comments);
+            self.sweep.total_pages = capture
                 .header("x-wp-totalpages")
                 .and_then(|value| value.parse::<usize>().ok());
             comments
@@ -260,16 +267,14 @@ impl CaptureProcessor for CommentCaptureProcessor {
             .extend(comments.iter().map(|comment| comment.id));
 
         let has_next = self
+            .sweep
             .total_pages
             .map_or(comments.len() == COMMENTS_PER_PAGE, |total| {
-                self.page < total
+                self.sweep.page < total
             });
         let mut inspection = if has_next {
-            self.page += 1;
-            Inspection {
-                recaptures: vec![self.comment_url(self.page)],
-                ..Inspection::default()
-            }
+            self.sweep.page += 1;
+            Inspection::recapture(self.comment_url(self.sweep.page))
         } else {
             self.finish_sweep()
         };

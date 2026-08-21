@@ -74,13 +74,13 @@ impl Collection {
         };
         self.session_index.update_resource(
             &key,
-            ResourceStateUpdate::representation(
-                state.etag.clone(),
-                state.last_modified.clone(),
-                state.payload_digest.clone(),
-                state.record_id.clone(),
-                state.warc_date,
-            ),
+            ResourceStateUpdate::Representation {
+                etag: state.etag.clone(),
+                last_modified: state.last_modified.clone(),
+                payload_digest: state.payload_digest.clone(),
+                record_id: state.record_id.clone(),
+                warc_date: state.warc_date,
+            },
         )?;
 
         self.original_from_state(state)
@@ -177,7 +177,10 @@ impl Collection {
             if status == 304 && revalidated.is_some() {
                 self.session_index.update_resource(
                     &resource_key,
-                    ResourceStateUpdate::not_modified(etag, last_modified),
+                    ResourceStateUpdate::NotModified {
+                        etag,
+                        last_modified,
+                    },
                 )?;
             } else if status == 200
                 && key.is_some()
@@ -185,13 +188,13 @@ impl Collection {
             {
                 self.session_index.update_resource(
                     &resource_key,
-                    ResourceStateUpdate::representation(
+                    ResourceStateUpdate::Representation {
                         etag,
                         last_modified,
-                        Some(original.payload_digest.clone()),
-                        Some(original.record_id.clone()),
-                        Some(original.warc_date),
-                    ),
+                        payload_digest: Some(original.payload_digest.clone()),
+                        record_id: Some(original.record_id.clone()),
+                        warc_date: Some(original.warc_date),
+                    },
                 )?;
             }
         }

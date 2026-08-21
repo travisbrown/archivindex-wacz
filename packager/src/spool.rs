@@ -1,12 +1,12 @@
 //! Disk-backed intermediate state for WARC-to-WACZ conversion.
 
 use std::borrow::Cow;
-use std::io::{Seek, Write};
+use std::io::Seek;
 
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::io::write::index::IndexSpool;
-use archivindex_wacz::pages::{Page, PageListHeader};
+use archivindex_wacz::pages::{Page, PageListHeader, PageListWriter};
 use redb::{ReadableTable as _, TableDefinition};
 
 const PAGES: TableDefinition<'static, u64, &[u8]> = TableDefinition::new("pages");
@@ -20,6 +20,8 @@ pub enum Error {
     Database(#[source] redb::Error),
     #[error("stored value serialization failed")]
     Serialization(#[from] serde_json::Error),
+    #[error(transparent)]
+    PageList(#[from] archivindex_wacz::pages::Error),
 }
 
 /// A page entry retaining its WARC record identity until linked metadata has been collected.
@@ -146,13 +148,18 @@ impl ConversionSpool {
         } = self;
         let mut pages = tempfile::tempfile()?;
         let mut extra_page_file = tempfile::tempfile()?;
-        write_json_line(&mut pages, &PageListHeader::default())?;
-        write_json_line(&mut extra_page_file, &extra_page_list_header())?;
         let mut pages_count = 0;
         let mut extra_pages = 0;
         let mut main_page = None;
 
         {
+            let extra_header = PageListHeader {
+                id: Some(Cow::Borrowed("extra-pages")),
+                title: Some(Cow::Borrowed("Extra Pages")),
+                ..PageListHeader::default()
+            };
+            let mut page_writer = PageListWriter::new(&mut pages, &PageListHeader::default())?;
+            let mut extra_page_writer = PageListWriter::new(&mut extra_page_file, &extra_header)?;
             let stored_pages = transaction.open_table(PAGES).spool()?;
             let annotations = transaction.open_table(ANNOTATIONS).spool()?;
             for entry in stored_pages.iter().spool()? {
@@ -181,12 +188,11 @@ impl ConversionSpool {
                     size: draft.size,
                     extra: ExtraProperties::default(),
                 };
-                let output = if annotation.via {
-                    &mut extra_page_file
+                if annotation.via {
+                    extra_page_writer.write(&page)?;
                 } else {
-                    &mut pages
-                };
-                write_json_line(output, &page)?;
+                    page_writer.write(&page)?;
+                }
                 pages_count += 1;
                 if annotation.via {
                     extra_pages += 1;
@@ -217,21 +223,5 @@ trait RedbResultExt<T> {
 impl<T, E: Into<redb::Error>> RedbResultExt<T> for Result<T, E> {
     fn spool(self) -> Result<T, Error> {
         self.map_err(|error| Error::Database(error.into()))
-    }
-}
-
-fn write_json_line(writer: &mut impl Write, value: &impl serde::Serialize) -> Result<(), Error> {
-    serde_json::to_writer(&mut *writer, value)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-fn extra_page_list_header() -> PageListHeader<'static> {
-    PageListHeader {
-        format: Cow::Borrowed(archivindex_wacz::pages::FORMAT),
-        id: Some(Cow::Borrowed("extra-pages")),
-        title: Some(Cow::Borrowed("Extra Pages")),
-        extra: ExtraProperties::default(),
     }
 }

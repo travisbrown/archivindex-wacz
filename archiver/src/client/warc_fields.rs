@@ -11,6 +11,7 @@ use chrono::Utc;
 use fluent_uri::Uri;
 
 use super::Error;
+use crate::session::{Operator, Software};
 
 const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
 const WARC_FORMAT: &str = "WARC file version 1.1";
@@ -20,8 +21,8 @@ const WARC_SPECIFICATION: &str =
 /// Information recorded in the WARC file's initial `warcinfo` record.
 pub(super) struct WarcinfoOptions<'a> {
     pub(super) user_agent: &'a str,
-    pub(super) software: Option<(&'a str, &'a str)>,
-    pub(super) operator: Option<(&'a str, Option<&'a str>)>,
+    pub(super) software: Option<&'a Software>,
+    pub(super) operator: Option<&'a Operator>,
     pub(super) session_id: Option<&'a str>,
 }
 
@@ -57,17 +58,21 @@ struct Warcinfo<'a> {
 
 impl<'a> Warcinfo<'a> {
     fn from_options(options: &WarcinfoOptions<'a>) -> Self {
-        let (software_name, software_version) = options
-            .software
-            .unwrap_or((env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")));
-        let operator = options.operator.map(|(name, email)| {
-            email.map_or_else(|| name.to_owned(), |email| format!("{name} <{email}>"))
+        let software = options.software.map_or_else(
+            || format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            |software| format!("{}/{}", software.name, software.version),
+        );
+        let operator = options.operator.map(|operator| {
+            operator.email.as_ref().map_or_else(
+                || operator.name.clone(),
+                |email| format!("{} <{email}>", operator.name),
+            )
         });
 
         Self {
             format: WARC_FORMAT,
             conforms_to: WARC_SPECIFICATION,
-            software: format!("{software_name}/{software_version}"),
+            software,
             operator,
             http_header_user_agent: options.user_agent,
             is_part_of: options.session_id,

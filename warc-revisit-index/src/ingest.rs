@@ -2,10 +2,11 @@
 
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::Extension;
-use archivindex_warc::record::header::{ResponseHeader, RevisitHeader, RevisitProfile};
+use archivindex_warc::record::header::{RevisitHeader, RevisitProfile};
+use archivindex_warc::record::http::ResponseMetadata;
 use rusqlite::Connection;
 
-use crate::db::{Index, Transaction};
+use crate::db::Store;
 use crate::db::{insert_payload, lookup_payload, lookup_resource, update_resource};
 use crate::error::Error;
 use crate::payload::RevisitTarget;
@@ -20,7 +21,7 @@ pub struct IndexRecordOutcome {
     pub resource_updated: bool,
 }
 
-impl Index {
+impl<C> Store<C> {
     /// Index one semantic WARC record.
     ///
     /// Payload-bearing HTTP `response` records establish canonical payloads. HTTP 200 responses
@@ -37,22 +38,7 @@ impl Index {
         &self,
         record: &Record<E>,
     ) -> Result<IndexRecordOutcome, Error> {
-        index_record(&self.connection, record)
-    }
-}
-
-impl Transaction<'_> {
-    /// Index one semantic WARC record within this bulk transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed WARC/HTTP metadata, unsupported or malformed digests,
-    /// malformed persisted state, or a SQLite query failure.
-    pub fn index_record<E: Extension>(
-        &self,
-        record: &Record<E>,
-    ) -> Result<IndexRecordOutcome, Error> {
-        index_record(&self.transaction, record)
+        index_record(self.connection(), record)
     }
 }
 
@@ -61,8 +47,8 @@ fn index_record<E: Extension>(
     record: &Record<E>,
 ) -> Result<IndexRecordOutcome, Error> {
     match record {
-        Record::Response { header, body } if body.starts_with(b"HTTP/") => {
-            index_response(connection, record, header, body)
+        Record::Response { body, .. } if body.starts_with(b"HTTP/") => {
+            index_response(connection, record)
         }
         Record::Revisit { header, body } => index_revisit(connection, header, body),
         _ => Ok(IndexRecordOutcome::default()),
@@ -72,9 +58,10 @@ fn index_record<E: Extension>(
 fn index_response<E: Extension>(
     connection: &Connection,
     record: &Record<E>,
-    header: &ResponseHeader<E>,
-    body: &[u8],
 ) -> Result<IndexRecordOutcome, Error> {
+    let Record::Response { header, body } = record else {
+        unreachable!("index_response is only called for response records");
+    };
     let metadata = http_metadata(body)?;
     let payload_digest = header.payload.payload_digest.clone();
     let payload_length = record
@@ -104,13 +91,13 @@ fn index_response<E: Extension>(
         update_resource(
             connection,
             &key,
-            ResourceStateUpdate::representation(
-                metadata.etag,
-                metadata.last_modified,
+            ResourceStateUpdate::Representation {
+                etag: metadata.etag,
+                last_modified: metadata.last_modified,
                 payload_digest,
-                Some(header.core.record_id.clone()),
-                Some(header.core.date),
-            ),
+                record_id: Some(header.core.record_id.clone()),
+                warc_date: Some(header.core.date),
+            },
         )?
         .is_some()
     } else {
@@ -166,13 +153,13 @@ fn index_revisit<E: Extension>(
             update_resource(
                 connection,
                 &key,
-                ResourceStateUpdate::representation(
-                    metadata.etag,
-                    metadata.last_modified,
-                    Some(digest.clone()),
+                ResourceStateUpdate::Representation {
+                    etag: metadata.etag,
+                    last_modified: metadata.last_modified,
+                    payload_digest: Some(digest.clone()),
                     record_id,
                     warc_date,
-                ),
+                },
             )?
             .is_some()
         }
@@ -181,20 +168,23 @@ fn index_revisit<E: Extension>(
                 update_resource(
                     connection,
                     &key,
-                    ResourceStateUpdate::not_modified(metadata.etag, metadata.last_modified),
+                    ResourceStateUpdate::NotModified {
+                        etag: metadata.etag,
+                        last_modified: metadata.last_modified,
+                    },
                 )?
                 .is_some()
             } else if header.refers_to.is_some() && header.refers_to_date.is_some() {
                 update_resource(
                     connection,
                     &key,
-                    ResourceStateUpdate::representation(
-                        metadata.etag,
-                        metadata.last_modified,
-                        header.payload.payload_digest.clone(),
-                        header.refers_to.clone(),
-                        header.refers_to_date,
-                    ),
+                    ResourceStateUpdate::Representation {
+                        etag: metadata.etag,
+                        last_modified: metadata.last_modified,
+                        payload_digest: header.payload.payload_digest.clone(),
+                        record_id: header.refers_to.clone(),
+                        warc_date: header.refers_to_date,
+                    },
                 )?
                 .is_some()
             } else {
@@ -218,59 +208,17 @@ struct HttpMetadata {
 }
 
 fn http_metadata(message: &[u8]) -> Result<HttpMetadata, Error> {
-    let mut lines = message.split_inclusive(|&byte| byte == b'\n');
-    let status_line = lines
-        .next()
-        .ok_or(Error::MalformedHttpResponse("missing status line"))?;
-    let status_line = status_line
-        .strip_suffix(b"\n")
-        .unwrap_or(status_line)
-        .strip_suffix(b"\r")
-        .unwrap_or_else(|| status_line.strip_suffix(b"\n").unwrap_or(status_line));
-    let mut parts = status_line.split(u8::is_ascii_whitespace);
-    let version = parts
-        .next()
-        .filter(|part| part.starts_with(b"HTTP/"))
-        .ok_or(Error::MalformedHttpResponse("invalid status line"))?;
-    if version.len() <= b"HTTP/".len() {
-        return Err(Error::MalformedHttpResponse("invalid HTTP version"));
-    }
-    let status = parts
-        .find(|part| !part.is_empty())
-        .and_then(|part| std::str::from_utf8(part).ok())
-        .filter(|part| part.len() == 3 && part.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|part| part.parse().ok())
-        .ok_or(Error::MalformedHttpResponse("invalid status code"))?;
-
-    let mut metadata = HttpMetadata {
-        status,
-        ..HttpMetadata::default()
-    };
-    let mut terminated = false;
-    for line in lines {
-        let line = line.strip_suffix(b"\n").unwrap_or(line);
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            terminated = true;
-            break;
-        }
-        let Some(colon) = line.iter().position(|&byte| byte == b':') else {
-            return Err(Error::MalformedHttpResponse("malformed header field"));
-        };
-        let name = &line[..colon];
-        let value = line[colon + 1..].trim_ascii();
-        let value = std::str::from_utf8(value).ok().map(str::to_owned);
-        if metadata.etag.is_none() && name.eq_ignore_ascii_case(b"etag") {
-            metadata.etag = value;
-        } else if metadata.last_modified.is_none() && name.eq_ignore_ascii_case(b"last-modified") {
-            metadata.last_modified = value;
-        }
-    }
-    if !terminated {
-        return Err(Error::MalformedHttpResponse(
-            "unterminated HTTP header section",
-        ));
-    }
-
-    Ok(metadata)
+    let metadata = ResponseMetadata::parse(message)
+        .ok_or(Error::MalformedHttpResponse("invalid HTTP response head"))?;
+    Ok(HttpMetadata {
+        status: metadata.status,
+        etag: metadata
+            .header("etag")
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .map(str::to_owned),
+        last_modified: metadata
+            .header("last-modified")
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .map(str::to_owned),
+    })
 }

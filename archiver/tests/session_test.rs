@@ -418,13 +418,13 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
     })?;
     index.update_resource(
         &ResourceKey::new(uri(&url)),
-        ResourceStateUpdate::representation(
-            Some("\"1\"".to_owned()),
-            Some(LAST_MODIFIED.to_owned()),
-            Some(digest.clone()),
-            Some(uri(EXTERNAL_RECORD_ID)),
-            Some(original_date),
-        ),
+        ResourceStateUpdate::Representation {
+            etag: Some("\"1\"".to_owned()),
+            last_modified: Some(LAST_MODIFIED.to_owned()),
+            payload_digest: Some(digest.clone()),
+            record_id: Some(uri(EXTERNAL_RECORD_ID)),
+            warc_date: Some(original_date),
+        },
     )?;
     drop(index);
 
