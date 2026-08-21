@@ -256,10 +256,10 @@ impl DataPackageBuilder {
     }
 
     /// Set extension properties, replacing any previously configured properties.
-    #[must_use]
-    pub fn extra(mut self, value: ExtraProperties) -> Self {
+    pub fn extra(mut self, value: ExtraProperties) -> Result<Self, crate::ExtraPropertyError> {
+        crate::validate_extra("DataPackage", &value, DATA_PACKAGE_PROPERTIES)?;
         self.extra = value;
-        self
+        Ok(self)
     }
 
     pub(crate) fn into_data_package(
@@ -289,7 +289,43 @@ impl DataPackageBuilder {
             extra: self.extra,
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra("DataPackage", &self.extra, DATA_PACKAGE_PROPERTIES)?;
+        for source in &self.sources {
+            source.validate()?;
+        }
+        for license in &self.licenses {
+            license.validate()?;
+        }
+        for contributor in &self.contributors {
+            contributor.validate()?;
+        }
+        Ok(())
+    }
 }
+
+const DATA_PACKAGE_PROPERTIES: &[&str] = &[
+    "profile",
+    "wacz_version",
+    "resources",
+    "name",
+    "id",
+    "title",
+    "description",
+    "keywords",
+    "homepage",
+    "image",
+    "version",
+    "sources",
+    "licenses",
+    "contributors",
+    "created",
+    "modified",
+    "software",
+    "mainPageUrl",
+    "mainPageDate",
+];
 
 /// A WACZ `datapackage-digest.json` file.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
@@ -343,6 +379,12 @@ pub struct Source<'a> {
     pub extra: ExtraProperties,
 }
 
+impl Source<'_> {
+    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra("Source", &self.extra, &["title", "path", "email"])
+    }
+}
+
 /// A license under which a package or resource is provided.
 ///
 /// The Data Package specification requires at least one of `name` or `path`; this crate does not
@@ -377,6 +419,12 @@ pub struct License<'a> {
     /// Additional properties, preserved verbatim for round-tripping.
     #[serde(flatten)]
     pub extra: ExtraProperties,
+}
+
+impl License<'_> {
+    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra("License", &self.extra, &["name", "path", "title"])
+    }
 }
 
 /// A person or organization who contributed to a package.
@@ -428,11 +476,56 @@ pub struct Contributor<'a> {
     pub extra: ExtraProperties,
 }
 
+impl Contributor<'_> {
+    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra(
+            "Contributor",
+            &self.extra,
+            &["title", "path", "email", "role", "organization"],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bounded_static::IntoBoundedStatic;
 
     use super::*;
+
+    fn extra(property: &str) -> ExtraProperties {
+        let mut extra = ExtraProperties::default();
+        extra.insert(property.to_owned(), serde_json::Value::Null);
+        extra
+    }
+
+    #[test]
+    fn modeled_extension_properties_are_rejected_at_every_manifest_level() {
+        assert!(DataPackageBuilder::new().extra(extra("resources")).is_err());
+        assert!(
+            Source {
+                extra: extra("path"),
+                ..Source::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            License {
+                extra: extra("name"),
+                ..License::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Contributor {
+                extra: extra("role"),
+                ..Contributor::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     /// The example manifest from the WACZ 1.1.1 specification, with contextual properties added.
     const EXAMPLE: &str = r#"{
@@ -547,6 +640,7 @@ mod tests {
             .main_page_url("https://example.com/")
             .main_page_date(main_page_date)
             .extra(extra.clone())
+            .expect("non-colliding extension properties")
             .into_data_package(Vec::new());
 
         assert_eq!(package.profile, PROFILE);

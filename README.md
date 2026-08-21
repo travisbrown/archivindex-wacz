@@ -29,6 +29,10 @@ echo https://example.com/ \
   | cargo run --bin archivindex-archiver -- archive --output example.warc.gz
 ```
 
+Capture commands exit with status 0 only when the requested capture is complete. Status 2 means
+that a usable but partial archive was published; operational failures that prevent publication use
+status 1.
+
 The `archive-wp-comments` command captures comment batches from a WordPress REST API into a crawl
 session. It fixes a creation-time cutoff and pages by comment ID. One sweep is sufficient when the
 reported total is stable and matches the distinct IDs captured; otherwise a second consistency

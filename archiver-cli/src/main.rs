@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -19,7 +20,17 @@ use archivindex_packager::{IndexFormat, WarcToWacz};
 use cli_helpers::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
-fn main() -> Result<(), Error> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            error.exit_code()
+        }
+    }
+}
+
+fn run() -> Result<(), Error> {
     let opts: Opts = Opts::parse();
     opts.verbose.init_logging()?;
 
@@ -47,8 +58,9 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
     let result = archiver.archive_to_path_with_events(urls, &options.output, &mut events);
     progress.finish_and_clear();
     let summary = result?;
-    if let Some(error) = input_error.borrow_mut().take() {
-        return Err(error.into());
+    let input_error = input_error.borrow_mut().take();
+    if let Some(error) = &input_error {
+        log::warn!("Stopped reading input early: {error}");
     }
 
     for failure in &summary.failures {
@@ -62,7 +74,11 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
         options.output.display()
     );
 
-    Ok(())
+    if summary.is_complete() && input_error.is_none() {
+        Ok(())
+    } else {
+        Err(Error::PartialArchive(options.output))
+    }
 }
 
 /// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
@@ -128,7 +144,11 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
         options.output.display()
     );
 
-    Ok(())
+    if summary.is_complete() {
+        Ok(())
+    } else {
+        Err(Error::PartialArchive(options.output))
+    }
 }
 
 /// Convert an existing WARC file into an indexed WACZ package.
@@ -213,6 +233,8 @@ fn progress_spinner(message: &'static str, unit: &str) -> ProgressBar {
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
+    #[error("a partial archive was published at {}", .0.display())]
+    PartialArchive(PathBuf),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("CLI argument reading error: {0}")]
@@ -227,6 +249,15 @@ enum Error {
     ReadComments(#[from] archivindex_archiver::wordpress::read::Error),
     #[error("JSON writing error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl Error {
+    fn exit_code(&self) -> ExitCode {
+        match self {
+            Self::PartialArchive(_) => ExitCode::from(2),
+            _ => ExitCode::FAILURE,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -373,10 +404,23 @@ impl ConfigOptions {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::process::ExitCode;
 
     use cli_helpers::prelude::Parser;
 
-    use super::{Command, Opts};
+    use super::{Command, Error, Opts};
+
+    #[test]
+    fn partial_archives_have_a_distinct_exit_status() {
+        assert_eq!(
+            Error::PartialArchive("partial.warc".into()).exit_code(),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            Error::Io(std::io::Error::other("failed")).exit_code(),
+            ExitCode::FAILURE
+        );
+    }
 
     #[test]
     fn read_urls_trims_and_skips_blank_lines() {

@@ -54,6 +54,9 @@ pub enum Error {
     /// A page entry could not be serialized.
     #[error("invalid page list entry")]
     Serialization(#[source] serde_json::Error),
+    /// An extension property duplicates a modeled page-list property.
+    #[error(transparent)]
+    ExtraProperty(#[from] crate::ExtraPropertyError),
 }
 
 /// The header line of a page list.
@@ -131,6 +134,22 @@ pub struct Page<'a> {
     /// Additional properties, preserved verbatim for round-tripping.
     #[serde(flatten)]
     pub extra: ExtraProperties,
+}
+
+impl PageListHeader<'_> {
+    fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra("PageListHeader", &self.extra, &["format", "id", "title"])
+    }
+}
+
+impl Page<'_> {
+    fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra(
+            "Page",
+            &self.extra,
+            &["url", "ts", "id", "title", "text", "size"],
+        )
+    }
 }
 
 /// A reader that iteratively parses page entries from a page list stream.
@@ -226,6 +245,11 @@ pub fn write_page_list<'p, W: Write, I: IntoIterator<Item = &'p Page<'p>>>(
     header: &PageListHeader<'_>,
     pages: I,
 ) -> Result<(), Error> {
+    header.validate()?;
+    let pages = pages.into_iter().collect::<Vec<_>>();
+    for page in &pages {
+        page.validate()?;
+    }
     write_line(&mut writer, header)?;
 
     for page in pages {
@@ -255,6 +279,11 @@ pub(crate) fn write_page_list_with_synthetic_ids<
     pages: I,
     id_length: usize,
 ) -> Result<(), Error> {
+    header.validate()?;
+    let pages = pages.into_iter().collect::<Vec<_>>();
+    for page in &pages {
+        page.validate()?;
+    }
     write_line(&mut writer, header)?;
 
     for page in pages {
@@ -288,6 +317,32 @@ fn write_line<W: Write, T: serde::ser::Serialize>(writer: &mut W, value: &T) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_rejects_collisions_before_emitting_any_lines() {
+        let mut header = PageListHeader::default();
+        header
+            .extra
+            .insert("format".to_owned(), serde_json::Value::Null);
+        let mut output = Vec::new();
+        assert!(write_page_list(&mut output, &header, []).is_err());
+        assert!(output.is_empty());
+
+        let header = PageListHeader::default();
+        let mut page = Page {
+            url: "https://example.com/".into(),
+            ts: Utc::now(),
+            id: None,
+            title: None,
+            text: None,
+            size: None,
+            extra: ExtraProperties::default(),
+        };
+        page.extra
+            .insert("size".to_owned(), serde_json::Value::from(1));
+        assert!(write_page_list(&mut output, &header, [&page]).is_err());
+        assert!(output.is_empty());
+    }
 
     const EXAMPLE: &str = concat!(
         "{\"format\": \"json-pages-1.0\", \"id\": \"pages\", \"title\": \"All Pages\"}\n",

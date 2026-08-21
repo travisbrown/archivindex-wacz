@@ -112,6 +112,34 @@ impl<'a> Resource<'a> {
             extra: ExtraProperties::default(),
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        crate::validate_extra(
+            "Resource",
+            &self.extra,
+            &[
+                "name",
+                "path",
+                "hash",
+                "bytes",
+                "profile",
+                "title",
+                "description",
+                "format",
+                "mediatype",
+                "encoding",
+                "sources",
+                "licenses",
+            ],
+        )?;
+        for source in &self.sources {
+            source.validate()?;
+        }
+        for license in &self.licenses {
+            license.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +147,16 @@ mod tests {
     use bounded_static::IntoBoundedStatic;
 
     use super::*;
+
+    #[test]
+    fn modeled_extension_properties_are_rejected() {
+        let mut resource = Resource::new("data", "data", Sha256Digest::compute(""), 0);
+        resource
+            .extra
+            .insert("bytes".to_owned(), serde_json::Value::from(1));
+
+        assert!(resource.validate().is_err());
+    }
 
     /// A resource descriptor using the optional Data Resource metadata properties.
     const EXAMPLE: &str = r#"{

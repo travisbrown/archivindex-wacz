@@ -56,6 +56,33 @@ impl std::fmt::Display for LineContext {
 #[serde(transparent)]
 pub struct ExtraProperties(serde_json::Map<String, serde_json::Value>);
 
+/// An extension property duplicates a property modeled by its containing object.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("extension property `{property}` duplicates a modeled property of {model}")]
+pub struct ExtraPropertyError {
+    /// The wire model containing the extension map.
+    pub model: &'static str,
+    /// The reserved property name.
+    pub property: String,
+}
+
+pub(crate) fn validate_extra(
+    model: &'static str,
+    extra: &ExtraProperties,
+    reserved: &[&str],
+) -> Result<(), ExtraPropertyError> {
+    if let Some(property) = reserved
+        .iter()
+        .find(|property| extra.contains_key(**property))
+    {
+        return Err(ExtraPropertyError {
+            model,
+            property: (*property).to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl bounded_static::ToBoundedStatic for ExtraProperties {
     type Static = Self;
 

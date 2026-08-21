@@ -224,7 +224,7 @@ impl<F: serde::Serialize> fmt::Display for Item<'_, F> {
 pub type ConformingItem<'a> = Item<'a, ConformingFields<'a>>;
 
 impl<'a> TryFrom<&Item<'a>> for ConformingItem<'a> {
-    type Error = MissingFields;
+    type Error = ConformanceError;
 
     fn try_from(item: &Item<'a>) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -334,6 +334,29 @@ pub struct ConformingFields<'a> {
     pub extra: ExtraProperties,
 }
 
+impl ConformingFields<'_> {
+    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
+        validate_cdxj_extra(&self.extra)
+    }
+}
+
+fn validate_cdxj_extra(extra: &ExtraProperties) -> Result<(), crate::ExtraPropertyError> {
+    crate::validate_extra(
+        "CDXJ fields",
+        extra,
+        &[
+            "url",
+            "digest",
+            "mime",
+            "status",
+            "offset",
+            "length",
+            "filename",
+            "recordDigest",
+        ],
+    )
+}
+
 impl<'a> From<ConformingFields<'a>> for ParsedFields<'a> {
     fn from(fields: ConformingFields<'a>) -> Self {
         Self {
@@ -355,8 +378,19 @@ impl<'a> From<ConformingFields<'a>> for ParsedFields<'a> {
 #[error("missing required CDXJ fields: {}", .0.join(", "))]
 pub struct MissingFields(pub Vec<&'static str>);
 
+/// A parsed CDXJ field block cannot be represented as unambiguous conforming output.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ConformanceError {
+    /// One or more normative properties are absent.
+    #[error(transparent)]
+    Missing(#[from] MissingFields),
+    /// An extension property duplicates a modeled CDXJ property.
+    #[error(transparent)]
+    Extra(#[from] crate::ExtraPropertyError),
+}
+
 impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
-    type Error = MissingFields;
+    type Error = ConformanceError;
 
     fn try_from(fields: &ParsedFields<'a>) -> Result<Self, Self::Error> {
         let mut missing = Vec::new();
@@ -379,8 +413,9 @@ impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
             missing.push("filename");
         }
         if !missing.is_empty() {
-            return Err(MissingFields(missing));
+            return Err(MissingFields(missing).into());
         }
+        validate_cdxj_extra(&fields.extra)?;
         Ok(Self {
             url: fields.url.clone(),
             digest: fields.digest.clone().expect("checked"),
@@ -505,6 +540,30 @@ pub fn search_key(url: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn conforming_fields_reject_numeric_property_collisions() {
+        let mut fields = ParsedFields {
+            url: "https://example.com/".into(),
+            digest: Some("sha256:test".into()),
+            mime: Some("text/html".into()),
+            status: Some(200),
+            offset: Some(0),
+            length: Some(1),
+            filename: Some("data.warc".into()),
+            record_digest: None,
+            extra: ExtraProperties::default(),
+        };
+        fields
+            .extra
+            .insert("offset".to_owned(), serde_json::Value::from(1));
+
+        assert!(matches!(
+            ConformingFields::try_from(&fields),
+            Err(ConformanceError::Extra(crate::ExtraPropertyError { property, .. }))
+                if property == "offset"
+        ));
+    }
+
     const EXAMPLE: &str = concat!(
         "com,example)/ 20201007212236 {\"url\": \"https://example.com/\", ",
         "\"digest\": \"sha256:3ac6b4f7bda57f4bd0d9ce4ecb1e0ec6ee4b0ff3a7ae5b25e5ff89d1e46ec0cf\", ",
@@ -596,8 +655,10 @@ mod tests {
         let error = ConformingFields::try_from(&item.fields).expect_err("fields are incomplete");
 
         assert_eq!(
-            error.0,
-            ["digest", "mime", "status", "offset", "length", "filename"]
+            error,
+            ConformanceError::Missing(MissingFields(vec![
+                "digest", "mime", "status", "offset", "length", "filename"
+            ]))
         );
         Ok(())
     }

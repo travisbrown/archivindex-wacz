@@ -64,7 +64,7 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, cdxj::Error> {
 
 fn conforming_items(
     items: &[cdxj::Item<'static>],
-) -> Result<Vec<cdxj::ConformingItem<'static>>, cdxj::MissingFields> {
+) -> Result<Vec<cdxj::ConformingItem<'static>>, cdxj::ConformanceError> {
     items.iter().map(cdxj::ConformingItem::try_from).collect()
 }
 
@@ -1111,6 +1111,17 @@ fn writer_rejects_invalid_warc_names_and_gzip_streams() {
 #[test]
 fn normal_index_writing_requires_normative_fields() -> Result<(), Box<dyn std::error::Error>> {
     let mut item = item_for(URL)?;
+    let mut conforming = cdxj::ConformingItem::try_from(&item)?;
+    conforming
+        .fields
+        .extra
+        .insert("offset".to_owned(), serde_json::Value::from(1));
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.add_index("index.cdx", [&conforming]),
+        Err(writer::Error::ExtraProperty(_))
+    ));
+
     item.fields.digest = None;
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
 

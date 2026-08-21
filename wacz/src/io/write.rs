@@ -124,7 +124,10 @@ pub enum Error {
     MissingRequiredMembers(Vec<&'static str>),
     /// An index entry omits normative CDXJ fields.
     #[error(transparent)]
-    NonconformingIndex(#[from] crate::cdxj::MissingFields),
+    NonconformingIndex(#[from] crate::cdxj::ConformanceError),
+    /// An extension property duplicates a modeled JSON property.
+    #[error(transparent)]
+    ExtraProperty(#[from] crate::ExtraPropertyError),
     /// A previous member write failed after mutating the ZIP stream.
     #[error("WACZ writer is unusable after a member write failure")]
     Poisoned,

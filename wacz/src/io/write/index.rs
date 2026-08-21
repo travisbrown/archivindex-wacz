@@ -24,6 +24,10 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
+        let items = items.into_iter().collect::<Vec<_>>();
+        for item in &items {
+            item.fields.validate()?;
+        }
         self.write_index(name, items)
     }
 
