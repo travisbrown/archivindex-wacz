@@ -168,7 +168,7 @@ impl Session<'_> {
         collection: &Collection,
     ) -> (Vec<Exchange>, Option<Error>, bool) {
         let attempts = self.retry.attempts.max(1);
-        let mut backoff = self.retry.initial_backoff.min(self.retry.max_backoff);
+        let mut delays = RetryDelays::new(&self.retry);
 
         for attempt in 0..attempts {
             if attempt > 0
@@ -186,13 +186,13 @@ impl Session<'_> {
                     if self.event(CaptureEvent::Retrying {
                         url,
                         attempt: attempt + 2,
-                        delay: backoff,
+                        delay: delays.backoff(),
                     }) == CaptureControl::Cancel
                     {
                         return (Vec::new(), None, true);
                     }
-                    thread::sleep(backoff);
-                    backoff = doubled_backoff(backoff, self.retry.max_backoff);
+                    thread::sleep(delays.backoff());
+                    delays.advance();
                 }
                 Some(error) => return (exchanges, Some(error), false),
                 None => {
@@ -208,11 +208,10 @@ impl Session<'_> {
                                 false,
                             );
                         }
-                        let delay = exchanges
-                            .last()
-                            .and_then(retry_after)
-                            .unwrap_or(backoff)
-                            .min(self.retry.max_backoff);
+                        let delay = exchanges.last().map_or_else(
+                            || delays.backoff(),
+                            |exchange| delays.for_exchange(exchange),
+                        );
                         if self.event(CaptureEvent::Retrying {
                             url,
                             attempt: attempt + 2,
@@ -222,7 +221,7 @@ impl Session<'_> {
                             return (Vec::new(), None, true);
                         }
                         thread::sleep(delay);
-                        backoff = doubled_backoff(backoff, self.retry.max_backoff);
+                        delays.advance();
                     } else {
                         return (exchanges, None, false);
                     }
@@ -234,16 +233,45 @@ impl Session<'_> {
     }
 }
 
-fn doubled_backoff(backoff: Duration, maximum: Duration) -> Duration {
-    backoff.checked_mul(2).unwrap_or(maximum).min(maximum)
+struct RetryDelays {
+    backoff: Duration,
+    maximum: Duration,
+}
+
+impl RetryDelays {
+    fn new(config: &crate::session::RetryConfig) -> Self {
+        Self {
+            backoff: config.initial_backoff.min(config.max_backoff),
+            maximum: config.max_backoff,
+        }
+    }
+
+    const fn backoff(&self) -> Duration {
+        self.backoff
+    }
+
+    fn advance(&mut self) {
+        self.backoff = self
+            .backoff
+            .checked_mul(2)
+            .unwrap_or(self.maximum)
+            .min(self.maximum);
+    }
+
+    fn for_exchange(&self, exchange: &Exchange) -> Duration {
+        exchange
+            .validator("retry-after")
+            .and_then(|value| parse_retry_after(&value, chrono::Utc::now()))
+            .unwrap_or(self.backoff)
+            .min(self.maximum)
+    }
 }
 
 const fn is_retryable_status(status: u16) -> bool {
     status == 429 || matches!(status, 500 | 502 | 503 | 504)
 }
 
-fn retry_after(exchange: &Exchange) -> Option<Duration> {
-    let value = exchange.validator("retry-after")?;
+fn parse_retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
     if let Ok(seconds) = value.trim().parse() {
         return Some(Duration::from_secs(seconds));
     }
@@ -251,7 +279,7 @@ fn retry_after(exchange: &Exchange) -> Option<Duration> {
     let retry_at = chrono::DateTime::parse_from_rfc2822(value.trim())
         .ok()?
         .to_utc();
-    (retry_at - chrono::Utc::now()).to_std().ok()
+    (retry_at - now).to_std().ok()
 }
 
 const fn is_transient(error: &Error) -> bool {
@@ -264,4 +292,49 @@ const fn is_transient(error: &Error) -> bool {
                 )
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone as _;
+
+    use super::*;
+    use crate::session::RetryConfig;
+
+    #[test]
+    fn retry_delays_clamp_initial_values_and_overflowing_growth() {
+        let delays = RetryDelays::new(&RetryConfig {
+            attempts: 3,
+            initial_backoff: Duration::MAX,
+            max_backoff: Duration::from_secs(5),
+        });
+        assert_eq!(delays.backoff(), Duration::from_secs(5));
+
+        let mut delays = RetryDelays::new(&RetryConfig {
+            attempts: 3,
+            initial_backoff: Duration::MAX,
+            max_backoff: Duration::MAX,
+        });
+        delays.advance();
+        assert_eq!(delays.backoff(), Duration::MAX);
+    }
+
+    #[test]
+    fn retry_after_accepts_seconds_and_future_http_dates_only() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 8, 21, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            parse_retry_after(" 42 ", now),
+            Some(Duration::from_secs(42))
+        );
+        assert_eq!(
+            parse_retry_after("Fri, 21 Aug 2026 12:01:00 +0000", now),
+            Some(Duration::from_mins(1))
+        );
+        assert_eq!(
+            parse_retry_after("Fri, 21 Aug 2026 11:59:00 +0000", now),
+            None
+        );
+        assert_eq!(parse_retry_after("not a delay", now), None);
+    }
 }
