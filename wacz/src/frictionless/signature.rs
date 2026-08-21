@@ -28,50 +28,50 @@ pub enum SignatureData<'a> {
     Anonymous(#[serde(borrow)] AnonymousSignature<'a>),
 }
 
-/// Generate accessors on [`SignatureData`] for the fields shared by both signature formats.
-///
-/// The two formats cannot share the fields structurally: the specification requires rejecting
-/// unlisted properties, and serde's `deny_unknown_fields` is incompatible with the `flatten`
-/// attribute that embedding a common struct would need.
-///
-/// The `const` group holds fields returned by direct reference; the `deref` group holds `Cow`
-/// fields returned as `str` through deref coercion, which `const fn` does not permit.
-macro_rules! shared_accessors {
-    // The internal rule (the `@accessor` marker is a macro convention, not Rust syntax) emits one
-    // accessor with the given qualifier tokens (`const` or nothing).
-    (@accessor ($($qualifier:tt)*) $(#[$doc:meta])* $name:ident: $ty:ty) => {
-        $(#[$doc])*
-        #[must_use]
-        pub $($qualifier)* fn $name(&self) -> &$ty {
-            match self {
-                Self::DomainIdentity(signature) => &signature.$name,
-                Self::Anonymous(signature) => &signature.$name,
-            }
+impl SignatureData<'_> {
+    /// The SHA-256 digest of `datapackage.json` that was signed.
+    #[must_use]
+    pub const fn hash(&self) -> &Sha256Digest {
+        match self {
+            Self::DomainIdentity(signature) => &signature.hash,
+            Self::Anonymous(signature) => &signature.hash,
         }
-    };
-    (const { $($(#[$const_doc:meta])* $const_name:ident: $const_ty:ty),+ $(,)? }
-     deref { $($(#[$deref_doc:meta])* $deref_name:ident: $deref_ty:ty),+ $(,)? }) => {
-        impl SignatureData<'_> {
-            $(shared_accessors!(@accessor (const) $(#[$const_doc])* $const_name: $const_ty);)+
-            $(shared_accessors!(@accessor () $(#[$deref_doc])* $deref_name: $deref_ty);)+
-        }
-    };
-}
-
-shared_accessors! {
-    const {
-        /// The SHA-256 digest of `datapackage.json` that was signed.
-        hash: Sha256Digest,
-        /// When the signature was created.
-        created: DateTime<Utc>,
     }
-    deref {
-        /// The software that created the signature.
-        software: str,
-        /// The version of the software that created the signature.
-        version: str,
-        /// The base64-encoded signature of [`hash`](SignatureData::hash).
-        signature: str,
+
+    /// When the signature was created.
+    #[must_use]
+    pub const fn created(&self) -> &DateTime<Utc> {
+        match self {
+            Self::DomainIdentity(signature) => &signature.created,
+            Self::Anonymous(signature) => &signature.created,
+        }
+    }
+
+    /// The software that created the signature.
+    #[must_use]
+    pub fn software(&self) -> &str {
+        match self {
+            Self::DomainIdentity(signature) => &signature.software,
+            Self::Anonymous(signature) => &signature.software,
+        }
+    }
+
+    /// The version of the software that created the signature.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        match self {
+            Self::DomainIdentity(signature) => &signature.version,
+            Self::Anonymous(signature) => &signature.version,
+        }
+    }
+
+    /// The base64-encoded signature of [`hash`](SignatureData::hash).
+    #[must_use]
+    pub fn signature(&self) -> &str {
+        match self {
+            Self::DomainIdentity(signature) => &signature.signature,
+            Self::Anonymous(signature) => &signature.signature,
+        }
     }
 }
 

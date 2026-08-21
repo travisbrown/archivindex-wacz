@@ -8,9 +8,7 @@ use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::read::{self as reader, WaczReader, validate};
-use archivindex_wacz::io::write::{
-    self as writer, IndexFormat, PackageMetadata, WaczWriter, WriterConfig,
-};
+use archivindex_wacz::io::write::{self as writer, IndexFormat, WaczWriter, WriterConfig};
 use archivindex_wacz::pages;
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_warc::io::write::WarcWriter;
@@ -46,7 +44,7 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, cdxj::Error> {
     Ok(cdxj::Item {
         key: Cow::Owned(cdxj::search_key(url)?),
         timestamp: capture_time().into(),
-        fields: cdxj::Fields {
+        fields: cdxj::ParsedFields {
             url: Cow::Owned(url.to_owned()),
             digest: Some(Cow::Borrowed(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -145,7 +143,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
     let item = cdxj::Item {
         key: Cow::Owned(cdxj::search_key(URL)?),
         timestamp: capture_time.into(),
-        fields: cdxj::Fields {
+        fields: cdxj::ParsedFields {
             url: Cow::Borrowed(URL),
             digest: Some(Cow::Borrowed(
                 "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -265,7 +263,7 @@ fn records_stream_directly_into_a_warc_member() -> Result<(), Box<dyn std::error
     let written = sink.write(&raw)?;
     sink.finish()?;
     let bytes = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
 
@@ -323,7 +321,7 @@ fn arbitrary_resource_read_is_verified() -> Result<(), Box<dyn std::error::Error
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_resource("extras/metadata.txt", b"custom metadata".as_slice())?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
 
@@ -426,7 +424,7 @@ fn synthetic_page_ids() -> Result<(), Box<dyn std::error::Error>> {
         let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         writer.add_pages(&PageListHeader::default(), [&with_id, &without_id])?;
         let wacz = writer
-            .finish_unchecked(PackageMetadata::default())?
+            .finish_unchecked(DataPackageBuilder::default())?
             .into_inner();
 
         let mut reader = WaczReader::new(Cursor::new(wacz))?;
@@ -456,7 +454,7 @@ fn zip_compression_level_controls_deflated_members() -> Result<(), Box<dyn std::
         let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         writer.add_resource("extras/content.txt", contents.as_slice())?;
         let wacz = writer
-            .finish_unchecked(PackageMetadata::default())?
+            .finish_unchecked(DataPackageBuilder::default())?
             .into_inner();
         let mut reader = WaczReader::new(Cursor::new(wacz))?;
         let mut compressed = Vec::new();
@@ -476,7 +474,7 @@ fn zip_compression_level_controls_deflated_members() -> Result<(), Box<dyn std::
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     writer.add_resource("extras/content.txt", contents.as_slice())?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
     assert_eq!(reader.resource_bytes("extras/content.txt")?, contents);
@@ -523,7 +521,7 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
     lines.sort_unstable();
     writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat()))?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     // The gzip data file uses STORE; the plain-text summary uses DEFLATE.
@@ -633,7 +631,7 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
     let conforming = conforming_items(&items)?;
     writer.add_index("index.cdx", &conforming)?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
 
@@ -715,7 +713,7 @@ fn failed_member_write_poisons_writer_and_leaves_no_final_path()
         Err(writer::Error::Poisoned)
     ));
     assert!(matches!(
-        writer.finish_unchecked(PackageMetadata::default()),
+        writer.finish_unchecked(DataPackageBuilder::default()),
         Err(writer::Error::Poisoned)
     ));
     assert!(!path.exists());
@@ -734,7 +732,7 @@ fn write_and_open_from_paths() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!wacz_path.exists());
     writer.add_warc_from_path(&warc_path)?;
     writer.add_pages(&PageListHeader::default(), [])?;
-    writer.finish_unchecked(PackageMetadata::default())?;
+    writer.finish_unchecked(DataPackageBuilder::default())?;
 
     let mut reader = WaczReader::open(&wacz_path)?;
 
@@ -798,7 +796,7 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
     let conforming = conforming_items(&items)?;
     writer.add_index("index.cdx", &conforming)?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
@@ -830,7 +828,7 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_index("index.cdx", no_items.clone())?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
@@ -849,7 +847,7 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     writer.add_index("index.cdx", no_items)?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut archive = zip::ZipArchive::new(Cursor::new(&wacz))?;
@@ -887,7 +885,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut archive = zip::ZipArchive::new(Cursor::new(&wacz))?;
@@ -938,7 +936,7 @@ fn named_page_lists_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_page_list("extraPages.jsonl", &header, [&page])?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
@@ -974,7 +972,7 @@ fn synthetic_ids_preserve_extra_properties() -> Result<(), Box<dyn std::error::E
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_pages(&PageListHeader::default(), [&page])?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
@@ -995,7 +993,7 @@ fn custom_resources_are_recorded_and_verified() -> Result<(), Box<dyn std::error
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_resource("extra/notes.txt", &b"notes"[..])?;
     let wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
@@ -1114,7 +1112,7 @@ fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::
 fn writer_rejects_nonconforming_layout_and_reserved_custom_resources() {
     let writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.finish(PackageMetadata::default()),
+        writer.finish(DataPackageBuilder::default()),
         Err(writer::Error::MissingRequiredMembers(_))
     ));
 
@@ -1612,7 +1610,7 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
     writer.add_index("index.cdx", &conforming)?;
     writer.add_warc("data.warc", warc.as_slice())?;
     let mut wacz = writer
-        .finish_unchecked(PackageMetadata::default())?
+        .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
 
     // Locate the first block's stored bytes and flip its gzip header OS byte, which changes the

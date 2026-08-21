@@ -186,12 +186,12 @@ impl Session<'_> {
                     if self.event(CaptureEvent::Retrying {
                         url,
                         attempt: attempt + 2,
-                        delay: delays.backoff(),
+                        delay: delays.backoff,
                     }) == CaptureControl::Cancel
                     {
                         return (Vec::new(), None, true);
                     }
-                    thread::sleep(delays.backoff());
+                    thread::sleep(delays.backoff);
                     delays.advance();
                 }
                 Some(error) => return (exchanges, Some(error), false),
@@ -209,7 +209,7 @@ impl Session<'_> {
                             );
                         }
                         let delay = exchanges.last().map_or_else(
-                            || delays.backoff(),
+                            || delays.backoff,
                             |exchange| delays.for_exchange(exchange),
                         );
                         if self.event(CaptureEvent::Retrying {
@@ -244,10 +244,6 @@ impl RetryDelays {
             backoff: config.initial_backoff.min(config.max_backoff),
             maximum: config.max_backoff,
         }
-    }
-
-    const fn backoff(&self) -> Duration {
-        self.backoff
     }
 
     fn advance(&mut self) {
@@ -308,7 +304,7 @@ mod tests {
             initial_backoff: Duration::MAX,
             max_backoff: Duration::from_secs(5),
         });
-        assert_eq!(delays.backoff(), Duration::from_secs(5));
+        assert_eq!(delays.backoff, Duration::from_secs(5));
 
         let mut delays = RetryDelays::new(&RetryConfig {
             attempts: 3,
@@ -316,7 +312,7 @@ mod tests {
             max_backoff: Duration::MAX,
         });
         delays.advance();
-        assert_eq!(delays.backoff(), Duration::MAX);
+        assert_eq!(delays.backoff, Duration::MAX);
     }
 
     #[test]

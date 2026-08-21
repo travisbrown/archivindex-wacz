@@ -212,8 +212,9 @@ impl<'a> Item<'a, ParsedFields<'a>> {
 
 impl<F: serde::Serialize> fmt::Display for Item<'_, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Serialization of the field block only fails on conditions that `Fields` values cannot
-        // represent (such as non-string map keys), so the error is safely mapped to `fmt::Error`.
+        // Serialization of the field block only fails on conditions that `ParsedFields` values
+        // cannot represent (such as non-string map keys), so the error is safely mapped to
+        // `fmt::Error`.
         let fields = serde_json::to_string(&self.fields).map_err(|_| fmt::Error)?;
 
         write!(f, "{} {} {}", self.key, self.timestamp, fields)
@@ -334,13 +335,9 @@ pub struct ConformingFields<'a> {
     pub extra: ExtraProperties,
 }
 
-impl ConformingFields<'_> {
-    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        validate_cdxj_extra(&self.extra)
-    }
-}
-
-fn validate_cdxj_extra(extra: &ExtraProperties) -> Result<(), crate::ExtraPropertyError> {
+pub(crate) fn validate_cdxj_extra(
+    extra: &ExtraProperties,
+) -> Result<(), crate::ExtraPropertyError> {
     crate::validate_extra(
         "CDXJ fields",
         extra,
@@ -429,9 +426,6 @@ impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
         })
     }
 }
-
-/// Short name for leniently parsed fields.
-pub type Fields<'a> = ParsedFields<'a>;
 
 /// A reader that iteratively parses CDXJ items from a stream.
 ///

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use std::ops::{Bound, RangeBounds};
+use std::ops::RangeBounds;
 use std::path::Path;
 
 use archivindex_warc::io::read::WarcReader;
@@ -15,7 +15,7 @@ use serde::Deserialize;
 use zip::CompressionMethod;
 
 use super::{Error, WaczReader};
-use crate::cdxj::{self, Fields, Item, Timestamp};
+use crate::cdxj::{self, Item, ParsedFields, Timestamp};
 use crate::digest::Sha256Digest;
 use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION};
 
@@ -190,7 +190,7 @@ impl<R: Read + Seek> WaczReader<R> {
     ///
     /// For `.warc.gz` members, the returned bytes are the complete compressed gzip member. For
     /// uncompressed WARC members, they are the complete serialized WARC record.
-    pub fn capture_bytes(&mut self, fields: &Fields<'_>) -> Result<Vec<u8>, Error> {
+    pub fn capture_bytes(&mut self, fields: &ParsedFields<'_>) -> Result<Vec<u8>, Error> {
         let filename = fields
             .filename
             .as_deref()
@@ -208,7 +208,7 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 
     /// Resolve CDXJ fields to exactly one byte-preserving raw WARC record.
-    pub fn read_capture_raw(&mut self, fields: &Fields<'_>) -> Result<raw::Record, Error> {
+    pub fn read_capture_raw(&mut self, fields: &ParsedFields<'_>) -> Result<raw::Record, Error> {
         let bytes = self.decoded_capture_bytes(fields)?;
         let mut records = WarcReader::new(Cursor::new(bytes)).iter_raw_records();
         let record = records.next().transpose()?;
@@ -224,7 +224,10 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 
     /// Resolve CDXJ fields to exactly one semantically validated WARC record.
-    pub fn read_capture(&mut self, fields: &Fields<'_>) -> Result<Record<NoExtension>, Error> {
+    pub fn read_capture(
+        &mut self,
+        fields: &ParsedFields<'_>,
+    ) -> Result<Record<NoExtension>, Error> {
         let bytes = self.decoded_capture_bytes(fields)?;
         let mut records = WarcReader::new(Cursor::new(bytes)).iter_records::<NoExtension>();
         let record = records.next().transpose()?;
@@ -263,7 +266,7 @@ impl<R: Read + Seek> WaczReader<R> {
             }
 
             let item = Item::parse(line)?.into_static();
-            if in_range(item.timestamp, time_range) {
+            if time_range.contains(&item.timestamp) {
                 captures.push(Capture {
                     index_path: path.to_owned(),
                     item,
@@ -297,7 +300,7 @@ impl<R: Read + Seek> WaczReader<R> {
             for line in text.lines().filter(|line| !line.is_empty()) {
                 if line_key(line) == Some(key.as_str()) {
                     let item = Item::parse(line)?.into_static();
-                    if in_range(item.timestamp, time_range) {
+                    if time_range.contains(&item.timestamp) {
                         captures.push(Capture {
                             index_path: summary.path.clone(),
                             item,
@@ -310,7 +313,7 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(captures)
     }
 
-    fn decoded_capture_bytes(&mut self, fields: &Fields<'_>) -> Result<Vec<u8>, Error> {
+    fn decoded_capture_bytes(&mut self, fields: &ParsedFields<'_>) -> Result<Vec<u8>, Error> {
         let filename = fields
             .filename
             .as_deref()
@@ -415,21 +418,6 @@ pub(super) fn has_extension(path: &str, expected: &str) -> bool {
     Path::new(path)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
-}
-
-fn in_range<B: RangeBounds<Timestamp>>(timestamp: Timestamp, range: &B) -> bool {
-    let after_start = match range.start_bound() {
-        Bound::Included(start) => timestamp >= *start,
-        Bound::Excluded(start) => timestamp > *start,
-        Bound::Unbounded => true,
-    };
-    let before_end = match range.end_bound() {
-        Bound::Included(end) => timestamp <= *end,
-        Bound::Excluded(end) => timestamp < *end,
-        Bound::Unbounded => true,
-    };
-
-    after_start && before_end
 }
 
 fn archive_path(filename: &str) -> String {

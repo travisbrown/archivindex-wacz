@@ -365,7 +365,7 @@ impl CaptureInfo {
         cdxj::Item {
             key: Cow::Owned(self.key.clone()),
             timestamp: cdxj::Timestamp::with_milliseconds(self.date.date_time()),
-            fields: cdxj::Fields {
+            fields: cdxj::ParsedFields {
                 url: Cow::Owned(self.url.clone()),
                 digest: self
                     .digest

@@ -300,7 +300,6 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(fixity)
     }
 
-    /// Open a ZIP entry by path, mapping the ZIP crate's not-found error to a dedicated variant.
     /// Open a member's content without interpreting a `.gz` suffix.
     ///
     /// ZIP compression is decoded by the ZIP layer; gzip content remains compressed. This is the
@@ -351,13 +350,6 @@ impl<R: Read + Seek> WaczReader<R> {
         };
 
         Ok(BufReader::new(stream))
-    }
-
-    /// Open a member as a stream, decoding both ZIP compression and gzip content.
-    ///
-    /// This is an explicit-name alias for [`member_stream`](Self::member_stream).
-    pub fn decoded_member(&mut self, path: &str) -> Result<MemberReader<'_>, Error> {
-        self.member_stream(path)
     }
 
     /// Read the full contents of a file by path.

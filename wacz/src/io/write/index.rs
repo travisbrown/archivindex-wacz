@@ -25,7 +25,9 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
-        self.write_index(name, items, |item| Ok(item.fields.validate()?))
+        self.write_index(name, items, |item| {
+            Ok(crate::cdxj::validate_cdxj_extra(&item.fields.extra)?)
+        })
     }
 
     /// Write an index while explicitly allowing entries that omit normative CDXJ fields.

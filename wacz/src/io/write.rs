@@ -16,11 +16,6 @@ mod resource;
 pub mod warc;
 
 use resource::options_for;
-/// Short name for manifest metadata supplied to [`WaczWriter::finish`].
-///
-/// New code should use [`crate::frictionless::DataPackageBuilder`] directly.
-pub type PackageMetadata = crate::frictionless::DataPackageBuilder;
-
 const DEFAULT_PAGE_ID_LENGTH: usize = 24;
 const DEFAULT_ZIPNUM_LINES: usize = 1024;
 /// Least ZIP DEFLATE compression level supported by the enabled encoders.
