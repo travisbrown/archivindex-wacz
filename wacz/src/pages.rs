@@ -22,8 +22,20 @@ pub const FORMAT: &str = "json-pages-1.0";
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The underlying stream could not be read or written.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[error(
+        "{}",
+        .context.as_ref().map_or_else(
+            || .source.to_string(),
+            |context| format!("failed to read {context}"),
+        )
+    )]
+    Io {
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+        /// Location of the failed read, when available.
+        context: Option<LineContext>,
+    },
     /// The page list ended before a header line was read.
     #[error("missing page list header")]
     MissingHeader,
@@ -48,15 +60,30 @@ pub enum Error {
         /// Bounded source context.
         context: LineContext,
     },
-    /// The page-list stream failed while reading a line.
-    #[error(transparent)]
-    LineIo(#[from] crate::lines::Error),
     /// A page entry could not be serialized.
     #[error("invalid page list entry")]
     Serialization(#[source] serde_json::Error),
     /// An extension property duplicates a modeled page-list property.
     #[error(transparent)]
     ExtraProperty(#[from] crate::ExtraPropertyError),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(source: std::io::Error) -> Self {
+        Self::Io {
+            source,
+            context: None,
+        }
+    }
+}
+
+impl From<crate::lines::Error> for Error {
+    fn from(error: crate::lines::Error) -> Self {
+        Self::Io {
+            source: error.source,
+            context: Some(error.context),
+        }
+    }
 }
 
 /// The header line of a page list.
@@ -214,7 +241,7 @@ impl<R: BufRead> Iterator for PageListReader<R> {
                     }),
             ),
             Ok(None) => None,
-            Err(error) => Some(Err(Error::LineIo(error))),
+            Err(error) => Some(Err(error.into())),
         }
     }
 }
@@ -241,22 +268,11 @@ pub fn synthetic_id(ts: &DateTime<Utc>, url: &str, length: usize) -> String {
 ///
 /// Fails if the underlying stream cannot be written or if an entry cannot be serialized.
 pub fn write_page_list<'p, W: Write, I: IntoIterator<Item = &'p Page<'p>>>(
-    mut writer: W,
+    writer: W,
     header: &PageListHeader<'_>,
     pages: I,
 ) -> Result<(), Error> {
-    header.validate()?;
-    let pages = pages.into_iter().collect::<Vec<_>>();
-    for page in &pages {
-        page.validate()?;
-    }
-    write_line(&mut writer, header)?;
-
-    for page in pages {
-        write_line(&mut writer, page)?;
-    }
-
-    Ok(())
+    write_page_list_with_policy(writer, header, pages, IdPolicy::Preserve)
 }
 
 /// A page entry serialized with a synthetic identifier when it has none of its own.
@@ -274,10 +290,25 @@ pub(crate) fn write_page_list_with_synthetic_ids<
     W: Write,
     I: IntoIterator<Item = &'p Page<'p>>,
 >(
-    mut writer: W,
+    writer: W,
     header: &PageListHeader<'_>,
     pages: I,
     id_length: usize,
+) -> Result<(), Error> {
+    write_page_list_with_policy(writer, header, pages, IdPolicy::Synthetic(id_length))
+}
+
+#[derive(Clone, Copy)]
+enum IdPolicy {
+    Preserve,
+    Synthetic(usize),
+}
+
+fn write_page_list_with_policy<'p, W: Write, I: IntoIterator<Item = &'p Page<'p>>>(
+    mut writer: W,
+    header: &PageListHeader<'_>,
+    pages: I,
+    id_policy: IdPolicy,
 ) -> Result<(), Error> {
     header.validate()?;
     let pages = pages.into_iter().collect::<Vec<_>>();
@@ -287,12 +318,12 @@ pub(crate) fn write_page_list_with_synthetic_ids<
     write_line(&mut writer, header)?;
 
     for page in pages {
-        if page.id.is_some() {
-            write_line(&mut writer, page)?;
-        } else {
-            let id = synthetic_id(&page.ts, &page.url, id_length);
-
-            write_line(&mut writer, &IdentifiedPage { id: &id, page })?;
+        match id_policy {
+            IdPolicy::Synthetic(id_length) if page.id.is_none() => {
+                let id = synthetic_id(&page.ts, &page.url, id_length);
+                write_line(&mut writer, &IdentifiedPage { id: &id, page })?;
+            }
+            IdPolicy::Preserve | IdPolicy::Synthetic(_) => write_line(&mut writer, page)?,
         }
     }
 
@@ -303,7 +334,7 @@ pub(crate) fn write_page_list_with_synthetic_ids<
 fn write_line<W: Write, T: serde::ser::Serialize>(writer: &mut W, value: &T) -> Result<(), Error> {
     serde_json::to_writer(&mut *writer, value).map_err(|error| {
         if error.is_io() {
-            Error::Io(error.into())
+            Error::from(std::io::Error::from(error))
         } else {
             Error::Serialization(error)
         }
@@ -317,6 +348,27 @@ fn write_line<W: Write, T: serde::ser::Serialize>(writer: &mut W, value: &T) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_io_errors_retain_context() {
+        let error = Error::from(crate::lines::Error {
+            context: LineContext {
+                source: "pages/pages.jsonl".to_owned(),
+                line: 3,
+                excerpt: None,
+            },
+            source: std::io::Error::other("failed"),
+        });
+
+        assert_eq!(error.to_string(), "failed to read pages/pages.jsonl:3");
+        assert!(matches!(
+            error,
+            Error::Io {
+                context: Some(context),
+                ..
+            } if context.line == 3
+        ));
+    }
 
     #[test]
     fn writing_rejects_collisions_before_emitting_any_lines() {
