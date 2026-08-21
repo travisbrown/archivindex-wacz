@@ -1,5 +1,6 @@
 //! Plain and `ZipNum` CDXJ index writing.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::io::{BufRead, BufReader, Seek, Write};
@@ -11,9 +12,8 @@ use super::resource::options_for;
 use super::{Error, IndexFormat, WaczWriter};
 use crate::cdxj;
 use crate::digest::Sha256Digest;
+use crate::zipnum::{self, FORMAT, SummaryEntry, SummaryHeader};
 use crate::{GZIP_EXTENSION, INDEXES_PREFIX};
-
-const ZIPNUM_FORMAT: &str = "cdxj-gzip-1.0";
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write a sorted CDXJ index in the configured plain or `ZipNum` format.
@@ -88,12 +88,13 @@ impl<W: Write + Seek> WaczWriter<W> {
         let idx_name = format!("{}.idx", name.strip_suffix(".cdx").unwrap_or(name));
         let data_path = format!("{INDEXES_PREFIX}{data_name}");
         let idx_path = format!("{INDEXES_PREFIX}{idx_name}");
-        let escaped = serde_json::to_string(&data_name).expect("string serialization cannot fail");
         let mut summary = tempfile::tempfile()?;
-        writeln!(
-            summary,
-            "!meta 0 {{\"format\": \"{ZIPNUM_FORMAT}\", \"filename\": {escaped}}}"
-        )?;
+        let header = SummaryHeader {
+            format: Cow::Borrowed(FORMAT),
+            filename: Cow::Borrowed(&data_name),
+        };
+        let header = zipnum::to_json(&header).expect("summary header serialization cannot fail");
+        writeln!(summary, "!meta 0 {header}")?;
         let data_options = options_for(&data_path, self.config.zip_compression_level)?;
         self.add_member(&data_path, data_options, |writer| {
             let mut offset = 0_u64;
@@ -105,7 +106,8 @@ impl<W: Write + Seek> WaczWriter<W> {
                     block.push(line);
                 }
                 if block.len() == lines_per_block.max(1) || (!block.is_empty() && eof) {
-                    let prefix = line_prefix(&block[0]).to_owned();
+                    let (prefix, _) = cdxj::split_prefix(&block[0])
+                        .expect("validated CDXJ lines have a key and timestamp");
                     let mut compressed = tempfile::tempfile()?;
                     {
                         let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
@@ -120,13 +122,21 @@ impl<W: Write + Seek> WaczWriter<W> {
                     compressed.rewind()?;
                     std::io::copy(&mut compressed, writer)?;
                     debug_assert_eq!(length, copied);
-                    writeln!(summary, "{prefix} {{\"offset\": {offset}, \"length\": {length}, \"digest\": \"{digest}\"}}")?;
+                    let entry = SummaryEntry {
+                        offset,
+                        length,
+                        digest,
+                    };
+                    let entry =
+                        zipnum::to_json(&entry).expect("summary entry serialization cannot fail");
+                    writeln!(summary, "{prefix} {entry}")?;
                     offset += length;
                     block.clear();
                 }
                 if eof {
                     if offset == 0 {
-                        let compressed = GzEncoder::new(Vec::new(), Compression::default()).finish()?;
+                        let compressed =
+                            GzEncoder::new(Vec::new(), Compression::default()).finish()?;
                         writer.write_all(&compressed)?;
                     }
                     break;
@@ -219,12 +229,6 @@ fn merge_runs(runs: Vec<std::fs::File>) -> Result<std::fs::File, std::io::Error>
     }
     output.rewind()?;
     Ok(output)
-}
-
-fn line_prefix(line: &str) -> &str {
-    line.match_indices(' ')
-        .nth(1)
-        .map_or_else(|| line.trim_end(), |(index, _)| &line[..index])
 }
 
 #[cfg(test)]

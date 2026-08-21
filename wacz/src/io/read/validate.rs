@@ -17,7 +17,6 @@ use crate::digest::Sha256Digest;
 use crate::frictionless::{DataPackage, DataPackageDigest, PROFILE, WACZ_VERSION};
 use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, PAGES_PATH, PAGES_PREFIX};
 
-use super::random::has_extension;
 use super::{Error, Fixity, WaczReader};
 
 /// The layers of [`WaczReader::validate`] that read complete members.
@@ -409,7 +408,7 @@ impl<R: Read + Seek> WaczReader<R> {
         let mut paths = HashSet::with_capacity(package.resources.len());
 
         for resource in &package.resources {
-            if !is_valid_resource_name(&resource.name) {
+            if !crate::paths::valid_resource_name(&resource.name) {
                 problems.push(ManifestProblem::InvalidResourceName(
                     resource.name.to_string(),
                 ));
@@ -547,7 +546,7 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// The first failure parsing a member as a `ZipNum` summary or a sorted CDXJ index, if any.
     fn index_content_problem(&mut self, path: &str) -> Option<ContentProblem> {
-        if has_extension(path, "idx") {
+        if crate::paths::is_zipnum_summary(path) {
             return self
                 .zipnum_summary(path)
                 .err()
@@ -615,18 +614,16 @@ impl<R: Read + Seek> WaczReader<R> {
     /// layer implies, reports them.
     fn capture_problems(&mut self) -> Vec<IndexProblem> {
         let mut problems = Vec::new();
-        let paths = self.index_paths().map(str::to_owned).collect::<Vec<_>>();
-        let mut referenced_data = Vec::new();
+        let partition = self.partition_indexes();
 
-        for path in paths.iter().filter(|path| has_extension(path, "idx")) {
-            let Ok(summary) = self.zipnum_summary(path) else {
+        for (path, summary) in partition.summaries {
+            let Ok(summary) = summary else {
                 continue;
             };
-            referenced_data.push(summary.data_path.clone());
 
             for block in &summary.blocks {
                 match self.zipnum_block(block) {
-                    Ok(bytes) => self.resolve_captures(path, &bytes, &mut problems),
+                    Ok(bytes) => self.resolve_captures(&path, &bytes, &mut problems),
                     Err(error) => problems.push(IndexProblem::Block {
                         summary_path: path.clone(),
                         offset: block.offset,
@@ -636,11 +633,9 @@ impl<R: Read + Seek> WaczReader<R> {
             }
         }
 
-        for path in paths.iter().filter(|path| {
-            !has_extension(path, "idx") && !referenced_data.iter().any(|data| data == *path)
-        }) {
-            if let Ok(bytes) = self.decoded_member_bytes(path) {
-                self.resolve_captures(path, &bytes, &mut problems);
+        for path in partition.plain {
+            if let Ok(bytes) = self.decoded_member_bytes(&path) {
+                self.resolve_captures(&path, &bytes, &mut problems);
             }
         }
 
@@ -676,27 +671,9 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 }
 
-/// Whether a resource name satisfies the Data Package restriction to lowercase `a-z0-9._-`.
-fn is_valid_resource_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resource_name_validity() {
-        assert!(is_valid_resource_name("pages.jsonl"));
-        assert!(is_valid_resource_name("data-1_2.warc.gz"));
-        assert!(!is_valid_resource_name(""));
-        assert!(!is_valid_resource_name("Pages.JSONL"));
-        assert!(!is_valid_resource_name("archive/data.warc"));
-        assert!(!is_valid_resource_name("caf\u{e9}.warc"));
-    }
 
     #[test]
     fn default_options_select_no_expensive_layers() {

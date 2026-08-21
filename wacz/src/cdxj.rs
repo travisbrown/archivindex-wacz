@@ -541,6 +541,12 @@ pub fn search_key(url: &str) -> Result<String, Error> {
     Ok(key)
 }
 
+/// Split a CDXJ-style line into its key-and-timestamp prefix and JSON field block.
+pub(crate) fn split_prefix(line: &str) -> Option<(&str, &str)> {
+    let (json, _) = line.match_indices(' ').nth(1)?;
+    Some((&line[..json], &line[json + 1..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

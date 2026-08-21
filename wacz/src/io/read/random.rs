@@ -1,9 +1,7 @@
 //! Random-access index and capture reading.
 
-use std::borrow::Cow;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::RangeBounds;
-use std::path::Path;
 
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::parse::raw;
@@ -11,12 +9,12 @@ use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use bounded_static::IntoBoundedStatic as _;
 use flate2::read::GzDecoder;
-use serde::Deserialize;
 use zip::CompressionMethod;
 
 use super::{Error, WaczReader};
 use crate::cdxj::{self, Item, ParsedFields, Timestamp};
 use crate::digest::Sha256Digest;
+use crate::zipnum::{FORMAT, SummaryEntry, SummaryHeader};
 use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION};
 
 /// A capture found in a WACZ index, together with the index that described it.
@@ -56,19 +54,9 @@ pub struct ZipNumSummary {
     pub blocks: Vec<ZipNumBlock>,
 }
 
-#[derive(Deserialize)]
-struct SummaryHeader<'a> {
-    #[serde(borrow)]
-    format: Cow<'a, str>,
-    #[serde(borrow)]
-    filename: Cow<'a, str>,
-}
-
-#[derive(Deserialize)]
-struct SummaryEntry {
-    offset: u64,
-    length: u64,
-    digest: Sha256Digest,
+pub(super) struct IndexPartition {
+    pub(super) summaries: Vec<(String, Result<ZipNumSummary, Error>)>,
+    pub(super) plain: Vec<String>,
 }
 
 impl<R: Read + Seek> WaczReader<R> {
@@ -144,20 +132,16 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
-        let paths = self.index_paths().map(str::to_owned).collect::<Vec<_>>();
-        let mut referenced_data = Vec::new();
+        let partition = self.partition_indexes();
         let mut captures = Vec::new();
 
-        for path in paths.iter().filter(|path| has_extension(path, "idx")) {
-            let summary = self.zipnum_summary(path)?;
-            referenced_data.push(summary.data_path.clone());
+        for (_, summary) in partition.summaries {
+            let summary = summary?;
             captures.extend(self.lookup_zipnum(&summary, url, &time_range)?);
         }
 
-        for path in paths.iter().filter(|path| {
-            !has_extension(path, "idx") && !referenced_data.iter().any(|data| data == *path)
-        }) {
-            captures.extend(self.lookup_plain(path, url, &time_range)?);
+        for path in partition.plain {
+            captures.extend(self.lookup_plain(&path, url, &time_range)?);
         }
 
         captures.sort_by(|left, right| {
@@ -178,7 +162,7 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
-        if has_extension(path, "idx") {
+        if crate::paths::is_zipnum_summary(path) {
             let summary = self.zipnum_summary(path)?;
             self.lookup_zipnum(&summary, url, &time_range)
         } else {
@@ -328,6 +312,32 @@ impl<R: Read + Seek> WaczReader<R> {
             Ok(bytes)
         }
     }
+
+    pub(super) fn partition_indexes(&mut self) -> IndexPartition {
+        let paths = self.index_paths().map(str::to_owned).collect::<Vec<_>>();
+        let mut referenced_data = Vec::new();
+        let mut summaries = Vec::new();
+
+        for path in paths
+            .iter()
+            .filter(|path| crate::paths::is_zipnum_summary(path))
+        {
+            let summary = self.zipnum_summary(path);
+            if let Ok(summary) = &summary {
+                referenced_data.push(summary.data_path.clone());
+            }
+            summaries.push((path.clone(), summary));
+        }
+
+        let plain = paths
+            .into_iter()
+            .filter(|path| {
+                !crate::paths::is_zipnum_summary(path) && !referenced_data.contains(path)
+            })
+            .collect();
+
+        IndexPartition { summaries, plain }
+    }
 }
 
 fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
@@ -335,7 +345,7 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
     let header_line = lines
         .next()
         .ok_or_else(|| Error::InvalidZipNum(format!("{path}: missing !meta header")))?;
-    let (header_key, header_json) = split_prefix(header_line)
+    let (header_key, header_json) = cdxj::split_prefix(header_line)
         .ok_or_else(|| Error::InvalidZipNum(format!("{path}: malformed !meta header")))?;
 
     if header_key != "!meta 0" {
@@ -346,7 +356,7 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
 
     let header: SummaryHeader<'_> = serde_json::from_str(header_json)
         .map_err(|error| Error::InvalidZipNum(format!("{path}: {error}")))?;
-    if header.format != "cdxj-gzip-1.0" {
+    if header.format != FORMAT {
         return Err(Error::InvalidZipNum(format!(
             "{path}: unsupported format {}",
             header.format
@@ -357,7 +367,7 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
     let mut blocks = Vec::new();
 
     for (line_number, line) in lines.enumerate() {
-        let (prefix, json) = split_prefix(line).ok_or_else(|| {
+        let (prefix, json) = cdxj::split_prefix(line).ok_or_else(|| {
             Error::InvalidZipNum(format!("{path}: malformed line {}", line_number + 2))
         })?;
         let (key, timestamp) = prefix.rsplit_once(' ').ok_or_else(|| {
@@ -398,11 +408,6 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
     })
 }
 
-fn split_prefix(line: &str) -> Option<(&str, &str)> {
-    let (json, _) = line.match_indices(' ').nth(1)?;
-    Some((&line[..json], &line[json + 1..]))
-}
-
 fn sibling_path(path: &str, filename: &str) -> String {
     path.rsplit_once('/').map_or_else(
         || filename.to_owned(),
@@ -412,12 +417,6 @@ fn sibling_path(path: &str, filename: &str) -> String {
 
 fn line_key(line: &str) -> Option<&str> {
     line.split_once(' ').map(|(key, _)| key)
-}
-
-pub(super) fn has_extension(path: &str, expected: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
 }
 
 fn archive_path(filename: &str) -> String {

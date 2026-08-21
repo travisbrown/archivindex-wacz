@@ -26,6 +26,7 @@ pub mod io;
 mod lines;
 pub mod pages;
 mod paths;
+mod zipnum;
 
 /// Bounded source context for an error in a line-oriented member.
 #[derive(Clone, Debug, Eq, PartialEq)]

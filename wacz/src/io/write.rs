@@ -209,10 +209,9 @@ impl<W: Write + Seek> WaczWriter<W> {
 
     /// Add WARC data under `archive/` using ZIP `STORE`.
     pub fn add_warc<R: Read>(&mut self, name: &str, mut reader: R) -> Result<(), Error> {
-        let gzip = name.strip_suffix(".warc.gz").is_some();
-        if !(gzip || name.strip_suffix(".warc").is_some()) {
+        let Some(gzip) = crate::paths::warc_gzip(name) else {
             return Err(Error::InvalidWarcName(name.to_owned()));
-        }
+        };
         let path = format!("{ARCHIVE_PREFIX}{name}");
         if gzip {
             let mut spool = tempfile::tempfile()?;

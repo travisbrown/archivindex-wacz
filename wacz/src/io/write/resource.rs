@@ -77,7 +77,8 @@ impl<W: Write + Seek> WaczWriter<W> {
             return Err(Error::DuplicateMemberPath(path.to_owned()));
         }
         let name = resource_name(path);
-        if !valid_resource_name(name) || self.resources.iter().any(|resource| resource.name == name)
+        if !crate::paths::valid_resource_name(name)
+            || self.resources.iter().any(|resource| resource.name == name)
         {
             return Err(Error::InvalidResourceName(name.to_owned()));
         }
@@ -155,11 +156,4 @@ pub(super) fn resource_name(path: &str) -> &str {
         "extraPages.jsonl" => "extra-pages.jsonl",
         name => name,
     }
-}
-
-fn valid_resource_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
-        })
 }
