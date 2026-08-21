@@ -179,6 +179,11 @@ pub enum CaptureControl {
 pub trait CaptureEventSink {
     /// Observe one event and decide whether capture should continue.
     fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl;
+
+    /// Report that a URL capture attempt is starting and return whether it should be cancelled.
+    fn started(&mut self, url: &str, attempt: usize) -> bool {
+        self.event(CaptureEvent::Started { url, attempt }) == CaptureControl::Cancel
+    }
 }
 
 impl<F> CaptureEventSink for F
@@ -358,14 +363,13 @@ impl Archiver {
         if concurrency == 1 {
             for url in urls {
                 let url = url.as_ref();
-                if events.event(CaptureEvent::Started { url, attempt: 1 }) == CaptureControl::Cancel
-                {
+                if events.started(url, 1) {
                     cancelled = true;
                     break;
                 }
-                let (exchanges, error) = self.capture(url, None).parts();
-                cancelled |= notify_outcome(events, url, &exchanges, error.as_ref());
-                collection.record(url.to_owned(), exchanges, error, None, None)?;
+                let outcome = self.capture(url, None);
+                cancelled |= notify_outcome(events, url, &outcome);
+                collection.record(url.to_owned(), outcome, None, None)?;
                 cancelled |= events.event(CaptureEvent::Written { url }) == CaptureControl::Cancel;
                 if cancelled {
                     break;
@@ -379,21 +383,20 @@ impl Archiver {
     }
 }
 
-fn notify_outcome(
-    events: &mut impl CaptureEventSink,
+pub(crate) fn notify_outcome(
+    events: &mut (impl CaptureEventSink + ?Sized),
     url: &str,
-    exchanges: &[Exchange],
-    error: Option<&Error>,
+    outcome: &CaptureOutcome,
 ) -> bool {
-    let event = error.map_or_else(
-        || CaptureEvent::Captured {
+    let event = match outcome {
+        CaptureOutcome::Captured(exchanges) => CaptureEvent::Captured {
             url,
             status: exchanges
                 .last()
                 .expect("successful capture has an exchange")
                 .status,
         },
-        |error| CaptureEvent::Failed { url, error },
-    );
+        CaptureOutcome::Failed { error, .. } => CaptureEvent::Failed { url, error },
+    };
     events.event(event) == CaptureControl::Cancel
 }

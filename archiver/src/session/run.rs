@@ -7,14 +7,13 @@ use std::time::Duration;
 use archivindex_warc_revisit_index::db::Index as RevisitIndex;
 
 use super::{Capture, Inspection, Session, SessionSummary};
-use crate::client::{CaptureControl, CaptureEvent, CaptureOutcome, Collection, Error, Exchange};
+use crate::client::{
+    ArchiveSummary, CaptureControl, CaptureEvent, CaptureOutcome, Collection, Error, Exchange,
+    notify_outcome,
+};
 
 enum AttemptOutcome {
-    Captured(Vec<Exchange>),
-    Failed {
-        exchanges: Vec<Exchange>,
-        error: Error,
-    },
+    Finished(CaptureOutcome),
     Cancelled,
 }
 
@@ -22,6 +21,50 @@ enum CrawlOutcome {
     Complete,
     Cancelled,
     Fatal(Error),
+}
+
+impl CrawlOutcome {
+    fn finish(
+        self,
+        archive: Result<ArchiveSummary, Error>,
+        seeds: &HashSet<String>,
+    ) -> Result<SessionSummary, Error> {
+        match (self, archive) {
+            (Self::Fatal(error), Err(_)) | (_, Err(error)) => Err(error),
+            (outcome, Ok(summary)) => Ok(outcome.into_summary(summary, seeds)),
+        }
+    }
+
+    fn into_summary(self, summary: ArchiveSummary, seeds: &HashSet<String>) -> SessionSummary {
+        let (seed_captures, extra_captures) = summary
+            .captures
+            .into_iter()
+            .partition(|capture| seeds.contains(&capture.url));
+
+        match self {
+            Self::Complete => SessionSummary {
+                seed_captures,
+                extra_captures,
+                failures: summary.failures,
+                fatal_error: None,
+                cancelled: false,
+            },
+            Self::Cancelled => SessionSummary {
+                seed_captures,
+                extra_captures,
+                failures: summary.failures,
+                fatal_error: None,
+                cancelled: true,
+            },
+            Self::Fatal(error) => SessionSummary {
+                seed_captures,
+                extra_captures,
+                failures: summary.failures,
+                fatal_error: Some(error),
+                cancelled: false,
+            },
+        }
+    }
 }
 
 impl Session<'_> {
@@ -57,39 +100,38 @@ impl Session<'_> {
             let Some((url, via)) = queue.pop_front() else {
                 break CrawlOutcome::Complete;
             };
-            if self.event(CaptureEvent::Started {
-                url: &url,
-                attempt: 1,
-            }) == CaptureControl::Cancel
+            if self
+                .events
+                .as_mut()
+                .is_some_and(|events| events.started(&url, 1))
             {
                 break CrawlOutcome::Cancelled;
             }
-            let (exchanges, error, captured) = match self.capture_with_retry(&url, &collection) {
-                AttemptOutcome::Captured(exchanges) => (exchanges, None, true),
-                AttemptOutcome::Failed { exchanges, error } => (exchanges, Some(error), false),
+            let mut outcome = match self.capture_with_retry(&url, &collection) {
+                AttemptOutcome::Finished(outcome) => outcome,
                 AttemptOutcome::Cancelled => break CrawlOutcome::Cancelled,
             };
-            let outcome = error.as_ref().map_or_else(
-                || CaptureEvent::Captured {
-                    url: &url,
-                    status: exchanges.last().map_or(0, |exchange| exchange.status),
-                },
-                |error| CaptureEvent::Failed { url: &url, error },
-            );
-            let cancel_after_write = self.event(outcome) == CaptureControl::Cancel;
-            let (title, processor_error) = if captured {
-                self.process_capture(&url, &exchanges, &mut seen, &mut queue)
-            } else {
-                (None, None)
+            let cancel_after_write = self
+                .events
+                .as_mut()
+                .is_some_and(|events| notify_outcome(events.as_mut(), &url, &outcome));
+            let (title, processor_error) = match &outcome {
+                CaptureOutcome::Captured(exchanges) => {
+                    let inspection = self.process_capture(&url, exchanges, &mut seen, &mut queue);
+                    if inspection.1.is_none() {
+                        capture_count += 1;
+                    }
+                    inspection
+                }
+                CaptureOutcome::Failed { .. } => (None, None),
             };
             let stop_after_write = processor_error.is_some();
-            if let Err(error) = collection.record(
-                url.clone(),
-                exchanges,
-                error.or(processor_error),
-                title.as_deref(),
-                via.as_deref(),
-            ) {
+            if let Some(error) = processor_error {
+                outcome = outcome.fail(error);
+            }
+            if let Err(error) =
+                collection.record(url.clone(), outcome, title.as_deref(), via.as_deref())
+            {
                 break CrawlOutcome::Fatal(error);
             }
             if cancel_after_write
@@ -100,32 +142,9 @@ impl Session<'_> {
             if stop_after_write {
                 break CrawlOutcome::Complete;
             }
-            capture_count += usize::from(captured);
         };
 
-        let (fatal_error, cancelled) = match crawl_outcome {
-            CrawlOutcome::Complete => (None, false),
-            CrawlOutcome::Cancelled => (None, true),
-            CrawlOutcome::Fatal(error) => (Some(error), false),
-        };
-
-        match collection.finish_to_path(&self.output) {
-            Ok(summary) => {
-                let (seed_captures, extra_captures) = summary
-                    .captures
-                    .into_iter()
-                    .partition(|capture| seeds.contains(&capture.url));
-
-                Ok(SessionSummary {
-                    seed_captures,
-                    extra_captures,
-                    failures: summary.failures,
-                    fatal_error,
-                    cancelled,
-                })
-            }
-            Err(error) => Err(fatal_error.unwrap_or(error)),
-        }
+        crawl_outcome.finish(collection.finish_to_path(&self.output), &seeds)
     }
 
     /// Show a successful capture to the processor and enqueue its discoveries and recaptures.
@@ -188,10 +207,10 @@ impl Session<'_> {
 
         for attempt in 0..attempts {
             if attempt > 0
-                && self.event(CaptureEvent::Started {
-                    url,
-                    attempt: attempt + 1,
-                }) == CaptureControl::Cancel
+                && self
+                    .events
+                    .as_mut()
+                    .is_some_and(|events| events.started(url, attempt + 1))
             {
                 return AttemptOutcome::Cancelled;
             }
@@ -212,7 +231,7 @@ impl Session<'_> {
                     delays.advance();
                 }
                 CaptureOutcome::Failed { exchanges, error } => {
-                    return AttemptOutcome::Failed { exchanges, error };
+                    return AttemptOutcome::Finished(CaptureOutcome::Failed { exchanges, error });
                 }
                 CaptureOutcome::Captured(exchanges) => {
                     let status = exchanges
@@ -221,13 +240,13 @@ impl Session<'_> {
                         .filter(|status| is_retryable_status(*status));
                     if let Some(status) = status {
                         if attempt + 1 == attempts {
-                            return AttemptOutcome::Failed {
+                            return AttemptOutcome::Finished(CaptureOutcome::Failed {
                                 exchanges,
                                 error: Error::HttpStatus {
                                     url: url.to_owned(),
                                     status,
                                 },
-                            };
+                            });
                         }
                         let delay = exchanges.last().map_or_else(
                             || delays.backoff,
@@ -244,7 +263,7 @@ impl Session<'_> {
                         thread::sleep(delay);
                         delays.advance();
                     } else {
-                        return AttemptOutcome::Captured(exchanges);
+                        return AttemptOutcome::Finished(CaptureOutcome::Captured(exchanges));
                     }
                 }
             }

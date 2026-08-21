@@ -27,10 +27,11 @@ pub enum CaptureOutcome {
 }
 
 impl CaptureOutcome {
-    pub(super) fn parts(self) -> (Vec<Exchange>, Option<Error>) {
+    pub(crate) fn fail(self, error: Error) -> Self {
         match self {
-            Self::Captured(exchanges) => (exchanges, None),
-            Self::Failed { exchanges, error } => (exchanges, Some(error)),
+            Self::Captured(exchanges) | Self::Failed { exchanges, .. } => {
+                Self::Failed { exchanges, error }
+            }
         }
     }
 }

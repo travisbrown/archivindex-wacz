@@ -51,11 +51,7 @@ impl Archiver {
             let mut cancelled = false;
             for (index, url) in urls.by_ref().take(concurrency).enumerate() {
                 let url = url.as_ref().to_owned();
-                if events.event(CaptureEvent::Started {
-                    url: &url,
-                    attempt: 1,
-                }) == CaptureControl::Cancel
-                {
+                if events.started(&url, 1) {
                     cancelled = true;
                     break;
                 }
@@ -72,29 +68,22 @@ impl Archiver {
                 let (index, url, outcome) = outcome_receiver
                     .recv()
                     .expect("workers always report an outcome before exiting");
-                let (exchanges, error) = outcome.parts();
                 completed += 1;
 
                 if result.is_ok() {
-                    cancelled |= notify_outcome(events, &url, &exchanges, error.as_ref());
+                    cancelled |= notify_outcome(events, &url, &outcome);
                     if !cancelled && let Some(url) = urls.next() {
                         let url = url.as_ref().to_owned();
-                        if events.event(CaptureEvent::Started {
-                            url: &url,
-                            attempt: 1,
-                        }) == CaptureControl::Cancel
-                        {
+                        if events.started(&url, 1) {
                             cancelled = true;
                         } else {
                             let _ = task_sender.send((dispatched, url));
                             dispatched += 1;
                         }
                     }
-                    pending.insert(index, (url, exchanges, error));
-                    while let Some((url, exchanges, error)) = pending.remove(&next_to_record) {
-                        if let Err(error) =
-                            collection.record(url.clone(), exchanges, error, None, None)
-                        {
+                    pending.insert(index, (url, outcome));
+                    while let Some((url, outcome)) = pending.remove(&next_to_record) {
+                        if let Err(error) = collection.record(url.clone(), outcome, None, None) {
                             result = Err(error);
                             break;
                         }

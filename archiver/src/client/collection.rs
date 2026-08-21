@@ -16,7 +16,7 @@ use fluent_uri::Uri;
 use super::capture::Original;
 use super::warc_fields::{WarcinfoOptions, warcinfo_record};
 use super::warc_mapping::{MetadataOptions, write_exchange, write_record};
-use super::{ArchiveSummary, CaptureSummary, Error, Exchange, Failure};
+use super::{ArchiveSummary, CaptureOutcome, CaptureSummary, Error, Exchange, Failure};
 
 /// Files accumulated while captures are written to a spooled WARC file.
 pub struct Collection {
@@ -124,13 +124,43 @@ impl Collection {
     pub(crate) fn record(
         &mut self,
         url: String,
-        exchanges: Vec<Exchange>,
-        error: Option<Error>,
+        outcome: CaptureOutcome,
         title: Option<&str>,
         via: Option<&str>,
     ) -> Result<(), Error> {
-        let redirects = exchanges.len().saturating_sub(1);
-        let successful = error.is_none();
+        match outcome {
+            CaptureOutcome::Captured(exchanges) => {
+                let redirects = exchanges.len().saturating_sub(1);
+                let last =
+                    self.record_exchanges(exchanges, title, via, Some(url.as_str()), redirects)?;
+                let (date, status, size) =
+                    last.expect("a successful capture has at least one exchange");
+                self.summary.captures.push(CaptureSummary {
+                    url,
+                    date,
+                    status,
+                    size,
+                    redirects,
+                });
+            }
+            CaptureOutcome::Failed { exchanges, error } => {
+                let redirects = exchanges.len().saturating_sub(1);
+                self.record_exchanges(exchanges, title, via, None, redirects)?;
+                self.summary.failures.push(Failure { url, error });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn record_exchanges(
+        &mut self,
+        exchanges: Vec<Exchange>,
+        title: Option<&str>,
+        via: Option<&str>,
+        page_url: Option<&str>,
+        redirects: usize,
+    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, u16, u64)>, Error> {
         let mut last = None;
 
         for (hop, exchange) in exchanges.into_iter().enumerate() {
@@ -161,9 +191,7 @@ impl Collection {
                 MetadataOptions {
                     via: via.filter(|_| hop == 0),
                     title: title.filter(|_| hop == redirects),
-                    page_url: successful
-                        .then_some(url.as_str())
-                        .filter(|_| hop == redirects),
+                    page_url: page_url.filter(|_| hop == redirects),
                 },
                 revisit_of.as_ref(),
             )?;
@@ -199,21 +227,7 @@ impl Collection {
             }
         }
 
-        if let Some(error) = error {
-            self.summary.failures.push(Failure { url, error });
-        } else {
-            let (date, status, size) =
-                last.expect("a capture without an error has at least one exchange");
-            self.summary.captures.push(CaptureSummary {
-                url,
-                date,
-                status,
-                size,
-                redirects,
-            });
-        }
-
-        Ok(())
+        Ok(last)
     }
 
     /// Copy the completed WARC to `output`.
