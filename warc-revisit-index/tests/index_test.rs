@@ -4,9 +4,10 @@ use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate};
-use archivindex_warc_revisit_index::{
-    Error, Index, ResourceKey, ResourceStateUpdate, RevisitTarget,
-};
+use archivindex_warc_revisit_index::db::Index;
+use archivindex_warc_revisit_index::error::Error;
+use archivindex_warc_revisit_index::payload::RevisitTarget;
+use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
 use fluent_uri::Uri;
 use sha2::Digest as _;
 

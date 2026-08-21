@@ -22,7 +22,7 @@ use crate::digest::Sha256Digest;
 pub mod resource;
 pub mod signature;
 
-pub use resource::Resource;
+use resource::Resource;
 
 use signature::SignatureData;
 

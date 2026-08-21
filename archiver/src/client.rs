@@ -5,7 +5,7 @@ use std::path::Path;
 
 use archivindex_warc::record::BlockError;
 use archivindex_warc::recorder::Recorder;
-use archivindex_warc_revisit_index::Index as RevisitIndex;
+use archivindex_warc_revisit_index::db::Index as RevisitIndex;
 use chrono::{DateTime, Utc};
 use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
@@ -75,7 +75,7 @@ pub enum Error {
     InvalidSessionId(String),
     /// A revisit index could not be opened, queried, or updated.
     #[error(transparent)]
-    RevisitIndex(#[from] archivindex_warc_revisit_index::Error),
+    RevisitIndex(#[from] archivindex_warc_revisit_index::error::Error),
     /// A WARC content block could not be attached to its record.
     #[error(transparent)]
     WarcBlock(#[from] BlockError),

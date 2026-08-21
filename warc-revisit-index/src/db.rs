@@ -6,7 +6,9 @@ use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate};
 use fluent_uri::Uri;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{Error, ResourceKey, ResourceState, ResourceStateUpdate, RevisitTarget};
+use crate::error::Error;
+use crate::payload::RevisitTarget;
+use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -190,7 +192,7 @@ impl Transaction<'_> {
     }
 }
 
-pub fn lookup_payload(
+pub(crate) fn lookup_payload(
     connection: &Connection,
     digest: &LabelledDigest,
 ) -> Result<Option<RevisitTarget>, Error> {
@@ -227,7 +229,10 @@ pub fn lookup_payload(
         .transpose()
 }
 
-pub fn insert_payload(connection: &Connection, target: &RevisitTarget) -> Result<bool, Error> {
+pub(crate) fn insert_payload(
+    connection: &Connection,
+    target: &RevisitTarget,
+) -> Result<bool, Error> {
     let (algorithm, digest) = digest_parts(&target.payload_digest)?;
     let payload_length = target
         .payload_length
@@ -252,7 +257,7 @@ pub fn insert_payload(connection: &Connection, target: &RevisitTarget) -> Result
     Ok(changed != 0)
 }
 
-pub fn lookup_resource(
+pub(crate) fn lookup_resource(
     connection: &Connection,
     key: &ResourceKey,
 ) -> Result<Option<ResourceState>, Error> {
@@ -310,7 +315,7 @@ pub fn lookup_resource(
         .transpose()
 }
 
-pub fn update_resource(
+pub(crate) fn update_resource(
     connection: &Connection,
     key: &ResourceKey,
     update: ResourceStateUpdate,

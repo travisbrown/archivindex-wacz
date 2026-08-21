@@ -4,7 +4,7 @@ use std::collections::{HashSet, VecDeque};
 use std::thread;
 use std::time::Duration;
 
-use archivindex_warc_revisit_index::Index as RevisitIndex;
+use archivindex_warc_revisit_index::db::Index as RevisitIndex;
 
 use super::{Capture, Inspection, Session, SessionSummary};
 use crate::client::{CaptureControl, CaptureEvent, Collection, Error, Exchange};

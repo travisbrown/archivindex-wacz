@@ -21,14 +21,8 @@ use crate::{
     PAGES_PATH,
 };
 
-mod random;
-mod validate;
-
-pub use random::{Capture, ZipNumBlock, ZipNumSummary};
-pub use validate::{
-    ContentProblem, IndexProblem, LayoutProblem, ManifestProblem, SignatureProblem,
-    SignatureStatus, ValidationOptions, ValidationReport,
-};
+pub mod random;
+pub mod validate;
 
 /// An error type for WACZ reading.
 #[derive(Debug, thiserror::Error)]

@@ -16,7 +16,8 @@ use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Operator, RetryConfig, Session};
 use archivindex_archiver::wordpress::CommentCaptureProcessor;
 use archivindex_archiver::wordpress::read::read_comments;
-use archivindex_packager::{IndexFormat, WarcToWacz};
+use archivindex_packager::WarcToWacz;
+use archivindex_wacz::io::write::IndexFormat;
 use cli_helpers::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 

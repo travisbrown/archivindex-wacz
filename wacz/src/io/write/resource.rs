@@ -8,7 +8,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::{Error, WaczWriter};
 use crate::digest::Sha256Digest;
-use crate::frictionless::Resource;
+use crate::frictionless::resource::Resource;
 use crate::{
     ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, GZIP_EXTENSION, INDEXES_PREFIX,
     PAGES_PREFIX,

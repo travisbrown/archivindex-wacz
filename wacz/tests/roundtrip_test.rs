@@ -7,7 +7,7 @@ use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
-use archivindex_wacz::io::read::{self as reader, WaczReader};
+use archivindex_wacz::io::read::{self as reader, WaczReader, validate};
 use archivindex_wacz::io::write::{
     self as writer, IndexFormat, PackageMetadata, WaczWriter, WriterConfig,
 };
@@ -1073,38 +1073,38 @@ fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::
         ("indexes/orphan.cdx.gz", b""),
     ])?;
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions::default())?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
 
     assert!(
         report
             .layout
-            .contains(&reader::LayoutProblem::InvalidWarcMember(
+            .contains(&validate::LayoutProblem::InvalidWarcMember(
                 "archive/not-a-warc.txt".to_owned()
             ))
     );
     assert!(
         report
             .layout
-            .contains(&reader::LayoutProblem::InvalidIndexMember(
+            .contains(&validate::LayoutProblem::InvalidIndexMember(
                 "indexes/not-an-index.txt".to_owned()
             ))
     );
     assert!(
         report
             .layout
-            .contains(&reader::LayoutProblem::InvalidIndexMember(
+            .contains(&validate::LayoutProblem::InvalidIndexMember(
                 "indexes/orphan.cdx.gz".to_owned()
             ))
     );
     assert!(
         report
             .layout
-            .contains(&reader::LayoutProblem::NoWarcMembers)
+            .contains(&validate::LayoutProblem::NoWarcMembers)
     );
     assert!(
         report
             .layout
-            .contains(&reader::LayoutProblem::NoIndexMembers)
+            .contains(&validate::LayoutProblem::NoIndexMembers)
     );
 
     Ok(())
@@ -1278,12 +1278,12 @@ fn directory_entries_are_not_member_paths() -> Result<(), Box<dyn std::error::Er
 fn validate_passes_for_conforming_archives() -> Result<(), Box<dyn std::error::Error>> {
     let wacz = build_wacz("data.warc", &warc_bytes()?)?;
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let report = reader.validate(reader::ValidationOptions::all())?;
+    let report = reader.validate(validate::ValidationOptions::all())?;
 
     assert!(report.is_conformant());
     assert!(report.layout.is_empty());
     assert!(report.manifest.is_empty());
-    assert_eq!(report.signature, reader::SignatureStatus::Unsigned);
+    assert_eq!(report.signature, validate::SignatureStatus::Unsigned);
     assert_eq!(report.content, Some(Vec::new()));
     assert_eq!(report.index, Some(Vec::new()));
     assert!(report.fixity.is_some_and(|fixity| fixity.is_success()));
@@ -1297,19 +1297,22 @@ fn validate_passes_for_conforming_archives() -> Result<(), Box<dyn std::error::E
 fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = zip_of(&[("datapackage.json", EMPTY_MANIFEST.as_bytes())])?;
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions::default())?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
 
     assert!(!report.is_conformant());
     assert_eq!(
         report.layout,
         vec![
-            reader::LayoutProblem::MissingPages,
-            reader::LayoutProblem::NoWarcMembers,
-            reader::LayoutProblem::NoIndexMembers,
+            validate::LayoutProblem::MissingPages,
+            validate::LayoutProblem::NoWarcMembers,
+            validate::LayoutProblem::NoIndexMembers,
         ]
     );
-    assert_eq!(report.manifest, vec![reader::ManifestProblem::NoResources]);
-    assert_eq!(report.signature, reader::SignatureStatus::Absent);
+    assert_eq!(
+        report.manifest,
+        vec![validate::ManifestProblem::NoResources]
+    );
+    assert_eq!(report.signature, validate::SignatureStatus::Absent);
     assert_eq!(report.fixity, None);
     assert_eq!(report.content, None);
     assert_eq!(report.index, None);
@@ -1318,14 +1321,14 @@ fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error:
     // declared digests to check.
     let bytes = zip_of(&[])?;
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions {
+    let report = reader.validate(validate::ValidationOptions {
         fixity: true,
-        ..reader::ValidationOptions::default()
+        ..validate::ValidationOptions::default()
     })?;
 
     assert_eq!(
         report.layout.first(),
-        Some(&reader::LayoutProblem::MissingDataPackage)
+        Some(&validate::LayoutProblem::MissingDataPackage)
     );
     assert!(report.manifest.is_empty());
     assert_eq!(report.fixity, None);
@@ -1355,7 +1358,7 @@ fn validate_reports_duplicate_zip_member_names() -> Result<(), Box<dyn std::erro
     assert!(
         report
             .layout
-            .contains(&reader::LayoutProblem::DuplicateMember(
+            .contains(&validate::LayoutProblem::DuplicateMember(
                 "duplicate-a.txt".to_owned()
             ))
     );
@@ -1387,32 +1390,32 @@ fn validate_reports_manifest_problems() -> Result<(), Box<dyn std::error::Error>
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions::default())?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
 
     assert_eq!(
         report.manifest,
         vec![
-            reader::ManifestProblem::Profile("wacz".to_owned()),
-            reader::ManifestProblem::WaczVersion("1.2.0".to_owned()),
-            reader::ManifestProblem::InvalidResourceName("Pages.JSONL".to_owned()),
-            reader::ManifestProblem::DuplicateResourcePath("pages/pages.jsonl".to_owned()),
-            reader::ManifestProblem::DuplicateResourceName("pages.jsonl".to_owned()),
-            reader::ManifestProblem::MissingResourceMember("archive/missing.warc".to_owned()),
-            reader::ManifestProblem::ReservedResourcePath("datapackage.json".to_owned()),
-            reader::ManifestProblem::InvalidResourcePath("../escape".to_owned()),
-            reader::ManifestProblem::MissingResourceMember("../escape".to_owned()),
-            reader::ManifestProblem::UnlistedMember("extra/notes.txt".to_owned()),
+            validate::ManifestProblem::Profile("wacz".to_owned()),
+            validate::ManifestProblem::WaczVersion("1.2.0".to_owned()),
+            validate::ManifestProblem::InvalidResourceName("Pages.JSONL".to_owned()),
+            validate::ManifestProblem::DuplicateResourcePath("pages/pages.jsonl".to_owned()),
+            validate::ManifestProblem::DuplicateResourceName("pages.jsonl".to_owned()),
+            validate::ManifestProblem::MissingResourceMember("archive/missing.warc".to_owned()),
+            validate::ManifestProblem::ReservedResourcePath("datapackage.json".to_owned()),
+            validate::ManifestProblem::InvalidResourcePath("../escape".to_owned()),
+            validate::ManifestProblem::MissingResourceMember("../escape".to_owned()),
+            validate::ManifestProblem::UnlistedMember("extra/notes.txt".to_owned()),
         ]
     );
 
     // An unparseable manifest is reported rather than failing validation.
     let bytes = zip_of(&[("datapackage.json", b"not json".as_slice())])?;
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions::default())?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
 
     assert!(matches!(
         report.manifest.as_slice(),
-        [reader::ManifestProblem::Unparseable(_)]
+        [validate::ManifestProblem::Unparseable(_)]
     ));
 
     Ok(())
@@ -1434,28 +1437,28 @@ fn validate_reports_signature_status() -> Result<(), Box<dyn std::error::Error>>
             manifest_hash, signed_hash,
         )
     };
-    let validate = |digest: &str| -> Result<reader::SignatureStatus, Box<dyn std::error::Error>> {
+    let validate = |digest: &str| -> Result<validate::SignatureStatus, Box<dyn std::error::Error>> {
         let bytes = zip_of(&[
             ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
             ("datapackage-digest.json", digest.as_bytes()),
         ])?;
         let mut reader = WaczReader::new(Cursor::new(bytes))?;
         Ok(reader
-            .validate(reader::ValidationOptions::default())?
+            .validate(validate::ValidationOptions::default())?
             .signature)
     };
 
     // A consistent signature is reported as present but not cryptographically checked.
     assert_eq!(
         validate(&signed(manifest_hash))?,
-        reader::SignatureStatus::Unverified
+        validate::SignatureStatus::Unverified
     );
 
     // A signature covering a different hash invalidates the digest file.
     let other = Sha256Digest::compute(b"other");
     assert_eq!(
         validate(&signed(other))?,
-        reader::SignatureStatus::Invalid(vec![reader::SignatureProblem::SignedHash {
+        validate::SignatureStatus::Invalid(vec![validate::SignatureProblem::SignedHash {
             declared: manifest_hash,
             signed: other,
         }])
@@ -1466,7 +1469,7 @@ fn validate_reports_signature_status() -> Result<(), Box<dyn std::error::Error>>
         validate(&format!(
             r#"{{"path": "datapackage.json", "hash": "{other}"}}"#
         ))?,
-        reader::SignatureStatus::Invalid(vec![reader::SignatureProblem::ManifestHash {
+        validate::SignatureStatus::Invalid(vec![validate::SignatureProblem::ManifestHash {
             declared: other,
             computed: manifest_hash,
         }])
@@ -1475,8 +1478,8 @@ fn validate_reports_signature_status() -> Result<(), Box<dyn std::error::Error>>
     // An unparseable digest file is reported rather than failing validation.
     assert!(matches!(
         validate("not json")?,
-        reader::SignatureStatus::Invalid(problems)
-            if matches!(problems.as_slice(), [reader::SignatureProblem::Unparseable(_)])
+        validate::SignatureStatus::Invalid(problems)
+            if matches!(problems.as_slice(), [validate::SignatureProblem::Unparseable(_)])
     ));
 
     Ok(())
@@ -1506,32 +1509,32 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions {
+    let report = reader.validate(validate::ValidationOptions {
         content: true,
-        ..reader::ValidationOptions::default()
+        ..validate::ValidationOptions::default()
     })?;
     let content = report.content.expect("content layer should run");
 
     assert_eq!(content.len(), 5);
     assert!(content.iter().any(|problem| matches!(
         problem,
-        reader::ContentProblem::Pages { path, .. } if path == "pages/bad.jsonl"
+        validate::ContentProblem::Pages { path, .. } if path == "pages/bad.jsonl"
     )));
     assert!(content.iter().any(|problem| matches!(
         problem,
-        reader::ContentProblem::IndexOrder { path } if path == "indexes/unsorted.cdx"
+        validate::ContentProblem::IndexOrder { path } if path == "indexes/unsorted.cdx"
     )));
     assert!(content.iter().any(|problem| matches!(
         problem,
-        reader::ContentProblem::Index { path, .. } if path == "indexes/bad.cdx"
+        validate::ContentProblem::Index { path, .. } if path == "indexes/bad.cdx"
     )));
     assert!(content.iter().any(|problem| matches!(
         problem,
-        reader::ContentProblem::ZipNum { path, .. } if path == "indexes/bad.idx"
+        validate::ContentProblem::ZipNum { path, .. } if path == "indexes/bad.idx"
     )));
     assert!(content.iter().any(|problem| matches!(
         problem,
-        reader::ContentProblem::Warc { path, .. } if path == "archive/truncated.warc"
+        validate::ContentProblem::Warc { path, .. } if path == "archive/truncated.warc"
     )));
 
     Ok(())
@@ -1557,9 +1560,9 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(reader::ValidationOptions {
+    let report = reader.validate(validate::ValidationOptions {
         index: true,
-        ..reader::ValidationOptions::default()
+        ..validate::ValidationOptions::default()
     })?;
 
     // The index layer implies the content layer, which finds nothing wrong here.
@@ -1570,14 +1573,14 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
     assert_eq!(problems.len(), 2);
     assert!(matches!(
         &problems[0],
-        reader::IndexProblem::Capture { index_path, key, message, .. }
+        validate::IndexProblem::Capture { index_path, key, message, .. }
             if index_path == "indexes/index.cdx"
                 && key == "com,example,www)/page1"
                 && message.contains("digest mismatch")
     ));
     assert!(matches!(
         &problems[1],
-        reader::IndexProblem::Capture { key, message, .. }
+        validate::IndexProblem::Capture { key, message, .. }
             if key == "com,example,www)/page2" && message.contains("outside member")
     ));
 
@@ -1628,16 +1631,16 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
     wacz[position + 9] ^= 0xff;
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let report = reader.validate(reader::ValidationOptions {
+    let report = reader.validate(validate::ValidationOptions {
         index: true,
-        ..reader::ValidationOptions::default()
+        ..validate::ValidationOptions::default()
     })?;
     let problems = report.index.expect("index layer should run");
 
     assert_eq!(problems.len(), 1);
     assert!(matches!(
         &problems[0],
-        reader::IndexProblem::Block { summary_path, offset, message }
+        validate::IndexProblem::Block { summary_path, offset, message }
             if summary_path == "indexes/index.idx"
                 && *offset == 0
                 && message.contains("digest mismatch")

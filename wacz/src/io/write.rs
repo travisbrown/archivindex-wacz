@@ -6,18 +6,16 @@ use std::path::{Path, PathBuf};
 
 use zip::ZipWriter;
 
-use crate::frictionless::Resource;
+use crate::frictionless::resource::Resource;
 use crate::pages::{self, Page, PageListHeader};
 use crate::{ARCHIVE_PREFIX, PAGES_PREFIX};
 
 mod index;
 mod manifest;
 mod resource;
-mod warc;
+pub mod warc;
 
 use resource::options_for;
-pub use warc::WarcSink;
-
 /// Short name for manifest metadata supplied to [`WaczWriter::finish`].
 ///
 /// New code should use [`crate::frictionless::DataPackageBuilder`] directly.

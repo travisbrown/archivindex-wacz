@@ -105,6 +105,7 @@ version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
  "archivindex-packager",
+ "archivindex-wacz",
  "cli-helpers",
  "indicatif",
  "serde_json",

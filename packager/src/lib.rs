@@ -13,7 +13,7 @@ use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::write::{
-    MAX_ZIP_COMPRESSION_LEVEL, MIN_ZIP_COMPRESSION_LEVEL, WaczWriter, WriterConfig,
+    IndexFormat, MAX_ZIP_COMPRESSION_LEVEL, MIN_ZIP_COMPRESSION_LEVEL, WaczWriter, WriterConfig,
 };
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
@@ -29,8 +29,6 @@ use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
 use rusqlite::{Connection, params};
 use url::Url;
-
-pub use archivindex_wacz::io::write::IndexFormat;
 
 const INDEX_NAME: &str = "index.cdx";
 const EXTRA_PAGES_NAME: &str = "extraPages.jsonl";

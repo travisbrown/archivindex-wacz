@@ -4,7 +4,8 @@ use std::borrow::Cow;
 
 use archivindex_warc::recorder::CapturedExchange;
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate, WarcDatePrecision};
-use archivindex_warc_revisit_index::{ResourceKey, ResourceState, RevisitTarget};
+use archivindex_warc_revisit_index::payload::RevisitTarget;
+use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState};
 use http::StatusCode;
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use sha2::{Digest, Sha256};

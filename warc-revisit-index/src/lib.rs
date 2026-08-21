@@ -13,7 +13,7 @@
 //! WARC streams extracted from WACZ packages, or any other source.
 //!
 //! Resource identity is currently one canonical GET representation per target URI. The
-//! [`ResourceKey`] wrapper leaves room for explicitly representing method, authorization context,
+//! [`resource::ResourceKey`] wrapper leaves room for explicitly representing method, authorization context,
 //! cookies, and `Vary`-selected request headers in a future schema. The same payload may be linked
 //! to any number of independent resource keys.
 //!
@@ -21,7 +21,8 @@
 //!
 //! ```
 //! use archivindex_warc::value::{DigestAlgorithm, LabelledDigest};
-//! use archivindex_warc_revisit_index::{Index, ResourceKey};
+//! use archivindex_warc_revisit_index::db::Index;
+//! use archivindex_warc_revisit_index::resource::ResourceKey;
 //! use fluent_uri::Uri;
 //!
 //! let index = Index::open_in_memory()?;
@@ -36,14 +37,8 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
-mod db;
-mod error;
-mod ingest;
-mod payload;
-mod resource;
-
-pub use db::{Index, Transaction};
-pub use error::Error;
-pub use ingest::IndexRecordOutcome;
-pub use payload::RevisitTarget;
-pub use resource::{ResourceKey, ResourceState, ResourceStateUpdate};
+pub mod db;
+pub mod error;
+pub mod ingest;
+pub mod payload;
+pub mod resource;

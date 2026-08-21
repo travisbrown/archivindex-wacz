@@ -9,7 +9,7 @@ use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::recorder::CapturedExchange;
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
-use archivindex_warc_revisit_index::RevisitTarget;
+use archivindex_warc_revisit_index::payload::RevisitTarget;
 use fluent_uri::Uri;
 
 use super::capture::labelled_digest;

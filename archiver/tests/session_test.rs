@@ -14,7 +14,8 @@ use archivindex_archiver::session::{
 };
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::digest::Sha256Digest;
-use archivindex_wacz::io::read::{ValidationOptions, WaczReader};
+use archivindex_wacz::io::read::WaczReader;
+use archivindex_wacz::io::read::validate::ValidationOptions;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
@@ -25,7 +26,9 @@ use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
 use archivindex_warc::version::WarcVersion;
-use archivindex_warc_revisit_index::{Index, ResourceKey, ResourceStateUpdate, RevisitTarget};
+use archivindex_warc_revisit_index::db::Index;
+use archivindex_warc_revisit_index::payload::RevisitTarget;
+use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
 use fluent_uri::Uri;
 
 mod support;

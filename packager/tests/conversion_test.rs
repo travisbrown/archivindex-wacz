@@ -3,7 +3,8 @@
 use std::io::{Read, Write};
 
 use archivindex_packager::{Capture, ConversionWarning, Error, PageTitleGenerator, WarcToWacz};
-use archivindex_wacz::io::read::{ValidationOptions, WaczReader};
+use archivindex_wacz::io::read::WaczReader;
+use archivindex_wacz::io::read::validate::ValidationOptions;
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::metadata::MetadataBody;

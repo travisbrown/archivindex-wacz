@@ -7,9 +7,9 @@ use std::path::Path;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::extension::NoExtension;
-use archivindex_warc_revisit_index::{
-    Index, ResourceKey, ResourceState, ResourceStateUpdate, Transaction,
-};
+use archivindex_warc_revisit_index::db::{Index, Transaction};
+use archivindex_warc_revisit_index::payload::RevisitTarget;
+use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 use flate2::bufread::MultiGzDecoder;
 use fluent_uri::Uri;
 
@@ -103,7 +103,7 @@ impl Collection {
     fn lookup_payload(
         &self,
         digest: &archivindex_warc::value::LabelledDigest,
-    ) -> Result<Option<archivindex_warc_revisit_index::RevisitTarget>, Error> {
+    ) -> Result<Option<RevisitTarget>, Error> {
         if let Some(target) = self.session_index.lookup_payload(digest)? {
             return Ok(Some(target));
         }

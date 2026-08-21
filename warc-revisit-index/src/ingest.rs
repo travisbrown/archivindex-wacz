@@ -5,8 +5,11 @@ use archivindex_warc::record::extension::Extension;
 use archivindex_warc::record::header::{ResponseHeader, RevisitHeader, RevisitProfile};
 use rusqlite::Connection;
 
+use crate::db::{Index, Transaction};
 use crate::db::{insert_payload, lookup_payload, lookup_resource, update_resource};
-use crate::{Error, Index, ResourceKey, ResourceStateUpdate, RevisitTarget, Transaction};
+use crate::error::Error;
+use crate::payload::RevisitTarget;
+use crate::resource::{ResourceKey, ResourceStateUpdate};
 
 /// The changes made while indexing one WARC record.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
