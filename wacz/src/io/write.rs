@@ -1,14 +1,14 @@
 //! WACZ writer facade and configuration.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use zip::ZipWriter;
 
+use crate::PAGES_PREFIX;
 use crate::frictionless::resource::Resource;
 use crate::pages::{self, Page, PageListHeader};
-use crate::{ARCHIVE_PREFIX, PAGES_PREFIX};
 
 pub mod index;
 mod manifest;
@@ -129,9 +129,6 @@ pub enum Error {
     /// An index name is not a direct `.cdx` member name.
     #[error("index name must be a direct .cdx file name: {0}")]
     InvalidIndexName(String),
-    /// A gzip-named WARC is not a valid gzip stream.
-    #[error("invalid gzip WARC: {0}")]
-    InvalidGzip(#[source] std::io::Error),
     /// A WARC-record sink was configured with an invalid gzip compression level.
     #[error("gzip compression level must be between 0 and 9, got {0}")]
     InvalidGzipCompressionLevel(u32),
@@ -233,26 +230,15 @@ impl<W: Write + Seek> WaczWriter<W> {
         }
     }
 
-    /// Add WARC data under `archive/` using ZIP `STORE`.
+    /// Stream WARC data under `archive/` using ZIP `STORE`.
+    ///
+    /// The bytes are copied without parsing or content-level decompression. Use
+    /// [`WaczReader::validate`](crate::io::read::WaczReader::validate) with content validation to
+    /// check WARC framing and gzip encoding.
     pub fn add_warc<R: Read>(&mut self, name: &str, mut reader: R) -> Result<(), Error> {
-        let Some(gzip) = crate::paths::warc_gzip(name) else {
-            return Err(Error::InvalidWarcName(name.to_owned()));
-        };
-        let path = format!("{ARCHIVE_PREFIX}{name}");
-        if gzip {
-            let mut spool = tempfile::tempfile()?;
-            std::io::copy(&mut reader, &mut spool)?;
-            spool.seek(SeekFrom::Start(0))?;
-            std::io::copy(
-                &mut flate2::read::MultiGzDecoder::new(&mut spool),
-                &mut std::io::sink(),
-            )
-            .map_err(Error::InvalidGzip)?;
-            spool.seek(SeekFrom::Start(0))?;
-            self.add_typed_resource(&path, spool)
-        } else {
-            self.add_typed_resource(&path, reader)
-        }
+        let mut sink = self.start_warc(name)?;
+        std::io::copy(&mut reader, &mut sink)?;
+        sink.finish()
     }
 
     /// Add a WARC file under `archive/`, using its file name.

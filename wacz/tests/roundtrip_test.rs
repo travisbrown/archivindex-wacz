@@ -260,7 +260,7 @@ fn records_stream_directly_into_a_warc_member() -> Result<(), Box<dyn std::error
     WarcWriter::new(&mut expected).write(&raw)?;
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     let mut sink = writer.start_warc("data.warc")?;
-    let written = sink.write(&raw)?;
+    let written = sink.write_record(&raw)?;
     sink.finish()?;
     let bytes = writer
         .finish_unchecked(DataPackageBuilder::default())?
@@ -1122,16 +1122,31 @@ fn writer_rejects_nonconforming_layout_and_reserved_custom_resources() {
 }
 
 #[test]
-fn writer_rejects_invalid_warc_names_and_gzip_streams() {
+fn writer_validates_warc_names_not_content() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.add_warc("data.bin", &b"data"[..]),
         Err(writer::Error::InvalidWarcName(_))
     ));
-    assert!(matches!(
-        writer.add_warc("data.warc.gz", &b"not gzip"[..]),
-        Err(writer::Error::InvalidGzip(_))
-    ));
+    writer.add_warc("data.warc.gz", &b"not gzip"[..])?;
+    let bytes = writer
+        .finish_unchecked(DataPackageBuilder::default())?
+        .into_inner();
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(validate::ValidationOptions {
+        content: true,
+        ..validate::ValidationOptions::default()
+    })?;
+
+    assert!(
+        report
+            .content
+            .expect("content layer should run")
+            .iter()
+            .any(|problem| problem.path == "archive/data.warc.gz"
+                && problem.kind == validate::ContentKind::Warc)
+    );
+    Ok(())
 }
 
 #[test]

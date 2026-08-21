@@ -104,6 +104,10 @@ impl<W> HashingWriter<W> {
     pub(super) fn finish(self) -> (Sha256Digest, u64) {
         (Sha256Digest(self.hasher.finalize().into()), self.bytes)
     }
+
+    pub(super) const fn bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
 impl<W: Write> Write for HashingWriter<W> {

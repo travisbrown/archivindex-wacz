@@ -254,7 +254,7 @@ impl<'a> WarcToWacz<'a> {
             collect_metadata(&spool, &record)?;
             let capture = capture_info(&record, self.title_generator.as_deref_mut());
             let raw = record.into_raw()?;
-            let written = warc.write(&raw)?;
+            let written = warc.write_record(&raw)?;
             records += 1;
 
             if let Some(capture) = capture {
