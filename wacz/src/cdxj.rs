@@ -38,7 +38,7 @@ pub enum Error {
         context: LineContext,
         /// Parsing or I/O failure.
         #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: InvalidLineSource,
     },
     /// The line does not contain the three space-separated parts of a CDXJ item.
     #[error("truncated CDXJ line: {0}")]
@@ -56,6 +56,17 @@ pub enum Error {
     /// A URL to be transformed into a searchable key has no host.
     #[error("URL has no host: {0}")]
     MissingHost(String),
+}
+
+/// The underlying failure for a line read by [`IndexReader`].
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidLineSource {
+    /// The line was read successfully but was not a valid CDXJ item.
+    #[error(transparent)]
+    Item(Box<Error>),
+    /// The line-oriented input could not be read.
+    #[error("failed to read CDXJ input")]
+    Io(#[source] std::io::Error),
 }
 
 /// A 14- or 17-digit CDX timestamp (`YYYYmmddHHMMSS[sss]`, always UTC).
@@ -461,13 +472,13 @@ impl<R: BufRead> Iterator for IndexReader<R> {
                     .map(IntoBoundedStatic::into_static)
                     .map_err(|source| Error::InvalidLine {
                         context: location,
-                        source: Box::new(source),
+                        source: InvalidLineSource::Item(Box::new(source)),
                     }),
             ),
             Ok(None) => None,
             Err(error) => Some(Err(Error::InvalidLine {
                 context: error.context,
-                source: Box::new(error.source),
+                source: InvalidLineSource::Io(error.source),
             })),
         }
     }
