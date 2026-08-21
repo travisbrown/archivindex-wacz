@@ -546,7 +546,7 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(
         summary_lines[0],
-        "!meta 0 {\"format\": \"cdxj-gzip-1.0\", \"filename\": \"index.cdx.gz\"}"
+        "!meta 0 {\"format\":\"cdxj-gzip-1.0\",\"filename\":\"index.cdx.gz\"}"
     );
     assert_eq!(summary_lines.len(), 4);
 
@@ -895,7 +895,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
     let summary_lines = summary.lines().collect::<Vec<_>>();
 
     assert_eq!(summary_lines.len(), 2);
-    assert!(summary_lines[1].starts_with("com,example)/?a={b} 20201007212236 {\"offset\": "));
+    assert!(summary_lines[1].starts_with("com,example)/?a={b} 20201007212236 {\"offset\":"));
 
     drop(archive);
     let mut reader = WaczReader::new(Cursor::new(&wacz))?;

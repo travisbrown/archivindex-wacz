@@ -12,7 +12,7 @@ use super::resource::options_for;
 use super::{Error, IndexFormat, WaczWriter};
 use crate::cdxj;
 use crate::digest::Sha256Digest;
-use crate::zipnum::{self, FORMAT, SummaryEntry, SummaryHeader};
+use crate::zipnum::{FORMAT, SummaryEntry, SummaryHeader};
 use crate::{GZIP_EXTENSION, INDEXES_PREFIX};
 
 impl<W: Write + Seek> WaczWriter<W> {
@@ -92,7 +92,8 @@ impl<W: Write + Seek> WaczWriter<W> {
             format: Cow::Borrowed(FORMAT),
             filename: Cow::Borrowed(&data_name),
         };
-        let header = zipnum::to_json(&header).expect("summary header serialization cannot fail");
+        let header =
+            serde_json::to_string(&header).expect("summary header serialization cannot fail");
         writeln!(summary, "!meta 0 {header}")?;
         let data_options = options_for(&data_path, self.config.zip_compression_level);
         self.add_member(&data_path, data_options, |writer| {
@@ -126,8 +127,8 @@ impl<W: Write + Seek> WaczWriter<W> {
                         length,
                         digest,
                     };
-                    let entry =
-                        zipnum::to_json(&entry).expect("summary entry serialization cannot fail");
+                    let entry = serde_json::to_string(&entry)
+                        .expect("summary entry serialization cannot fail");
                     writeln!(summary, "{prefix} {entry}")?;
                     offset += length;
                     block.clear();
