@@ -255,6 +255,31 @@ fn round_trip_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn records_stream_directly_into_a_warc_member() -> Result<(), Box<dyn std::error::Error>> {
+    let record: Record = Record::response(URL, capture_time())?.body(BODY)?;
+    let raw = record.into_raw()?;
+    let mut expected = Vec::new();
+    WarcWriter::new(&mut expected).write(&raw)?;
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    let mut sink = writer.start_warc("data.warc", 6)?;
+    let written = sink.write(&raw)?;
+    sink.finish()?;
+    let bytes = writer
+        .finish_unchecked(PackageMetadata::default())?
+        .into_inner();
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+
+    assert_eq!(written.offset, 0);
+    assert_eq!(written.length, expected.len() as u64);
+    let mut stored = Vec::new();
+    reader
+        .raw_member("archive/data.warc")?
+        .read_to_end(&mut stored)?;
+    assert_eq!(stored, expected);
+    Ok(())
+}
+
+#[test]
 fn round_trip_with_gzip_warc_member() -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&warc_bytes()?)?;
@@ -491,7 +516,12 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     let conforming = conforming_items(&items)?;
-    writer.add_index("index.cdx", &conforming)?;
+    let mut lines = conforming
+        .iter()
+        .map(|item| format!("{item}\n"))
+        .collect::<Vec<_>>();
+    lines.sort_unstable();
+    writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat()))?;
     let wacz = writer
         .finish_unchecked(PackageMetadata::default())?
         .into_inner();

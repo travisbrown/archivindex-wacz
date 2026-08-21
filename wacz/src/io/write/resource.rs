@@ -66,7 +66,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         Ok(())
     }
 
-    fn validate_path(&self, path: &str) -> Result<(), Error> {
+    pub(super) fn validate_path(&self, path: &str) -> Result<(), Error> {
         if !crate::paths::is_safe(path) {
             return Err(Error::InvalidMemberPath(path.to_owned()));
         }
@@ -92,7 +92,7 @@ pub(super) struct HashingWriter<W> {
 }
 
 impl<W> HashingWriter<W> {
-    fn new(underlying: W) -> Self {
+    pub(super) fn new(underlying: W) -> Self {
         Self {
             underlying,
             hasher: sha2::Sha256::new(),
@@ -100,7 +100,7 @@ impl<W> HashingWriter<W> {
         }
     }
 
-    fn finish(self) -> (Sha256Digest, u64) {
+    pub(super) fn finish(self) -> (Sha256Digest, u64) {
         (Sha256Digest(self.hasher.finalize().into()), self.bytes)
     }
 }
@@ -150,7 +150,7 @@ fn file_name(path: &str) -> &str {
 /// The conventional WACZ path uses camel case, while Data Package resource names permit only
 /// lowercase ASCII. The path remains `pages/extraPages.jsonl`; only its manifest identifier is
 /// normalized.
-fn resource_name(path: &str) -> &str {
+pub(super) fn resource_name(path: &str) -> &str {
     match file_name(path) {
         "extraPages.jsonl" => "extra-pages.jsonl",
         name => name,

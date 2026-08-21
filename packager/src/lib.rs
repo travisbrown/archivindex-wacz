@@ -5,8 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::{BufRead, BufWriter, Read, Seek, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use archivindex_wacz::ExtraProperties;
@@ -19,7 +18,7 @@ use archivindex_wacz::io::write::{
 use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::io::write::{
-    DEFAULT_GZIP_COMPRESSION_LEVEL, MAX_GZIP_COMPRESSION_LEVEL, WarcWriter, Written,
+    DEFAULT_GZIP_COMPRESSION_LEVEL, MAX_GZIP_COMPRESSION_LEVEL, Written,
 };
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
@@ -28,6 +27,7 @@ use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
+use rusqlite::{Connection, params};
 use url::Url;
 
 pub use archivindex_wacz::io::write::IndexFormat;
@@ -79,6 +79,12 @@ pub enum Error {
     /// The requested WACZ ZIP compression level is outside the supported range.
     #[error("ZIP compression level must be between 1 and 264, got {0}")]
     InvalidZipCompressionLevel(u32),
+    /// Temporary conversion metadata could not be stored or queried.
+    #[error("conversion metadata spool error")]
+    Spool(#[from] rusqlite::Error),
+    /// A timestamp read from the private conversion spool is invalid.
+    #[error("invalid timestamp in conversion metadata spool: {0}")]
+    SpoolDate(#[from] chrono::ParseError),
 }
 
 /// A non-fatal condition encountered while converting a WARC file.
@@ -227,10 +233,10 @@ impl<'a> WarcToWacz<'a> {
 
         if input_gzip {
             let reader = WarcReader::from_path_gzip(&self.input)?;
-            self.convert(reader, warc_name, output_gzip)
+            self.convert(reader, warc_name)
         } else {
             let reader = WarcReader::from_path(&self.input)?;
-            self.convert(reader, warc_name, output_gzip)
+            self.convert(reader, warc_name)
         }
     }
 
@@ -238,81 +244,42 @@ impl<'a> WarcToWacz<'a> {
         &mut self,
         reader: WarcReader<R>,
         warc_name: &str,
-        output_gzip: bool,
     ) -> Result<ConversionSummary, Error> {
-        let mut warc = WarcWriter::new(BufWriter::new(tempfile::tempfile()?)).with_digests();
-        let mut items = Vec::new();
-        let mut pages = Vec::new();
-        let mut annotations = HashMap::new();
-        let mut package_info = PackageInfo::default();
-        let mut records = 0;
-
-        for record in reader.iter_records::<NoExtension>() {
-            let record = record?;
-            package_info.inspect(&record);
-            collect_metadata(&record, &mut annotations);
-            let capture = capture_info(&record, self.title_generator.as_deref_mut());
-            let raw = record.into_raw()?;
-            let written = if output_gzip {
-                warc.write_gzip_with_level(&raw, self.gzip_compression_level)?
-            } else {
-                warc.write(&raw)?
-            };
-            records += 1;
-
-            if let Some(capture) = capture {
-                items.push(capture.item(warc_name, &written));
-                pages.push(capture.page());
-            }
-        }
-
-        pages.retain_mut(|page| {
-            let annotation = annotations.get(&page.record_id);
-            if package_info.pages_from_metadata
-                && annotation.is_none_or(|item| item.page_url.is_none())
-            {
-                return false;
-            }
-            if let Some(annotation) = annotation {
-                if let Some(title) = &annotation.title {
-                    page.title = Some(title.clone());
-                }
-                if let Some(url) = &annotation.page_url {
-                    page.url.clone_from(url);
-                }
-                page.extra = annotation.via;
-            }
-            true
-        });
-
-        let mut file = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
-        file.rewind()?;
         let writer_config = WriterConfig {
             index_format: self.index_format,
             zip_compression_level: self.zip_compression_level,
             ..WriterConfig::default()
         };
         let mut wacz = WaczWriter::create_with_config(&self.output, writer_config)?;
-        wacz.add_warc(warc_name, file)?;
-        // Malformed or payload-less WARC responses are retained by conversion. Their CDXJ entries
-        // intentionally use the reader-compatible lenient field model.
-        wacz.add_index_lenient(INDEX_NAME, &items)?;
-        let page_entries = pages
-            .iter()
-            .filter(|page| !page.extra)
-            .map(PageDraft::as_page)
-            .collect::<Vec<_>>();
-        let extra_page_entries = pages
-            .iter()
-            .filter(|page| page.extra)
-            .map(PageDraft::as_page)
-            .collect::<Vec<_>>();
-        wacz.add_pages(&PageListHeader::default(), &page_entries)?;
-        if !extra_page_entries.is_empty() {
-            wacz.add_page_list(
+        let mut warc = wacz.start_warc(warc_name, self.gzip_compression_level)?;
+        let spool = ConversionSpool::new()?;
+        let mut package_info = PackageInfo::default();
+        let mut records = 0;
+
+        for record in reader.iter_records::<NoExtension>() {
+            let record = record?;
+            package_info.inspect(&record);
+            spool.collect_metadata(&record)?;
+            let capture = capture_info(&record, self.title_generator.as_deref_mut());
+            let raw = record.into_raw()?;
+            let written = warc.write(&raw)?;
+            records += 1;
+
+            if let Some(capture) = capture {
+                let item = capture.item(warc_name, &written);
+                let page = capture.page();
+                spool.add_capture(&item, &page)?;
+            }
+        }
+
+        warc.finish()?;
+        let mut outputs = spool.finish(package_info.pages_from_metadata)?;
+        wacz.add_sorted_index_file(INDEX_NAME, BufReader::new(&mut outputs.index))?;
+        wacz.add_page_list_file("pages.jsonl", BufReader::new(&mut outputs.pages))?;
+        if outputs.extra_pages > 0 {
+            wacz.add_page_list_file(
                 EXTRA_PAGES_NAME,
-                &extra_page_list_header(),
-                &extra_page_entries,
+                BufReader::new(&mut outputs.extra_page_file),
             )?;
         }
         let warnings = package_info.warnings();
@@ -323,17 +290,15 @@ impl<'a> WarcToWacz<'a> {
         if let Some(description) = package_info.description {
             metadata = metadata.description(description);
         }
-        if let Some(page) = page_entries.first() {
-            metadata = metadata
-                .main_page_url(page.url.clone().into_owned())
-                .main_page_date(page.ts);
+        if let Some((url, date)) = outputs.main_page {
+            metadata = metadata.main_page_url(url).main_page_date(date);
         }
         wacz.finish(metadata)?.flush()?;
 
         Ok(ConversionSummary {
             records,
-            captures: items.len(),
-            pages: pages.len(),
+            captures: outputs.captures,
+            pages: outputs.pages_count,
             warnings,
         })
     }
@@ -426,7 +391,6 @@ impl CaptureInfo {
             date: self.date,
             size: self.size,
             title: self.generated_title,
-            extra: false,
         }
     }
 }
@@ -438,21 +402,180 @@ struct PageDraft {
     date: WarcDate,
     size: Option<u64>,
     title: Option<String>,
-    extra: bool,
 }
 
-impl PageDraft {
-    fn as_page(&self) -> Page<'_> {
-        Page {
-            url: Cow::Borrowed(&self.url),
-            ts: self.date.date_time(),
-            id: None,
-            title: self.title.as_deref().map(Cow::Borrowed),
-            text: None,
-            size: self.size,
-            extra: ExtraProperties::default(),
-        }
+struct ConversionSpool {
+    _file: tempfile::NamedTempFile,
+    connection: Connection,
+}
+
+struct SpoolOutputs {
+    index: std::fs::File,
+    pages: std::fs::File,
+    extra_page_file: std::fs::File,
+    captures: usize,
+    pages_count: usize,
+    extra_pages: usize,
+    main_page: Option<(String, chrono::DateTime<chrono::Utc>)>,
+}
+
+impl ConversionSpool {
+    fn new() -> Result<Self, Error> {
+        let file = tempfile::NamedTempFile::new()?;
+        let connection = Connection::open(file.path())?;
+        connection.execute_batch(
+            "CREATE TABLE cdx (line TEXT PRIMARY KEY);
+             CREATE TABLE pages (
+               sequence INTEGER PRIMARY KEY,
+               record_id TEXT NOT NULL,
+               url TEXT NOT NULL,
+               date TEXT NOT NULL,
+               size TEXT,
+               title TEXT
+             );
+             CREATE TABLE annotations (
+               record_id TEXT PRIMARY KEY,
+               title TEXT,
+               via INTEGER NOT NULL,
+               page_url TEXT
+             );",
+        )?;
+        Ok(Self {
+            _file: file,
+            connection,
+        })
     }
+
+    fn add_capture(&self, item: &cdxj::Item<'_>, page: &PageDraft) -> Result<(), rusqlite::Error> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO cdx (line) VALUES (?1)",
+            [format!("{item}\n")],
+        )?;
+        self.connection.execute(
+            "INSERT INTO pages (record_id, url, date, size, title) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                page.record_id,
+                page.url,
+                page.date.date_time().to_rfc3339(),
+                page.size.map(|value| value.to_string()),
+                page.title,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn collect_metadata(&self, record: &Record) -> Result<(), rusqlite::Error> {
+        let Record::Metadata {
+            header,
+            body: FieldsBlock::Fields(fields),
+        } = record
+        else {
+            return Ok(());
+        };
+        let title = fields
+            .get(&MetadataField::Dcmi(DcmiTerm::Title))
+            .filter(|title| !title.is_empty());
+        let via = i64::from(fields.via().is_some());
+        let page_url = fields.get(&MetadataField::Other("pageurl".to_owned()));
+        for record_id in header.refers_to.iter().chain(&header.concurrent_to) {
+            self.connection.execute(
+                "INSERT INTO annotations (record_id, title, via, page_url)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(record_id) DO UPDATE SET
+                   title = COALESCE(excluded.title, annotations.title),
+                   via = MAX(excluded.via, annotations.via),
+                   page_url = COALESCE(excluded.page_url, annotations.page_url)",
+                params![record_id.as_str(), title, via, page_url],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish(&self, pages_from_metadata: bool) -> Result<SpoolOutputs, Error> {
+        let mut index = tempfile::tempfile()?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT line FROM cdx ORDER BY line")?;
+        let lines = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for line in lines {
+            index.write_all(line?.as_bytes())?;
+        }
+        index.rewind()?;
+        let captures = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM pages", [], |row| row.get::<_, i64>(0))?;
+        let captures = usize::try_from(captures).expect("a non-negative SQLite row count");
+
+        let mut pages = tempfile::tempfile()?;
+        let mut extra_page_file = tempfile::tempfile()?;
+        write_json_line(&mut pages, &PageListHeader::default())?;
+        write_json_line(&mut extra_page_file, &extra_page_list_header())?;
+        let mut statement = self.connection.prepare(
+            "SELECT p.url, p.date, p.size, COALESCE(a.title, p.title),
+                    COALESCE(a.via, 0), a.page_url
+             FROM pages p LEFT JOIN annotations a USING (record_id)
+             ORDER BY p.sequence",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut pages_count = 0;
+        let mut extra_pages = 0;
+        let mut main_page = None;
+        while let Some(row) = rows.next()? {
+            let page_url = row.get::<_, Option<String>>(5)?;
+            if pages_from_metadata && page_url.is_none() {
+                continue;
+            }
+            let url = page_url.unwrap_or(row.get(0)?);
+            let ts = row.get::<_, String>(1)?.parse()?;
+            let size = row
+                .get::<_, Option<String>>(2)?
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let page = Page {
+                id: Some(Cow::Owned(archivindex_wacz::pages::synthetic_id(
+                    &ts, &url, 24,
+                ))),
+                url: Cow::Owned(url.clone()),
+                ts,
+                title: row.get::<_, Option<String>>(3)?.map(Cow::Owned),
+                text: None,
+                size,
+                extra: ExtraProperties::default(),
+            };
+            let extra = row.get::<_, i64>(4)? != 0;
+            let output = if extra {
+                &mut extra_page_file
+            } else {
+                &mut pages
+            };
+            write_json_line(output, &page)?;
+            pages_count += 1;
+            if extra {
+                extra_pages += 1;
+            } else if main_page.is_none() {
+                main_page = Some((url, ts));
+            }
+        }
+        pages.rewind()?;
+        extra_page_file.rewind()?;
+        Ok(SpoolOutputs {
+            index,
+            pages,
+            extra_page_file,
+            captures,
+            pages_count,
+            extra_pages,
+            main_page,
+        })
+    }
+}
+
+fn write_json_line(writer: &mut impl Write, value: &impl serde::Serialize) -> Result<(), Error> {
+    serde_json::to_writer(&mut *writer, value)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    writer.write_all(b"\n")?;
+    Ok(())
 }
 
 fn capture_info(
@@ -537,44 +660,6 @@ fn capture_info_from_http(
         size: (!revisit).then_some(entity.len() as u64),
         generated_title,
     })
-}
-
-#[derive(Default)]
-struct MetadataAnnotation {
-    title: Option<String>,
-    via: bool,
-    page_url: Option<String>,
-}
-
-fn collect_metadata(record: &Record, annotations: &mut HashMap<String, MetadataAnnotation>) {
-    let Record::Metadata {
-        header,
-        body: FieldsBlock::Fields(fields),
-    } = record
-    else {
-        return;
-    };
-    let title = fields
-        .get(&MetadataField::Dcmi(DcmiTerm::Title))
-        .filter(|title| !title.is_empty())
-        .map(str::to_owned);
-    let via = fields.via().is_some();
-    let page_url = fields
-        .get(&MetadataField::Other("pageurl".to_owned()))
-        .map(str::to_owned);
-
-    for record_id in header.refers_to.iter().chain(&header.concurrent_to) {
-        let annotation = annotations
-            .entry(record_id.as_str().to_owned())
-            .or_default();
-        if title.is_some() {
-            annotation.title.clone_from(&title);
-        }
-        annotation.via |= via;
-        if page_url.is_some() {
-            annotation.page_url.clone_from(&page_url);
-        }
-    }
 }
 
 fn extra_page_list_header() -> PageListHeader<'static> {

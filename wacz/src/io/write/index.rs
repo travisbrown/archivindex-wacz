@@ -1,7 +1,8 @@
 //! Plain and `ZipNum` CDXJ index writing.
 
-use std::fmt::Write as _;
-use std::io::{Seek, Write};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::io::{BufRead, BufReader, Seek, Write};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -24,11 +25,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
-        let items = items.into_iter().collect::<Vec<_>>();
-        for item in &items {
-            item.fields.validate()?;
-        }
-        self.write_index(name, items)
+        self.write_index(name, items, |item| Ok(item.fields.validate()?))
     }
 
     /// Write an index while explicitly allowing entries that omit normative CDXJ fields.
@@ -40,93 +37,218 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
-        self.write_index(name, items)
+        self.write_index(name, items, |_| Ok(()))
+    }
+
+    /// Add an already sorted, deduplicated CDXJ file without retaining the collection in memory.
+    pub fn add_sorted_index_file<R: BufRead + Seek>(
+        &mut self,
+        name: &str,
+        mut reader: R,
+    ) -> Result<(), Error> {
+        if !crate::paths::valid_index_name(name) {
+            return Err(Error::InvalidIndexName(name.to_owned()));
+        }
+        for item in cdxj::IndexReader::new(&mut reader) {
+            item.map_err(Error::InvalidIndex)?;
+        }
+        reader.rewind()?;
+        match self.config.index_format {
+            IndexFormat::Plain => {
+                let path = format!("{INDEXES_PREFIX}{name}");
+                self.add_typed_resource(&path, reader)
+            }
+            IndexFormat::ZipNum { lines } => self.add_zipnum_stream(name, reader, lines),
+        }
     }
 
     fn write_index<'a, F: serde::Serialize + 'a, I: IntoIterator<Item = &'a cdxj::Item<'a, F>>>(
         &mut self,
         name: &str,
         items: I,
+        validate: impl Fn(&cdxj::Item<'a, F>) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut rendered = items
-            .into_iter()
-            .map(|item| format!("{item}\n"))
-            .collect::<Vec<_>>();
-        rendered.sort_unstable();
-        rendered.dedup();
-
-        match self.config.index_format {
-            IndexFormat::Plain => {
-                let path = format!("{INDEXES_PREFIX}{name}");
-                let options = options_for(&path, self.config.zip_compression_level)?;
-                self.add_member(&path, options, |writer| {
-                    for line in &rendered {
-                        writer.write_all(line.as_bytes())?;
-                    }
-                    Ok(())
-                })
-            }
-            IndexFormat::ZipNum { lines } => self.add_zipnum_index(name, &rendered, lines),
+        let mut sorter = LineSorter::new();
+        for item in items {
+            validate(item)?;
+            sorter.push(format!("{item}\n"))?;
         }
+        self.add_sorted_index_file(name, BufReader::new(sorter.finish()?))
     }
 
-    fn add_zipnum_index(
+    fn add_zipnum_stream(
         &mut self,
         name: &str,
-        rendered: &[String],
-        lines: usize,
+        mut reader: impl BufRead,
+        lines_per_block: usize,
     ) -> Result<(), Error> {
         let data_name = format!("{name}{GZIP_EXTENSION}");
         let idx_name = format!("{}.idx", name.strip_suffix(".cdx").unwrap_or(name));
         let data_path = format!("{INDEXES_PREFIX}{data_name}");
         let idx_path = format!("{INDEXES_PREFIX}{idx_name}");
-        let escaped_data_name =
-            serde_json::to_string(&data_name).expect("string serialization cannot fail");
-        let mut summary = String::new();
+        let escaped = serde_json::to_string(&data_name).expect("string serialization cannot fail");
+        let mut summary = tempfile::tempfile()?;
         writeln!(
             summary,
-            "!meta 0 {{\"format\": \"{ZIPNUM_FORMAT}\", \"filename\": {escaped_data_name}}}"
-        )
-        .expect("writing to a String cannot fail");
-
+            "!meta 0 {{\"format\": \"{ZIPNUM_FORMAT}\", \"filename\": {escaped}}}"
+        )?;
         let data_options = options_for(&data_path, self.config.zip_compression_level)?;
         self.add_member(&data_path, data_options, |writer| {
             let mut offset = 0_u64;
-            for block in rendered.chunks(lines.max(1)) {
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-                for line in block {
-                    encoder.write_all(line.as_bytes())?;
+            let mut block = Vec::with_capacity(lines_per_block.max(1));
+            loop {
+                let mut line = String::new();
+                let eof = reader.read_line(&mut line)? == 0;
+                if !eof {
+                    block.push(line);
                 }
-                let compressed = encoder.finish()?;
-                let length = compressed.len();
-                let digest = Sha256Digest::compute(&compressed);
-                writeln!(
-                    summary,
-                    "{} {{\"offset\": {offset}, \"length\": {length}, \"digest\": \"{digest}\"}}",
-                    line_prefix(&block[0])
-                )
-                .expect("writing to a String cannot fail");
-                writer.write_all(&compressed)?;
-                offset += length as u64;
-            }
-
-            if offset == 0 {
-                let compressed = GzEncoder::new(Vec::new(), Compression::default()).finish()?;
-                writer.write_all(&compressed)?;
+                if block.len() == lines_per_block.max(1) || (!block.is_empty() && eof) {
+                    let prefix = line_prefix(&block[0]).to_owned();
+                    let mut compressed = tempfile::tempfile()?;
+                    {
+                        let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
+                        for value in &block {
+                            encoder.write_all(value.as_bytes())?;
+                        }
+                        encoder.finish()?;
+                    }
+                    let length = compressed.stream_position()?;
+                    compressed.rewind()?;
+                    let (digest, copied) = Sha256Digest::from_reader(&mut compressed)?;
+                    compressed.rewind()?;
+                    std::io::copy(&mut compressed, writer)?;
+                    debug_assert_eq!(length, copied);
+                    writeln!(summary, "{prefix} {{\"offset\": {offset}, \"length\": {length}, \"digest\": \"{digest}\"}}")?;
+                    offset += length;
+                    block.clear();
+                }
+                if eof {
+                    if offset == 0 {
+                        let compressed = GzEncoder::new(Vec::new(), Compression::default()).finish()?;
+                        writer.write_all(&compressed)?;
+                    }
+                    break;
+                }
             }
             Ok(())
         })?;
-
-        let idx_options = options_for(&idx_path, self.config.zip_compression_level)?;
-        self.add_member(&idx_path, idx_options, |writer| {
-            writer.write_all(summary.as_bytes())?;
-            Ok(())
-        })
+        summary.rewind()?;
+        self.add_typed_resource(&idx_path, summary)
     }
+}
+
+const SORT_CHUNK_LINES: usize = 4096;
+const SORT_MERGE_FAN_IN: usize = 64;
+
+struct LineSorter {
+    chunk: Vec<String>,
+    runs: Vec<std::fs::File>,
+}
+
+impl LineSorter {
+    fn new() -> Self {
+        Self {
+            chunk: Vec::with_capacity(SORT_CHUNK_LINES),
+            runs: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, line: String) -> Result<(), std::io::Error> {
+        self.chunk.push(line);
+        if self.chunk.len() == SORT_CHUNK_LINES {
+            self.flush_run()?;
+        }
+        Ok(())
+    }
+
+    fn flush_run(&mut self) -> Result<(), std::io::Error> {
+        self.chunk.sort_unstable();
+        self.chunk.dedup();
+        let mut run = tempfile::tempfile()?;
+        for line in self.chunk.drain(..) {
+            run.write_all(line.as_bytes())?;
+        }
+        run.rewind()?;
+        self.runs.push(run);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<std::fs::File, std::io::Error> {
+        if !self.chunk.is_empty() || self.runs.is_empty() {
+            self.flush_run()?;
+        }
+        let mut runs = self.runs;
+        while runs.len() > SORT_MERGE_FAN_IN {
+            let mut source = runs.into_iter();
+            let mut merged = Vec::new();
+            loop {
+                let group = source.by_ref().take(SORT_MERGE_FAN_IN).collect::<Vec<_>>();
+                if group.is_empty() {
+                    break;
+                }
+                merged.push(merge_runs(group)?);
+            }
+            runs = merged;
+        }
+        merge_runs(runs)
+    }
+}
+
+fn merge_runs(runs: Vec<std::fs::File>) -> Result<std::fs::File, std::io::Error> {
+    let mut readers = runs.into_iter().map(BufReader::new).collect::<Vec<_>>();
+    let mut heap = BinaryHeap::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? != 0 {
+            heap.push(Reverse((line, index)));
+        }
+    }
+    let mut output = tempfile::tempfile()?;
+    let mut previous = String::new();
+    while let Some(Reverse((line, index))) = heap.pop() {
+        if line != previous {
+            output.write_all(line.as_bytes())?;
+            previous.clone_from(&line);
+        }
+        let mut next = String::new();
+        if readers[index].read_line(&mut next)? != 0 {
+            heap.push(Reverse((next, index)));
+        }
+    }
+    output.rewind()?;
+    Ok(output)
 }
 
 fn line_prefix(line: &str) -> &str {
     line.match_indices(' ')
         .nth(1)
         .map_or_else(|| line.trim_end(), |(index, _)| &line[..index])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use super::*;
+
+    #[test]
+    fn external_sort_crosses_run_boundaries_and_deduplicates() {
+        let mut sorter = LineSorter::new();
+        for value in (0..5000).rev() {
+            sorter.push(format!("{value:04}\n")).unwrap();
+        }
+        sorter.push("2500\n".to_owned()).unwrap();
+        let mut output = String::new();
+        sorter
+            .finish()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        let lines = output.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 5000);
+        assert_eq!(lines.first(), Some(&"0000"));
+        assert_eq!(lines.last(), Some(&"4999"));
+        assert!(lines.is_sorted());
+    }
 }

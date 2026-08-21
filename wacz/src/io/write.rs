@@ -1,7 +1,7 @@
 //! WACZ writer facade and configuration.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use zip::ZipWriter;
@@ -13,8 +13,10 @@ use crate::{ARCHIVE_PREFIX, PAGES_PREFIX};
 mod index;
 mod manifest;
 mod resource;
+mod warc;
 
 use resource::options_for;
+pub use warc::WarcSink;
 
 /// Short name for manifest metadata supplied to [`WaczWriter::finish`].
 ///
@@ -83,12 +85,18 @@ pub enum Error {
     /// The ZIP container could not be written.
     #[error(transparent)]
     Zip(#[from] zip::result::ZipError),
+    /// A raw WARC record could not be written into a streaming member.
+    #[error(transparent)]
+    Warc(#[from] archivindex_warc::io::write::Error),
     /// A page list could not be written.
     #[error(transparent)]
     Pages(#[from] crate::pages::Error),
     /// The data package manifest could not be serialized.
     #[error("invalid data package manifest")]
     Manifest(#[source] serde_json::Error),
+    /// A pre-rendered CDXJ index is invalid.
+    #[error("invalid CDXJ index")]
+    InvalidIndex(#[source] crate::cdxj::Error),
     /// A WARC path has no usable UTF-8 file name.
     #[error("invalid WARC file name: {}", .0.display())]
     InvalidFileName(PathBuf),
@@ -110,6 +118,9 @@ pub enum Error {
     /// A gzip-named WARC is not a valid gzip stream.
     #[error("invalid gzip WARC: {0}")]
     InvalidGzip(#[source] std::io::Error),
+    /// A WARC-record sink was configured with an invalid gzip compression level.
+    #[error("gzip compression level must be between 0 and 9, got {0}")]
+    InvalidGzipCompressionLevel(u32),
     /// A path-based WACZ output does not use the required extension.
     #[error("WACZ output path must end in .wacz: {}", .0.display())]
     InvalidWaczExtension(PathBuf),
@@ -260,5 +271,20 @@ impl<W: Write + Seek> WaczWriter<W> {
                 writer, header, pages, id_length,
             )?)
         })
+    }
+
+    /// Add a pre-rendered page-list file after validating it in a first pass.
+    pub fn add_page_list_file<R: BufRead + Seek>(
+        &mut self,
+        name: &str,
+        mut reader: R,
+    ) -> Result<(), Error> {
+        let mut parsed = pages::PageListReader::new(&mut reader)?;
+        for page in &mut parsed {
+            page?;
+        }
+        reader.rewind()?;
+        let path = format!("{PAGES_PREFIX}{name}");
+        self.add_typed_resource(&path, reader)
     }
 }
