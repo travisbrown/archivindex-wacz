@@ -26,6 +26,13 @@ use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
 use fluent_uri::Uri;
 
+fn gzip_config() -> Config {
+    Config {
+        gzip_warc: true,
+        ..Config::default()
+    }
+}
+
 struct PackagedWarc {
     _directory: tempfile::TempDir,
     reader: WaczReader<std::io::BufReader<std::fs::File>>,
@@ -169,7 +176,7 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
         format!("http://127.0.0.1:{port}/missing"),
     ];
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive(&urls, Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -463,7 +470,7 @@ fn event_sink_can_cancel_and_finalize_a_partial_archive() -> Result<(), Box<dyn 
     ];
     let archiver = Archiver::new(Config {
         concurrency: 1,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let mut events = Vec::new();
@@ -502,7 +509,7 @@ fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
 
     let archiver = Archiver::new(Config {
         gzip_warc: false,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -556,7 +563,7 @@ fn archive_records_unreachable_urls_as_failures() -> Result<(), Box<dyn std::err
     let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
 
@@ -581,7 +588,7 @@ fn archive_stops_following_at_the_redirect_limit() -> Result<(), Box<dyn std::er
 
     let archiver = Archiver::new(Config {
         max_redirects: 0,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -608,9 +615,24 @@ fn archive_to_path_refuses_an_existing_output() -> Result<(), Box<dyn std::error
     let path = directory.path().join("test.warc.gz");
     std::fs::write(&path, b"existing")?;
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
 
     assert!(archiver.archive_to_path::<_, _, &str>([], &path).is_err());
+
+    Ok(())
+}
+
+#[test]
+fn archive_to_path_refuses_an_existing_partial() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("test.warc.gz");
+    let partial_path = directory.path().join("test.warc.gz.partial");
+    std::fs::write(&partial_path, b"existing partial")?;
+
+    let archiver = Archiver::new(gzip_config())?;
+
+    assert!(archiver.archive_to_path::<_, _, &str>([], &path).is_err());
+    assert_eq!(std::fs::read(partial_path)?, b"existing partial");
 
     Ok(())
 }
@@ -620,12 +642,29 @@ fn archive_to_path_writes_a_collection() -> Result<(), Box<dyn std::error::Error
     let (port, server) = serve(1)?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("test.warc.gz");
+    let partial_path = directory.path().join("test.warc.gz.partial");
 
-    let archiver = Archiver::new(Config::default())?;
-    let summary = archiver.archive_to_path([format!("http://127.0.0.1:{port}/")], &path)?;
+    let archiver = Archiver::new(gzip_config())?;
+    let mut saw_partial = false;
+    let mut events = |event: CaptureEvent<'_>| {
+        if matches!(event, CaptureEvent::Started { .. }) {
+            saw_partial = true;
+            assert!(partial_path.exists());
+            assert!(std::fs::metadata(&partial_path).is_ok_and(|metadata| metadata.len() > 0));
+            assert!(!path.exists());
+        }
+        CaptureControl::Continue
+    };
+    let summary = archiver.archive_to_path_with_events(
+        [format!("http://127.0.0.1:{port}/")],
+        &path,
+        &mut events,
+    )?;
     server.join().expect("server thread should not panic");
 
     assert!(summary.is_complete());
+    assert!(saw_partial);
+    assert!(!partial_path.exists());
 
     let mut reader = package_path(&path)?;
 
@@ -642,7 +681,7 @@ fn recorded_request_matches_the_wire_bytes() -> Result<(), Box<dyn std::error::E
     let archiver = Archiver::new(Config {
         user_agent: "fidelity-test/1.0".into(),
         gzip_warc: false,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -670,7 +709,7 @@ fn archive_records_chunked_responses_verbatim() -> Result<(), Box<dyn std::error
 
     let archiver = Archiver::new(Config {
         gzip_warc: false,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -710,7 +749,7 @@ fn archive_rejects_credentialed_urls_without_leaking_the_secret()
     // Nothing listens on the port: the URL is rejected before any request is made.
     let url = "http://user:secret@127.0.0.1:9/";
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([url], Cursor::new(&mut bytes))?;
 
@@ -732,7 +771,7 @@ fn archive_records_hops_captured_before_a_failure() -> Result<(), Box<dyn std::e
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/dead/{dead_port}");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -776,7 +815,7 @@ fn archive_treats_multiple_choices_and_not_modified_as_final()
         format!("http://127.0.0.1:{port}/not-modified"),
     ];
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive(&urls, Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -815,7 +854,7 @@ fn archive_preserves_a_nonstandard_reason_phrase() -> Result<(), Box<dyn std::er
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/nonstandard");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -842,7 +881,7 @@ fn archive_preserves_repeated_set_cookie_headers() -> Result<(), Box<dyn std::er
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/cookies");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -868,7 +907,7 @@ fn archive_records_binary_bodies() -> Result<(), Box<dyn std::error::Error>> {
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/binary");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -901,7 +940,7 @@ fn archive_identifies_payload_types_from_content() -> Result<(), Box<dyn std::er
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/mislabelled");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -946,7 +985,7 @@ fn archive_records_timeouts_as_failures() -> Result<(), Box<dyn std::error::Erro
 
     let archiver = Archiver::new(Config {
         timeout: Duration::from_millis(100),
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -970,7 +1009,7 @@ fn archive_truncates_responses_at_the_configured_limit() -> Result<(), Box<dyn s
     let archiver = Archiver::new(Config {
         max_response_length: Some(limit),
         gzip_warc: false,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -1008,7 +1047,7 @@ fn archive_stops_following_a_redirect_cycle() -> Result<(), Box<dyn std::error::
 
     let archiver = Archiver::new(Config {
         max_redirects: 2,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
@@ -1034,7 +1073,7 @@ fn archive_records_an_unusable_redirect_target_as_final() -> Result<(), Box<dyn 
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/bad-target");
 
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
     server.join().expect("server thread should not panic");
@@ -1048,7 +1087,7 @@ fn archive_records_an_unusable_redirect_target_as_final() -> Result<(), Box<dyn 
 
 #[test]
 fn archive_records_urls_without_a_host_as_failures() -> Result<(), Box<dyn std::error::Error>> {
-    let archiver = Archiver::new(Config::default())?;
+    let archiver = Archiver::new(gzip_config())?;
     let mut bytes = Vec::new();
     let summary = archiver.archive(["data:text/plain,hi"], Cursor::new(&mut bytes))?;
 
@@ -1062,7 +1101,7 @@ fn archive_records_urls_without_a_host_as_failures() -> Result<(), Box<dyn std::
 fn new_rejects_an_invalid_user_agent() {
     let result = Archiver::new(Config {
         user_agent: "bad\r\nagent".into(),
-        ..Config::default()
+        ..gzip_config()
     });
 
     assert!(matches!(result, Err(Error::InvalidUserAgent(_))));
@@ -1088,7 +1127,7 @@ fn archive_concurrently_preserves_input_order() -> Result<(), Box<dyn std::error
 
     let archiver = Archiver::new(Config {
         concurrency: 4,
-        ..Config::default()
+        ..gzip_config()
     })?;
     let mut bytes = Vec::new();
     let summary = archiver.archive(&urls, Cursor::new(&mut bytes))?;

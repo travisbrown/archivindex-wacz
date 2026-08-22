@@ -80,6 +80,7 @@ impl Session<'_> {
             &self.software,
             &self.operator,
             self.titles.then_some(self.id.as_str()),
+            &self.output,
             persistent_index,
         )?;
         let mut seen = HashSet::new();
@@ -93,6 +94,7 @@ impl Session<'_> {
 
         let seeds = seen.clone();
         let mut capture_count = 0;
+        let mut requested = false;
 
         let crawl_outcome = loop {
             if self.limit.is_some_and(|limit| capture_count >= limit) {
@@ -101,6 +103,10 @@ impl Session<'_> {
             let Some((url, via)) = queue.pop_front() else {
                 break CrawlOutcome::Complete;
             };
+            if requested {
+                thread::sleep(self.request_delay);
+            }
+            requested = true;
             if self
                 .events
                 .as_mut()

@@ -671,7 +671,7 @@ mod tests {
         );
         assert_eq!(package.main_page_date, Some(main_page_date));
         assert_eq!(package.extra, extra);
-        assert!(package.resources.is_empty());
+        assert_eq!(package.resources, []);
     }
 
     #[test]

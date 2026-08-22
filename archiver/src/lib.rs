@@ -14,7 +14,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let archiver = Archiver::new(Config::default())?;
-//! let summary = archiver.archive_to_path(["https://www.example.com/"], "example.warc.gz")?;
+//! let summary = archiver.archive_to_path(["https://www.example.com/"], "example.warc")?;
 //!
 //! assert!(summary.is_complete());
 //! # Ok(())

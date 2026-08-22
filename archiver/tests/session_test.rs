@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
 use archivindex_archiver::config::Config;
@@ -34,6 +34,13 @@ use fluent_uri::Uri;
 mod support;
 
 use support::{plain, request_header, request_path, serve_concurrently_with, serve_with};
+
+fn gzip_config() -> Config {
+    Config {
+        gzip_warc: true,
+        ..Config::default()
+    }
+}
 
 struct PackagedWarc {
     _directory: tempfile::TempDir,
@@ -322,7 +329,7 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
     let output = directory.path().join("persistent-revisits.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "persistent-revisits",
         operator(),
         [&historical_url, &new_a_url, &new_b_url],
@@ -429,7 +436,7 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
     drop(index);
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "persistent-revalidation",
         operator(),
         [&url],
@@ -480,7 +487,7 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
     let output = directory.path().join("recapture.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "recapture",
         operator(),
         [&url],
@@ -587,7 +594,7 @@ fn recapture_of_a_validated_response_is_a_server_not_modified_revisit()
     let mut observed = Vec::new();
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "revalidate",
         operator(),
         [&url],
@@ -713,7 +720,7 @@ fn changed_content_is_recaptured_in_full_and_revalidated_by_its_new_validators()
     let output = directory.path().join("changed.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "changed",
         operator(),
         [&url],
@@ -804,6 +811,39 @@ fn changed_content_is_recaptured_in_full_and_revalidated_by_its_new_validators()
 }
 
 #[test]
+fn session_waits_between_queued_requests() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve_with(2, |_| {
+        (
+            plain("200 OK", "content-type: text/plain", "ok"),
+            Instant::now(),
+        )
+    })?;
+    let directory = tempfile::tempdir()?;
+    let output = directory.path().join("delayed.warc.gz");
+    let delay = Duration::from_millis(50);
+
+    let summary = Session::new(
+        archiver(gzip_config()),
+        "delayed",
+        operator(),
+        [
+            format!("http://127.0.0.1:{port}/first"),
+            format!("http://127.0.0.1:{port}/second"),
+        ],
+        output,
+    )?
+    .request_delay(delay)
+    .run()?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].duration_since(requests[0]) >= delay);
+
+    Ok(())
+}
+
+#[test]
 fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::error::Error>> {
     // The seeds are the home page and a redirect whose final URL is /about. The home page links
     // directly to /about and /missing; both are discoveries because seed identity uses the
@@ -820,7 +860,7 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
     let summary = Session::new(
         archiver(Config {
             user_agent: "session-test/1.0".to_owned(),
-            ..Config::default()
+            ..gzip_config()
         }),
         "crawl-2026.08",
         operator(),
@@ -1043,7 +1083,7 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
     let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "dedup",
         Operator {
             name: "Solo".to_owned(),
@@ -1107,7 +1147,7 @@ fn session_limit_stops_with_discoveries_still_queued() -> Result<(), Box<dyn std
     let path = directory.path().join("limited.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "limited",
         operator(),
         [&url],
@@ -1167,7 +1207,7 @@ fn session_rejects_an_unwritable_operator_before_writing() -> Result<(), Box<dyn
     let path = directory.path().join("session.warc.gz");
 
     let result = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "bad-operator",
         Operator {
             name: "Line\r\nBreak".to_owned(),
@@ -1202,7 +1242,7 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
     let summary = Session::new(
         archiver(Config {
             timeout: Duration::from_millis(100),
-            ..Config::default()
+            ..gzip_config()
         }),
         "retry",
         operator(),
@@ -1260,7 +1300,7 @@ fn session_retries_retryable_http_statuses() -> Result<(), Box<dyn std::error::E
     let events_for_sink = Arc::clone(&events);
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "status-retry",
         operator(),
         [&url],
@@ -1322,7 +1362,7 @@ fn session_reports_exhausted_http_status_retries() -> Result<(), Box<dyn std::er
     let path = directory.path().join("status-exhausted.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "status-exhausted",
         operator(),
         [&url],
@@ -1353,7 +1393,7 @@ fn processor_failure_stops_with_an_incomplete_summary() -> Result<(), Box<dyn st
     let path = directory.path().join("processor-failure.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "processor-failure",
         operator(),
         [&url],
@@ -1379,7 +1419,7 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
     let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "unreachable",
         operator(),
         [&url],
@@ -1413,7 +1453,7 @@ fn session_does_not_retry_permanent_failures() -> Result<(), Box<dyn std::error:
     let path = directory.path().join("session.warc.gz");
 
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "no-retry",
         operator(),
         ["data:text/plain,hi"],
@@ -1440,7 +1480,7 @@ fn session_rejects_invalid_identifiers() {
         assert!(
             matches!(
                 Session::new(
-                    archiver(Config::default()),
+                    archiver(gzip_config()),
                     id,
                     operator(),
                     seeds,
@@ -1454,7 +1494,7 @@ fn session_rejects_invalid_identifiers() {
 
     assert!(
         Session::new(
-            archiver(Config::default()),
+            archiver(gzip_config()),
             "ok-id_1.2~3",
             operator(),
             seeds,
@@ -1470,22 +1510,20 @@ fn session_refuses_an_existing_output() -> Result<(), Box<dyn std::error::Error>
     let path = directory.path().join("session.warc.gz");
     let database = directory.path().join("state.sqlite3");
     std::fs::write(&path, b"existing")?;
-    let (port, server) = serve(1)?;
-    let url = format!("http://127.0.0.1:{port}/");
+    let url = "https://example.com/";
 
     let result = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "existing",
         operator(),
-        [&url],
+        [url],
         &path,
     )?
     .revisit_index(&database)
     .run();
-    server.join().expect("server thread should not panic");
 
     assert!(result.is_err());
-    let key = ResourceKey::new(Uri::parse(url.as_str())?.to_owned());
+    let key = ResourceKey::new(Uri::parse(url)?.to_owned());
     assert!(Index::open(database)?.lookup_resource(&key)?.is_none());
 
     Ok(())
@@ -1497,14 +1535,8 @@ fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std:
     let path = directory.path().join("session.warc.gz");
 
     let seeds: [&str; 0] = [];
-    let summary = Session::new(
-        archiver(Config::default()),
-        "empty",
-        operator(),
-        seeds,
-        &path,
-    )?
-    .run()?;
+    let summary =
+        Session::new(archiver(gzip_config()), "empty", operator(), seeds, &path)?.run()?;
 
     assert!(summary.is_complete());
     assert!(summary.seed_captures.is_empty());
@@ -1513,6 +1545,42 @@ fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std:
 
     assert!(reader.verify_fixity()?.is_success());
     assert_eq!(reader.pages()?.count(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn session_writes_to_named_partial_before_publishing() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve(1)?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("session.warc.gz");
+    let partial_path = directory.path().join("session.warc.gz.partial");
+    let url = format!("http://127.0.0.1:{port}/");
+    let mut saw_partial = false;
+
+    let summary = Session::new(
+        archiver(gzip_config()),
+        "visible-partial",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .events(|event: CaptureEvent<'_>| {
+        if matches!(event, CaptureEvent::Started { .. }) {
+            saw_partial = true;
+            assert!(partial_path.exists());
+            assert!(std::fs::metadata(&partial_path).is_ok_and(|metadata| metadata.len() > 0));
+            assert!(!path.exists());
+        }
+        CaptureControl::Continue
+    })
+    .run()?;
+    server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert!(saw_partial);
+    assert!(path.exists());
+    assert!(!partial_path.exists());
 
     Ok(())
 }
@@ -1530,7 +1598,7 @@ fn session_processor_sees_the_final_response_of_a_chain() -> Result<(), Box<dyn 
 
     let mut observed = Vec::new();
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "final-hop",
         operator(),
         [&url],
@@ -1570,7 +1638,7 @@ fn session_seed_set_is_by_requested_url() -> Result<(), Box<dyn std::error::Erro
     let missing = format!("http://127.0.0.1:{port}/missing");
     let discovered = vec![about, missing.clone()];
     let summary = Session::new(
-        archiver(Config::default()),
+        archiver(gzip_config()),
         "seed-set",
         operator(),
         &seeds,

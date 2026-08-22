@@ -287,7 +287,8 @@ impl Archiver {
                 } else {
                     WARC_NAME
                 });
-        let (collection, cancelled) = self.archive_collection(urls, warc_name, events)?;
+        let (collection, cancelled) =
+            self.archive_collection(urls, warc_name, Some(path), events)?;
         let mut summary = collection.finish_to_path(path)?;
         summary.cancelled = cancelled;
         Ok(summary)
@@ -314,7 +315,7 @@ impl Archiver {
         } else {
             WARC_NAME
         };
-        let (collection, cancelled) = self.archive_collection(urls, warc_name, events)?;
+        let (collection, cancelled) = self.archive_collection(urls, warc_name, None, events)?;
         let mut summary = collection.finish(writer)?;
         summary.cancelled = cancelled;
         Ok(summary)
@@ -327,12 +328,14 @@ impl Archiver {
         software: &crate::session::Software,
         operator: &crate::session::Operator,
         title: Option<&str>,
+        output: &Path,
         persistent_index: Option<RevisitIndex>,
     ) -> Result<Collection, Error> {
         let gzip = self.config.gzip_warc;
         let suffix = if gzip { ".warc.gz" } else { ".warc" };
 
-        Collection::new(
+        Collection::new_for_path(
+            output,
             &format!("{id}{suffix}"),
             gzip,
             &WarcinfoOptions {
@@ -350,15 +353,16 @@ impl Archiver {
         &self,
         urls: I,
         warc_name: &str,
+        output: Option<&Path>,
         events: &mut impl CaptureEventSink,
     ) -> Result<(Collection, bool), Error> {
         let gzip = self.config.gzip_warc;
-        let mut collection = Collection::new(
-            warc_name,
-            gzip,
-            &WarcinfoOptions::archiver(&self.config.user_agent),
-            None,
-        )?;
+        let warcinfo = WarcinfoOptions::archiver(&self.config.user_agent);
+        let mut collection = if let Some(output) = output {
+            Collection::new_for_path(output, warc_name, gzip, &warcinfo, None)?
+        } else {
+            Collection::new(warc_name, gzip, &warcinfo, None)?
+        };
 
         let concurrency = self.config.concurrency.max(1);
         let mut cancelled = false;

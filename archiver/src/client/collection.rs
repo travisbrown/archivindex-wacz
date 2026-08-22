@@ -1,8 +1,8 @@
 //! WARC spooling and revisit-state accumulation.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::io::write::WarcWriter;
@@ -12,6 +12,7 @@ use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 use flate2::bufread::MultiGzDecoder;
 use fluent_uri::Uri;
+use tempfile::{NamedTempFile, TempPath};
 
 use super::capture::Original;
 use super::warc_fields::{WarcinfoOptions, warcinfo_record};
@@ -21,6 +22,7 @@ use super::{ArchiveSummary, CaptureOutcome, CaptureSummary, Error, Exchange, Fai
 /// Files accumulated while captures are written to a spooled WARC file.
 pub struct Collection {
     warc: WarcWriter<BufWriter<File>>,
+    spool_path: Option<TempPath>,
     warcinfo_id: Uri<String>,
     gzip: bool,
     summary: ArchiveSummary,
@@ -38,13 +40,69 @@ impl Collection {
         warcinfo: &WarcinfoOptions<'_>,
         persistent_index: Option<Index>,
     ) -> Result<Self, Error> {
-        let mut warc = WarcWriter::new(BufWriter::new(tempfile::tempfile()?)).with_digests();
+        Self::with_spool(
+            tempfile::tempfile()?,
+            None,
+            warc_name,
+            gzip,
+            warcinfo,
+            persistent_index,
+        )
+    }
+
+    /// Start a collection in `<output>.partial` so its growth is visible while it is written.
+    pub(super) fn new_for_path(
+        output: &Path,
+        warc_name: &str,
+        gzip: bool,
+        warcinfo: &WarcinfoOptions<'_>,
+        persistent_index: Option<Index>,
+    ) -> Result<Self, Error> {
+        if output.try_exists()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("output already exists: {}", output.display()),
+            )
+            .into());
+        }
+
+        let partial_path = std::path::absolute(partial_path(output))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&partial_path)?;
+        let spool_path = TempPath::try_from_path(&partial_path)?;
+
+        Self::with_spool(
+            file,
+            Some(spool_path),
+            warc_name,
+            gzip,
+            warcinfo,
+            persistent_index,
+        )
+    }
+
+    fn with_spool(
+        file: File,
+        spool_path: Option<TempPath>,
+        warc_name: &str,
+        gzip: bool,
+        warcinfo: &WarcinfoOptions<'_>,
+        persistent_index: Option<Index>,
+    ) -> Result<Self, Error> {
+        let mut warc = WarcWriter::new(BufWriter::new(file)).with_digests();
         let warcinfo = warcinfo_record(warc_name, warcinfo)?;
         let warcinfo_id = warcinfo.core().record_id.clone();
         write_record(&mut warc, warcinfo, gzip)?;
+        if spool_path.is_some() {
+            warc.flush()?;
+        }
 
         Ok(Self {
             warc,
+            spool_path,
             warcinfo_id,
             gzip,
             summary: ArchiveSummary::default(),
@@ -149,6 +207,10 @@ impl Collection {
             }
         }
 
+        if self.spool_path.is_some() {
+            self.warc.flush()?;
+        }
+
         Ok(())
     }
 
@@ -231,6 +293,7 @@ impl Collection {
     pub(crate) fn finish<W: Write>(self, mut output: W) -> Result<ArchiveSummary, Error> {
         let Self {
             warc,
+            spool_path: _,
             warcinfo_id: _,
             summary,
             persistent_index: _,
@@ -248,6 +311,7 @@ impl Collection {
     pub(crate) fn finish_to_path(self, path: &Path) -> Result<ArchiveSummary, Error> {
         let Self {
             warc,
+            spool_path,
             warcinfo_id: _,
             summary,
             mut persistent_index,
@@ -257,17 +321,24 @@ impl Collection {
         let mut source = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
         source.rewind()?;
 
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        std::io::copy(&mut source, &mut temporary)?;
-        temporary.flush()?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist_noclobber(path)
-            .map_err(|error| error.error)?;
+        if let Some(spool_path) = spool_path {
+            source.sync_all()?;
+            NamedTempFile::from_parts(source, spool_path)
+                .persist_noclobber(path)
+                .map_err(|error| error.error)?;
+        } else {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let mut temporary = NamedTempFile::new_in(parent)?;
+            std::io::copy(&mut source, &mut temporary)?;
+            temporary.flush()?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist_noclobber(path)
+                .map_err(|error| error.error)?;
+        }
 
         if let Some(index) = &mut persistent_index {
             let mut durable = File::open(path)?;
@@ -275,6 +346,12 @@ impl Collection {
         }
         Ok(summary)
     }
+}
+
+fn partial_path(output: &Path) -> PathBuf {
+    let mut path = output.as_os_str().to_os_string();
+    path.push(".partial");
+    path.into()
 }
 
 /// Publish the completed WARC's records to durable crawl state as one atomic update.

@@ -4,7 +4,7 @@ pub mod read;
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use url::Url;
 
@@ -18,8 +18,10 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// The processor takes a snapshot cutoff when it is constructed. Start a crawl with
 /// [`first_comment_url`](Self::first_comment_url), which requests comments in ascending ID order up
 /// to that cutoff. It walks every page advertised by `X-WP-TotalPages` and normally finishes after
-/// one sweep when `X-WP-Total` is stable and equals the number of distinct comment IDs seen. A
-/// second sweep runs when those consistency checks fail, or when explicitly requested with
+/// one sweep when the pagination headers are stable and the number of visible comments does not
+/// exceed `X-WP-Total`. `WordPress` applies per-comment read checks after its pagination query, so
+/// the reported total can legitimately exceed the number of comments returned. A second sweep
+/// runs when the consistency checks fail, or when explicitly requested with
 /// [`second_sweep`](Self::second_sweep). The fixed cutoff prevents ordinary additions after
 /// construction from moving the snapshot. Already captured IDs remain retained even if they are
 /// deleted during collection.
@@ -48,7 +50,7 @@ const COMMENTS_PER_PAGE: usize = 100;
 ///         email: None,
 ///     },
 ///     [first],
-///     "wordpress-comments.warc.gz",
+///     "wordpress-comments.warc",
 /// )?
 /// .processor(processor)
 /// .run()?;
@@ -62,8 +64,11 @@ pub struct CommentCaptureProcessor {
     site_name: String,
     before: DateTime<Utc>,
     seen_ids: HashSet<u64>,
+    first_date: Option<NaiveDate>,
+    last_date: Option<NaiveDate>,
     sweep: Sweep,
     force_second_sweep: bool,
+    complete: bool,
 }
 
 struct Sweep {
@@ -71,7 +76,7 @@ struct Sweep {
     page: usize,
     total: Option<usize>,
     previous_total: Option<usize>,
-    totals_consistent: bool,
+    headers_consistent: bool,
     total_pages: Option<usize>,
 }
 
@@ -82,7 +87,7 @@ impl Sweep {
             page: 1,
             total: None,
             previous_total: None,
-            totals_consistent: true,
+            headers_consistent: true,
             total_pages: None,
         }
     }
@@ -93,7 +98,7 @@ impl Sweep {
             page: 1,
             total: None,
             previous_total: self.total.or(self.previous_total),
-            totals_consistent: true,
+            headers_consistent: true,
             total_pages: self.total_pages,
         }
     }
@@ -138,8 +143,11 @@ impl CommentCaptureProcessor {
             site_name,
             before,
             seen_ids: HashSet::new(),
+            first_date: None,
+            last_date: None,
             sweep: Sweep::first(),
             force_second_sweep: false,
+            complete: false,
         })
     }
 
@@ -148,6 +156,18 @@ impl CommentCaptureProcessor {
     pub const fn second_sweep(mut self, enabled: bool) -> Self {
         self.force_second_sweep = enabled;
         self
+    }
+
+    /// Return progress through the current snapshot once `WordPress` has reported its total.
+    #[must_use]
+    pub fn progress(&self) -> Option<CommentProgress> {
+        Some(CommentProgress {
+            downloaded: self.seen_ids.len(),
+            total: self.sweep.effective_total()?,
+            first_date: self.first_date,
+            last_date: self.last_date,
+            complete: self.complete,
+        })
     }
 
     /// Build one page URL, retaining the snapshot cutoff on every request.
@@ -166,26 +186,28 @@ impl CommentCaptureProcessor {
     /// Finish a sweep, optionally scheduling one validation sweep.
     fn finish_sweep(&mut self) -> Inspection {
         let total = self.sweep.effective_total();
-        let counts_match = self.sweep.totals_consistent && total == Some(self.seen_ids.len());
-        if self.sweep.number == 1 && (self.force_second_sweep || !counts_match) {
+        let count_is_plausible = total.is_some_and(|total| self.seen_ids.len() <= total);
+        let snapshot_is_consistent = self.sweep.headers_consistent && count_is_plausible;
+        if self.sweep.number == 1 && (self.force_second_sweep || !snapshot_is_consistent) {
             self.sweep = self.sweep.next();
             return Inspection::recapture(self.comment_url(1));
         }
 
-        if !counts_match {
+        if !snapshot_is_consistent {
             return Inspection::error(format!(
                 "WordPress reported {} comments after sweep {}, but {} distinct IDs were captured{}",
                 total.map_or_else(|| "no total".to_owned(), |value| value.to_string()),
                 self.sweep.number,
                 self.seen_ids.len(),
-                if self.sweep.totals_consistent {
+                if self.sweep.headers_consistent {
                     ""
                 } else {
-                    " and totals changed during the sweep"
+                    " and pagination headers changed during validation"
                 }
             ));
         }
 
+        self.complete = true;
         Inspection::default()
     }
 
@@ -217,6 +239,7 @@ impl CaptureProcessor for CommentCaptureProcessor {
         // reports that as a 400 `rest_post_invalid_page_number`; treat it as the end of this sweep
         // and validate again from page one when the sweep found anything new.
         if capture.status == 400 && self.sweep.page > 1 {
+            self.sweep.headers_consistent = false;
             return self.finish_sweep();
         }
 
@@ -250,21 +273,36 @@ impl CaptureProcessor for CommentCaptureProcessor {
             };
             if self
                 .sweep
-                .total
+                .effective_total()
                 .is_some_and(|total| total != total_comments)
             {
-                self.sweep.totals_consistent = false;
+                self.sweep.headers_consistent = false;
             }
             self.sweep.total = Some(total_comments);
-            self.sweep.total_pages = capture
+            let total_pages = capture
                 .header("x-wp-totalpages")
                 .and_then(|value| value.parse::<usize>().ok());
+            if self
+                .sweep
+                .total_pages
+                .zip(total_pages)
+                .is_some_and(|(previous, current)| previous != current)
+            {
+                self.sweep.headers_consistent = false;
+            }
+            self.sweep.total_pages = total_pages;
             comments
         };
 
         let title = self.title(&comments);
-        self.seen_ids
-            .extend(comments.iter().map(|comment| comment.id));
+        for comment in &comments {
+            if self.seen_ids.insert(comment.id)
+                && let Some(date) = comment.date().map(|date| date.date_naive())
+            {
+                self.first_date = Some(self.first_date.map_or(date, |first| first.min(date)));
+                self.last_date = Some(self.last_date.map_or(date, |last| last.max(date)));
+            }
+        }
 
         let has_next = self
             .sweep
@@ -280,6 +318,63 @@ impl CaptureProcessor for CommentCaptureProcessor {
         };
         inspection.title = title;
         inspection
+    }
+}
+
+/// Aggregate progress through a `WordPress` comment snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommentProgress {
+    /// Number of distinct comment IDs downloaded so far.
+    pub downloaded: usize,
+    /// Total comments reported by `WordPress` for the snapshot.
+    pub total: usize,
+    /// Earliest valid GMT date among downloaded comments.
+    pub first_date: Option<NaiveDate>,
+    /// Latest valid GMT date among downloaded comments.
+    pub last_date: Option<NaiveDate>,
+    /// Whether the processor completed a stable traversal of the snapshot.
+    pub complete: bool,
+}
+
+impl CommentProgress {
+    /// Number included in `X-WP-Total` but omitted from the completed public response pages.
+    ///
+    /// `WordPress` performs per-comment visibility checks after querying and paginating, so this
+    /// difference ordinarily represents comments attached to posts the requester cannot read.
+    #[must_use]
+    pub const fn visibility_shortfall(self) -> Option<usize> {
+        if self.complete && self.downloaded < self.total {
+            Some(self.total - self.downloaded)
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for CommentProgress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.visibility_shortfall().is_some() {
+            write!(formatter, "Downloaded {} visible comments", self.downloaded)?;
+            write!(
+                formatter,
+                " (WordPress reported {} before visibility filtering",
+                self.total
+            )?;
+            if let (Some(first), Some(last)) = (self.first_date, self.last_date) {
+                write!(formatter, "; {first} to {last}")?;
+            }
+            formatter.write_str(")")?;
+        } else {
+            write!(
+                formatter,
+                "Downloaded {} of {} comments",
+                self.downloaded, self.total
+            )?;
+            if let (Some(first), Some(last)) = (self.first_date, self.last_date) {
+                write!(formatter, " ({first} to {last})")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -314,7 +409,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    use super::CommentCaptureProcessor;
+    use super::{CommentCaptureProcessor, CommentProgress};
     use crate::session::{Capture, CaptureProcessor};
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -376,6 +471,18 @@ mod tests {
             ["https://jihadwatch.org/wp-json/wp/v2/comments?\
                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
+        let progress = CommentProgress {
+            downloaded: 2,
+            total: 101,
+            first_date: Some(timestamp("2020-11-28T00:00:00Z").date_naive()),
+            last_date: Some(timestamp("2020-11-30T00:00:00Z").date_naive()),
+            complete: false,
+        };
+        assert_eq!(processor.progress(), Some(progress));
+        assert_eq!(
+            progress.to_string(),
+            "Downloaded 2 of 101 comments (2020-11-28 to 2020-11-30)"
+        );
     }
 
     #[test]
@@ -399,7 +506,7 @@ mod tests {
             ["https://jihadwatch.org/wp-json/wp/v2/comments?\
                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
-        // A stable total matching the 101 distinct IDs makes the first sweep sufficient.
+        // Stable pagination headers make the first sweep sufficient.
         assert_eq!(
             processor
                 .inspect(&capture(&page_two, 200, TWO_PAGES))
@@ -505,19 +612,44 @@ mod tests {
     }
 
     #[test]
-    fn total_mismatch_requests_one_second_sweep_then_fails_incomplete() {
+    fn visibility_filtered_total_finishes_with_a_shortfall() {
         let mut processor =
             CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
                 .expect("a processor");
         let payload = br#"[{"id": 1, "date_gmt": "2020-11-30T12:30:00"}]"#;
         let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 2\r\nX-WP-TotalPages: 1\r\n\r\n";
 
+        let inspection = processor.inspect(&capture(payload, 200, response));
+        assert_eq!(inspection.recaptures, Vec::<String>::new());
+        assert_eq!(inspection.error, None);
+
+        let progress = processor.progress().expect("reported progress");
+        assert!(progress.complete);
+        assert_eq!(progress.visibility_shortfall(), Some(1));
+        assert_eq!(
+            progress.to_string(),
+            "Downloaded 1 visible comments (WordPress reported 2 before visibility filtering; \
+             2020-11-30 to 2020-11-30)"
+        );
+    }
+
+    #[test]
+    fn more_visible_ids_than_reported_are_validated_then_rejected() {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+                .expect("a processor");
+        let payload = br#"[
+            {"id": 1, "date_gmt": "2020-11-30T12:30:00"},
+            {"id": 2, "date_gmt": "2020-11-30T12:30:00"}
+        ]"#;
+        let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 1\r\nX-WP-TotalPages: 1\r\n\r\n";
+
         let first = processor.inspect(&capture(payload, 200, response));
         assert_eq!(first.recaptures, [processor.first_comment_url()]);
         assert_eq!(first.error, None);
 
         let second = processor.inspect(&capture(payload, 200, response));
-        assert!(second.recaptures.is_empty());
+        assert_eq!(second.recaptures, Vec::<String>::new());
         assert!(second.error.is_some());
     }
 
@@ -531,7 +663,7 @@ mod tests {
         let inspection = processor.inspect(&capture(b"[]", 200, response));
 
         assert!(inspection.error.is_some());
-        assert!(inspection.recaptures.is_empty());
+        assert_eq!(inspection.recaptures, Vec::<String>::new());
     }
 
     #[test]

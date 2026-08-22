@@ -159,6 +159,7 @@ pub struct Session<'a> {
     output: PathBuf,
     processor: Option<Box<dyn CaptureProcessor + 'a>>,
     retry: RetryConfig,
+    request_delay: Duration,
     limit: Option<usize>,
     revisit_index: Option<PathBuf>,
     events: Option<Box<dyn CaptureEventSink + 'a>>,
@@ -197,6 +198,7 @@ impl<'a> Session<'a> {
             output: output.into(),
             processor: None,
             retry: RetryConfig::default(),
+            request_delay: Duration::ZERO,
             limit: None,
             revisit_index: None,
             events: None,
@@ -245,6 +247,15 @@ impl<'a> Session<'a> {
     #[must_use]
     pub const fn retry(mut self, retry: RetryConfig) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Wait for `delay` between successive queued capture requests.
+    ///
+    /// Retry attempts continue to use [`RetryConfig`]'s backoff instead of this delay.
+    #[must_use]
+    pub const fn request_delay(mut self, delay: Duration) -> Self {
+        self.request_delay = delay;
         self
     }
 

@@ -26,8 +26,11 @@ The `archive` command reads one URL per line from standard input and writes a si
 
 ```bash
 echo https://example.com/ \
-  | cargo run --bin archivindex-archiver -- archive --output example.warc.gz
+  | cargo run --bin archivindex-archiver -- archive --output example.warc
 ```
+
+Capture output is uncompressed by default. Pass `--gzip` and use a `.warc.gz` output name to
+compress each WARC record as an independent gzip member.
 
 Capture commands exit with status 0 only when the requested capture is complete. Status 2 means
 that a usable but partial archive was published; operational failures that prevent publication use
@@ -37,16 +40,18 @@ The `archive-wp-comments` command captures comment batches from a WordPress REST
 session. It fixes a creation-time cutoff and pages by comment ID. One sweep is sufficient when the
 reported total is stable and matches the distinct IDs captured; otherwise a second consistency
 sweep runs automatically. Pass `--second-sweep` to request that validation sweep unconditionally.
-`--limit` can stop after a fixed number of successful batches (including validation recaptures):
+`--limit` can stop after a fixed number of successful batches (including validation recaptures).
+Use `--request-delay` to wait a specified number of seconds between batch requests:
 
 ```bash
 cargo run --bin archivindex-archiver -- archive-wp-comments \
   --base-url https://example.com/ \
-  --output comments.warc.gz \
+  --output comments.warc \
   --session-name comments-2026 \
   --operator "A. Archivist" \
   --operator-email archivist@example.com \
   --revisit-index comments-state.sqlite3 \
+  --request-delay 1 \
   --limit 10
 ```
 
@@ -54,7 +59,7 @@ The `read-wp-comments` command writes the archived comments as JSON Lines in asc
 order. Conflicting captures of the same comment are reported through the warning log:
 
 ```bash
-cargo run --bin archivindex-archiver -- read-wp-comments comments.warc.gz > comments.jsonl
+cargo run --bin archivindex-archiver -- read-wp-comments comments.warc > comments.jsonl
 ```
 
 The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A

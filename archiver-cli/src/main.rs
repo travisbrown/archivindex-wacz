@@ -13,9 +13,11 @@ use std::time::Duration;
 
 use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent};
 use archivindex_archiver::config::Config;
-use archivindex_archiver::session::{Operator, RetryConfig, Session};
-use archivindex_archiver::wordpress::CommentCaptureProcessor;
+use archivindex_archiver::session::{
+    Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
+};
 use archivindex_archiver::wordpress::read::read_comments;
+use archivindex_archiver::wordpress::{CommentCaptureProcessor, CommentProgress};
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::io::write::IndexFormat;
 use cli_helpers::prelude::*;
@@ -88,6 +90,11 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     let processor =
         CommentCaptureProcessor::new(&options.base_url)?.second_sweep(options.second_sweep);
     let first_url = processor.first_comment_url();
+    let comment_progress = Rc::new(RefCell::new(None));
+    let processor = ProgressingCommentProcessor {
+        processor,
+        progress: Rc::clone(&comment_progress),
+    };
     let retry_defaults = RetryConfig::default();
     let retry = RetryConfig {
         attempts: options.retry_attempts.unwrap_or(retry_defaults.attempts),
@@ -100,7 +107,9 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     };
     let config = options.config.into_config(None);
     let archiver = Archiver::new(config)?;
-    let progress = progress_spinner("Archiving", "batches");
+    let progress = message_spinner("Downloading comments");
+    let event_progress = progress.clone();
+    let event_comment_progress = Rc::clone(&comment_progress);
     let operator = Operator {
         name: options.operator,
         email: options.operator_email,
@@ -114,13 +123,16 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
     )?
     .software(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
     .processor(processor)
-    .events(|event: CaptureEvent<'_>| {
-        if matches!(event, CaptureEvent::Written { .. }) {
-            progress.inc(1);
+    .events(move |event: CaptureEvent<'_>| {
+        if matches!(event, CaptureEvent::Written { .. })
+            && let Some(snapshot) = *event_comment_progress.borrow()
+        {
+            event_progress.set_message(snapshot.to_string());
         }
         CaptureControl::Continue
     })
-    .retry(retry);
+    .retry(retry)
+    .request_delay(Duration::from_secs(options.request_delay));
 
     if titles {
         session = session.titles();
@@ -143,17 +155,36 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
         log::warn!("The session ended early: {error}");
     }
 
-    let captures = summary.seed_captures.len() + summary.extra_captures.len();
-
-    println!(
-        "Archived {captures} WordPress comment batches to {}",
-        options.output.display()
-    );
+    if let Some(snapshot) = *comment_progress.borrow() {
+        if let Some(shortfall) = snapshot.visibility_shortfall() {
+            log::warn!(
+                "WordPress counted {} comments before visibility filtering but returned {} visible comments ({shortfall} omitted)",
+                snapshot.total,
+                snapshot.downloaded
+            );
+        }
+        println!("{snapshot} to {}", options.output.display());
+    } else {
+        println!("Downloaded no comments to {}", options.output.display());
+    }
 
     if summary.is_complete() {
         Ok(())
     } else {
         Err(Error::PartialArchive(options.output))
+    }
+}
+
+struct ProgressingCommentProcessor {
+    processor: CommentCaptureProcessor,
+    progress: Rc<RefCell<Option<CommentProgress>>>,
+}
+
+impl CaptureProcessor for ProgressingCommentProcessor {
+    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        let inspection = self.processor.inspect(capture);
+        *self.progress.borrow_mut() = self.processor.progress();
+        inspection
     }
 }
 
@@ -232,6 +263,15 @@ fn progress_spinner(message: &'static str, unit: &str) -> ProgressBar {
     progress.set_style(
         ProgressStyle::with_template(&format!("{{msg}} {{human_pos}} {unit} {{spinner}}"))
             .expect("valid progress spinner template"),
+    );
+    progress.set_message(message);
+    progress
+}
+
+fn message_spinner(message: &'static str) -> ProgressBar {
+    let progress = ProgressBar::new_spinner();
+    progress.set_style(
+        ProgressStyle::with_template("{msg} {spinner}").expect("valid progress spinner template"),
     );
     progress.set_message(message);
     progress
@@ -342,6 +382,9 @@ struct ArchiveWpCommentsOptions {
     /// Maximum retry delay in seconds (defaults to 30).
     #[clap(long)]
     retry_max_backoff: Option<u64>,
+    /// Seconds to wait between successive comment-batch requests (defaults to 0).
+    #[clap(long, default_value_t = 0)]
+    request_delay: u64,
 }
 
 /// Options for converting an existing WARC file into a WACZ package.
@@ -376,9 +419,9 @@ struct ReadWpCommentsOptions {
 /// Capture settings shared by both workflows.
 #[derive(Debug, clap::Args)]
 struct ConfigOptions {
-    /// Store the WARC file uncompressed instead of gzip-compressed.
+    /// Compress each WARC record as an independent gzip member.
     #[clap(long)]
-    no_gzip: bool,
+    gzip: bool,
     /// The User-Agent header value sent with every request (defaults to the archiver's own).
     #[clap(long)]
     user_agent: Option<String>,
@@ -405,7 +448,7 @@ impl ConfigOptions {
             max_redirects: self.max_redirects.unwrap_or(defaults.max_redirects),
             concurrency: concurrency.unwrap_or(defaults.concurrency),
             max_response_length: self.max_response_length,
-            gzip_warc: !self.no_gzip,
+            gzip_warc: self.gzip,
         }
     }
 }
@@ -461,6 +504,9 @@ mod tests {
             "--limit",
             "12",
             "--second-sweep",
+            "--request-delay",
+            "7",
+            "--gzip",
         ])
         .expect("valid options");
 
@@ -479,6 +525,25 @@ mod tests {
         assert_eq!(options.limit, Some(12));
         assert!(options.second_sweep);
         assert!(!options.titles);
+        assert_eq!(options.request_delay, 7);
+        assert!(options.config.gzip);
+    }
+
+    #[test]
+    fn archive_defaults_to_an_uncompressed_warc() {
+        let options = Opts::try_parse_from([
+            "archivindex-archiver",
+            "archive",
+            "--output",
+            "capture.warc",
+        ])
+        .expect("valid options");
+
+        let Command::Archive(options) = options.command else {
+            panic!("expected the archive command");
+        };
+
+        assert!(!options.config.gzip);
     }
 
     #[test]

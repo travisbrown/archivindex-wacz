@@ -415,7 +415,7 @@ mod tests {
             .insert("format".to_owned(), serde_json::Value::Null);
         let mut output = Vec::new();
         assert!(write_page_list(&mut output, &header, []).is_err());
-        assert!(output.is_empty());
+        assert_eq!(output, b"");
 
         let header = PageListHeader::default();
         let mut page = Page {
@@ -430,7 +430,7 @@ mod tests {
         page.extra
             .insert("size".to_owned(), serde_json::Value::from(1));
         assert!(write_page_list(&mut output, &header, [&page]).is_err());
-        assert!(output.is_empty());
+        assert_eq!(output, b"");
     }
 
     const EXAMPLE: &str = concat!(
