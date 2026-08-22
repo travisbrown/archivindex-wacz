@@ -1129,10 +1129,9 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     assert_eq!(fields.operator(), Some("Solo"));
-    assert!(
-        fields
-            .software()
-            .is_some_and(|software| software.starts_with("archivindex-archiver/"))
+    assert_eq!(
+        fields.software(),
+        Some(concat!("archivindex-archiver/", env!("CARGO_PKG_VERSION")))
     );
 
     Ok(())

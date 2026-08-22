@@ -121,7 +121,6 @@ fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
         [first_url],
         &options.output,
     )?
-    .software(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
     .processor(processor)
     .events(move |event: CaptureEvent<'_>| {
         if matches!(event, CaptureEvent::Written { .. })
