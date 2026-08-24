@@ -428,8 +428,8 @@ mod tests {
 
     fn capture<'a>(payload: &'a [u8], status: u16, response: &'a [u8]) -> Capture<'a> {
         Capture {
-            url: "https://jihadwatch.org/wp-json/wp/v2/comments",
-            final_url: "https://jihadwatch.org/wp-json/wp/v2/comments",
+            url: "https://example.com/wp-json/wp/v2/comments",
+            final_url: "https://example.com/wp-json/wp/v2/comments",
             status,
             payload,
             response,
@@ -441,9 +441,9 @@ mod tests {
     #[test]
     fn first_url_uses_the_saved_snapshot_cutoff() {
         let processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org/", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com/", timestamp(BEFORE))
                 .expect("a processor");
-        let expected = "https://jihadwatch.org/wp-json/wp/v2/comments?\
+        let expected = "https://example.com/wp-json/wp/v2/comments?\
             before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=1&per_page=100";
 
         assert_eq!(processor.first_comment_url(), expected);
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn inspection_titles_a_batch_and_advances_by_page() {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
         let payload = br#"[
             {"id": 211416, "date_gmt": "2020-11-28T08:15:00"},
@@ -464,11 +464,11 @@ mod tests {
 
         assert_eq!(
             inspection.title.as_deref(),
-            Some("jihadwatch.org comments 211416-211420 (2020-11-28 to 2020-11-30)")
+            Some("example.com comments 211416-211420 (2020-11-28 to 2020-11-30)")
         );
         assert_eq!(
             inspection.recaptures,
-            ["https://jihadwatch.org/wp-json/wp/v2/comments?\
+            ["https://example.com/wp-json/wp/v2/comments?\
                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
         let progress = CommentProgress {
@@ -489,7 +489,7 @@ mod tests {
     fn matching_total_finishes_after_one_complete_sweep() -> Result<(), Box<dyn std::error::Error>>
     {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
         let page_one = serde_json::to_vec(
             &(1..=100)
@@ -503,7 +503,7 @@ mod tests {
             processor
                 .inspect(&capture(&page_one, 200, TWO_PAGES))
                 .recaptures,
-            ["https://jihadwatch.org/wp-json/wp/v2/comments?\
+            ["https://example.com/wp-json/wp/v2/comments?\
                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
         // Stable pagination headers make the first sweep sufficient.
@@ -522,7 +522,7 @@ mod tests {
     fn deletion_that_removes_a_page_cannot_hide_the_shifted_comment()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
         let original_page = serde_json::to_vec(
             &(1..=100)
@@ -562,7 +562,7 @@ mod tests {
     fn revalidated_pages_continue_a_sweep_by_the_last_advertised_page_count()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor")
                 .second_sweep(true);
         let page_one = serde_json::to_vec(
@@ -572,7 +572,7 @@ mod tests {
         )?;
         let page_two =
             serde_json::to_vec(&[json!({"id": 101, "date_gmt": "2020-11-30T12:30:00"})])?;
-        let page_two_url = "https://jihadwatch.org/wp-json/wp/v2/comments?\
+        let page_two_url = "https://example.com/wp-json/wp/v2/comments?\
             before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100";
 
         processor.inspect(&capture(&page_one, 200, TWO_PAGES));
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn malformed_batches_fail_but_empty_batches_finish() {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
 
         let malformed = processor.inspect(&capture(b"not json", 200, ONE_PAGE));
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn visibility_filtered_total_finishes_with_a_shortfall() {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
         let payload = br#"[{"id": 1, "date_gmt": "2020-11-30T12:30:00"}]"#;
         let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 2\r\nX-WP-TotalPages: 1\r\n\r\n";
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn more_visible_ids_than_reported_are_validated_then_rejected() {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
         let payload = br#"[
             {"id": 1, "date_gmt": "2020-11-30T12:30:00"},
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn missing_total_fails_the_traversal() {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
         let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
 
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn unexpected_status_fails_the_traversal() {
         let mut processor =
-            CommentCaptureProcessor::with_before("https://jihadwatch.org", timestamp(BEFORE))
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
 
         let inspection = processor.inspect(&capture(b"{}", 403, b"HTTP/1.1 403 Forbidden\r\n\r\n"));
