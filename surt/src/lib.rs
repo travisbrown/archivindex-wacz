@@ -87,7 +87,8 @@ struct Shape {
 /// A SURT key: `com,example[:port])[path][?query]`.
 ///
 /// The host's labels are in reverse DNS order, separated by commas, and followed by `)`; an IPv6
-/// literal is a single bracketed label. Keys order by their text, which is what makes them
+/// literal is a single label, bracketed or, as the Wayback Machine writes it, bare (in which case
+/// what follows the address is part of the host, not a port). Keys order by their text, which is what makes them
 /// useful: a prefix of a key is a prefix of the keys of everything below it.
 ///
 /// Parsing borrows the text; [`Surt::into_owned`] detaches it.
@@ -183,12 +184,24 @@ impl<'a> Surt<'a> {
         fmt::from_fn(move |f| {
             write!(f, "{scheme}://")?;
 
+            // The Wayback Machine writes IPv6 addresses bare, but a URL needs them bracketed.
+            let host = self.host();
+            let bare_ipv6 = host.contains(':') && !host.starts_with('[');
+
+            if bare_ipv6 {
+                f.write_str("[")?;
+            }
+
             for (index, label) in self.labels().rev().enumerate() {
                 if index > 0 {
                     f.write_str(".")?;
                 }
 
                 f.write_str(label)?;
+            }
+
+            if bare_ipv6 {
+                f.write_str("]")?;
             }
 
             if let Some(port) = self.port() {
@@ -343,6 +356,9 @@ fn shape(key: &str) -> Result<Shape, Error> {
         host.find(']').ok_or_else(|| Error::MalformedHost {
             key: key.to_owned(),
         })? + 1
+    } else if host.bytes().filter(|&byte| byte == b':').count() > 1 {
+        // A bare IPv6 address: nothing after it can be told apart from the address.
+        host_end
     } else {
         host.find(':').unwrap_or(host_end)
     };
@@ -477,5 +493,23 @@ mod tests {
         prop_assert_eq!(key.path(), parts.path.as_str());
         prop_assert_eq!(key.query(), parts.query.as_deref());
         prop_assert_eq!(key.clone().into_owned(), key);
+    }
+
+    #[test]
+    fn parses_bare_ipv6_keys() {
+        let key = Surt::parse("2001:db8::1:8080)/p").unwrap();
+
+        assert_eq!(key.host(), "2001:db8::1:8080");
+        assert_eq!(key.labels().collect::<Vec<_>>(), ["2001:db8::1:8080"]);
+        assert_eq!(key.port(), None);
+        assert_eq!(key.path(), "/p");
+        assert_eq!(key.url("http").to_string(), "http://[2001:db8::1:8080]/p");
+        assert_eq!(
+            Surt::parse("[2001:db8::1]:8080)/p")
+                .unwrap()
+                .url("http")
+                .to_string(),
+            "http://[2001:db8::1]:8080/p"
+        );
     }
 }

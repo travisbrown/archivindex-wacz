@@ -4,6 +4,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::RangeBounds;
 
 use archivindex_surt::Surt;
+use archivindex_surt::url::Canonicalizer;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::parse::raw;
 use archivindex_warc::record::Record;
@@ -118,6 +119,10 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// Find captures of `url` in every index whose timestamps fall within `time_range`.
     ///
+    /// The URL is looked up under the Wayback Machine's key, which this crate writes, and also
+    /// under the `warcio.js` key of Browsertrix and `wabac.js` when the two differ (typically by
+    /// a trailing slash), so packages from either family are searched correctly.
+    ///
     /// Plain indexes are searched using binary search after reading the index member. `ZipNum`
     /// summaries are binary-searched first, and only candidate gzip blocks are fetched. Results
     /// are ordered chronologically, with their source index retained in [`Capture::index_path`].
@@ -126,17 +131,17 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
-        let key = Surt::from_url(url)?;
+        let keys = lookup_keys(url)?;
         let partition = self.partition_indexes();
         let mut captures = Vec::new();
 
         for (_, summary) in partition.summaries {
             let summary = summary?;
-            captures.extend(self.lookup_zipnum(&summary, key.as_str(), &time_range)?);
+            captures.extend(self.lookup_zipnum(&summary, &keys, &time_range)?);
         }
 
         for path in partition.plain {
-            captures.extend(self.lookup_plain(&path, key.as_str(), &time_range)?);
+            captures.extend(self.lookup_plain(&path, &keys, &time_range)?);
         }
 
         captures.sort_by(|left, right| {
@@ -157,21 +162,21 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
-        let key = Surt::from_url(url)?;
-        self.lookup_index_key(path, key.as_str(), &time_range)
+        let keys = lookup_keys(url)?;
+        self.lookup_index_key(path, &keys, &time_range)
     }
 
     fn lookup_index_key<B: RangeBounds<Timestamp>>(
         &mut self,
         path: &str,
-        key: &str,
+        keys: &[Surt<'static>],
         time_range: &B,
     ) -> Result<Vec<Capture>, Error> {
         if crate::paths::is_zipnum_summary(path) {
             let summary = self.zipnum_summary(path)?;
-            self.lookup_zipnum(&summary, key, time_range)
+            self.lookup_zipnum(&summary, keys, time_range)
         } else {
-            self.lookup_plain(path, key, time_range)
+            self.lookup_plain(path, keys, time_range)
         }
     }
 
@@ -221,7 +226,7 @@ impl<R: Read + Seek> WaczReader<R> {
     fn lookup_plain<B: RangeBounds<Timestamp>>(
         &mut self,
         path: &str,
-        key: &str,
+        keys: &[Surt<'static>],
         time_range: &B,
     ) -> Result<Vec<Capture>, Error> {
         let bytes = self.decoded_member_bytes(path)?;
@@ -231,20 +236,25 @@ impl<R: Read + Seek> WaczReader<R> {
             .lines()
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>();
-        let first = lines.partition_point(|line| line_key(line).is_some_and(|found| found < key));
         let mut captures = Vec::new();
 
-        for line in &lines[first..] {
-            if line_key(line) != Some(key) {
-                break;
-            }
+        for key in keys {
+            let key = key.as_str();
+            let first =
+                lines.partition_point(|line| line_key(line).is_some_and(|found| found < key));
 
-            let item = Item::parse(line)?.into_static();
-            if time_range.contains(&item.timestamp) {
-                captures.push(Capture {
-                    index_path: path.to_owned(),
-                    item,
-                });
+            for line in &lines[first..] {
+                if line_key(line) != Some(key) {
+                    break;
+                }
+
+                let item = Item::parse(line)?.into_static();
+                if time_range.contains(&item.timestamp) {
+                    captures.push(Capture {
+                        index_path: path.to_owned(),
+                        item,
+                    });
+                }
             }
         }
 
@@ -254,26 +264,38 @@ impl<R: Read + Seek> WaczReader<R> {
     fn lookup_zipnum<B: RangeBounds<Timestamp>>(
         &mut self,
         summary: &ZipNumSummary,
-        key: &str,
+        keys: &[Surt<'static>],
         time_range: &B,
     ) -> Result<Vec<Capture>, Error> {
-        let insertion = summary
-            .blocks
-            .partition_point(|block| block.key.as_str() < key);
-        let first = insertion.saturating_sub(1);
+        // Every block that may hold one of the keys, read once even when the keys share blocks.
+        let mut candidates = Vec::new();
+
+        for key in keys {
+            let key = key.as_str();
+            let first = summary
+                .blocks
+                .partition_point(|block| block.key.as_str() < key)
+                .saturating_sub(1);
+
+            candidates.extend(
+                (first..summary.blocks.len())
+                    .take_while(|&index| summary.blocks[index].key.as_str() <= key),
+            );
+        }
+
+        candidates.sort_unstable();
+        candidates.dedup();
+
         let mut captures = Vec::new();
 
-        for block in &summary.blocks[first..] {
-            if block.key.as_str() > key {
-                break;
-            }
-
+        for block in candidates.into_iter().map(|index| &summary.blocks[index]) {
             let bytes = self.zipnum_block(block)?;
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| Error::InvalidIndexEncoding(summary.data_path.clone()))?;
 
             for line in text.lines().filter(|line| !line.is_empty()) {
-                if line_key(line) == Some(key) {
+                if line_key(line).is_some_and(|found| keys.iter().any(|key| key.as_str() == found))
+                {
                     let item = Item::parse(line)?.into_static();
                     if time_range.contains(&item.timestamp) {
                         captures.push(Capture {
@@ -431,6 +453,20 @@ fn sibling_path(path: &str, filename: &str) -> String {
         || filename.to_owned(),
         |(parent, _)| format!("{parent}/{filename}"),
     )
+}
+
+/// The keys a URL may be indexed under: the Wayback Machine's and, when it differs, that of
+/// `warcio.js`, so that indexes written by either family of tools are searched.
+fn lookup_keys(url: &str) -> Result<Vec<Surt<'static>>, archivindex_surt::url::Error> {
+    let wayback = Surt::from_url(url)?;
+    let warcio = Canonicalizer::WARCIO.surt(url)?;
+    let mut keys = vec![wayback];
+
+    if warcio != keys[0] {
+        keys.push(warcio);
+    }
+
+    Ok(keys)
 }
 
 fn line_key(line: &str) -> Option<&str> {

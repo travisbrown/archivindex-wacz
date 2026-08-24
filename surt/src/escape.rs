@@ -94,8 +94,10 @@ pub fn normalize_escapes(text: &str, enabled: bool) -> Cow<'_, str> {
 
 /// Resolve `.` and `..` segments and, optionally, collapse runs of slashes.
 ///
-/// Dot segments are resolved as in RFC 3986 (a trailing `.` or `..` leaves a trailing slash).
-/// An empty path becomes `/`. When `collapse_slashes` is set, empty segments other than the one
+/// Dot segments are resolved as in RFC 3986 (a trailing `.` or `..` leaves a trailing slash),
+/// except that a `..` with nothing above it is kept, as the Python `surt` library keeps it: `/../a`
+/// stays as it is, while `/../../a` is `/a` because the second `..` removes the first. An empty
+/// path becomes `/`. When `collapse_slashes` is set, empty segments other than the one
 /// that forms a trailing slash are dropped, so `/a//b/` becomes `/a/b/`.
 pub fn normalize_path(path: &str, collapse_slashes: bool) -> Cow<'_, str> {
     // `/.` covers `/./`, `/../`, and trailing `/.` and `/..` (and, harmlessly, `/.hidden`).
@@ -117,7 +119,9 @@ pub fn normalize_path(path: &str, collapse_slashes: bool) -> Cow<'_, str> {
                 }
             }
             ".." => {
-                segments.pop();
+                if segments.pop().is_none() {
+                    segments.push("..");
+                }
 
                 if last {
                     segments.push("");
@@ -347,7 +351,9 @@ mod tests {
         assert_eq!(normalize_path("/a//b/", true), "/a/b/");
         assert_eq!(normalize_path("/a//b/", false), "/a//b/");
         assert_eq!(normalize_path("/a/b/..", false), "/a/");
-        assert_eq!(normalize_path("/../a", true), "/a");
+        assert_eq!(normalize_path("/../a", true), "/../a");
+        assert_eq!(normalize_path("/../../a", true), "/a");
+        assert_eq!(normalize_path("/..", true), "/../");
         assert_eq!(normalize_path("/a/.", true), "/a/");
     }
 

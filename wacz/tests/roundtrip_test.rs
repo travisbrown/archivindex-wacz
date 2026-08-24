@@ -1653,3 +1653,44 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+
+/// Lookups find captures indexed under the `warcio.js` key family as well as the Wayback one.
+#[test]
+fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>> {
+    let url = "https://www.example.com/dir/";
+    let mut items = vec![item_for(url)?, item_for(url)?];
+    items[1].key = archivindex_surt::url::Canonicalizer::WARCIO
+        .surt(url)?
+        .into();
+    assert_eq!(items[0].key, "com,example)/dir");
+    assert_eq!(items[1].key, "com,example)/dir/");
+
+    let conforming = conforming_items(&items)?;
+    let mut lines = conforming
+        .iter()
+        .map(|item| format!("{item}\n"))
+        .collect::<Vec<_>>();
+    lines.sort_unstable();
+
+    for index_format in [IndexFormat::Plain, IndexFormat::ZipNum { lines: 1 }] {
+        let config = WriterConfig {
+            index_format,
+            ..WriterConfig::default()
+        };
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+        writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat()))?;
+        let wacz = writer
+            .finish_unchecked(DataPackageBuilder::default())?
+            .into_inner();
+        let mut reader = WaczReader::new(Cursor::new(wacz))?;
+
+        let captures = reader.lookup(url, ..)?;
+        let keys = captures
+            .iter()
+            .map(|capture| capture.item.key.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, ["com,example)/dir", "com,example)/dir/"]);
+    }
+
+    Ok(())
+}

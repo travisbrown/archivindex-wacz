@@ -4,7 +4,7 @@
 //! (trimming whitespace, removing tabs and newlines, defaulting to `http://`, and unwrapping
 //! `http://https://...`), lowercases the scheme, host, path, and query, drops the user
 //! information and fragment, drops a default port and an empty query, resolves `.` and `..`
-//! path segments, strips trailing dots from the host, rewrites numeric IPv4 hosts as dotted
+//! path segments (keeping a `..` with nothing above it), strips trailing dots from the host, rewrites numeric IPv4 hosts as dotted
 //! quads, and encodes non-ASCII hosts as IDNA. The flags on [`Canonicalizer`] select the rest.
 
 use std::borrow::Cow;
@@ -24,6 +24,7 @@ impl Canonicalizer {
         normalize_escapes: true,
         collapse_slashes: true,
         sort_query: true,
+        strip_ipv6_brackets: true,
     };
 
     /// The rules of `warcio.js`, used by Browsertrix and `wabac.js`.
@@ -37,6 +38,7 @@ impl Canonicalizer {
         normalize_escapes: false,
         collapse_slashes: false,
         sort_query: true,
+        strip_ipv6_brackets: false,
     };
 
     /// Only the transformation the Heritrix glossary describes: reordering and lowercasing.
@@ -47,6 +49,7 @@ impl Canonicalizer {
         normalize_escapes: false,
         collapse_slashes: false,
         sort_query: false,
+        strip_ipv6_brackets: false,
     };
 
     /// Canonicalize a URL and transform it into a SURT key.
@@ -55,7 +58,14 @@ impl Canonicalizer {
     ///
     /// Fails when the URL cannot be split into components; see [`url::Error`].
     pub fn surt(&self, url: &str) -> Result<Surt<'static>, url::Error> {
-        Ok(self.canonicalize(url)?.surt())
+        let key = self.canonicalize(url)?.surt();
+
+        Ok(if self.strip_ipv6_brackets && key.host().starts_with('[') {
+            // The host's brackets are the first `[` and `]` in the key.
+            Surt::from_canonical_key(key.as_str().replacen(['[', ']'], "", 2))
+        } else {
+            key
+        })
     }
 
     /// Canonicalize a URL.
@@ -389,10 +399,7 @@ mod tests {
             wayback("HTTP://ARCHIVE.ORG/Path/To?Q=V"),
             "org,archive)/path/to?q=v"
         );
-        assert_eq!(
-            wayback("http://[2001:DB8::1]:8080/"),
-            "[2001:db8::1]:8080)/"
-        );
+        assert_eq!(wayback("http://[2001:DB8::1]:8080/"), "2001:db8::1:8080)/");
     }
 
     #[test]
@@ -542,5 +549,19 @@ mod tests {
 
             prop_assert_eq!(&first, &second);
         }
+    }
+
+    #[test]
+    fn strips_ipv6_brackets_only_for_wayback() {
+        let url = "http://[2001:DB8::1]:8080/p";
+
+        assert_eq!(
+            Canonicalizer::WAYBACK.surt(url).unwrap().as_str(),
+            "2001:db8::1:8080)/p"
+        );
+        assert_eq!(
+            Canonicalizer::WARCIO.surt(url).unwrap().as_str(),
+            "[2001:db8::1]:8080)/p"
+        );
     }
 }
