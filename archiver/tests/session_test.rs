@@ -1346,6 +1346,63 @@ fn session_retries_retryable_http_statuses() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn session_honours_an_http_date_retry_after() -> Result<(), Box<dyn std::error::Error>> {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = Arc::clone(&attempts);
+    let (port, server) = serve_with(2, move |head| {
+        let attempt = server_attempts.fetch_add(1, Ordering::Relaxed);
+        let response = if attempt == 0 {
+            // A real `Retry-After` date is an IMF-fixdate in GMT, not RFC 2822's `+0000` form.
+            let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(2))
+                .format("%a, %d %b %Y %H:%M:%S GMT");
+            plain(
+                "503 Service Unavailable",
+                &format!("content-type: text/plain\r\nretry-after: {retry_at}"),
+                "try later",
+            )
+        } else {
+            plain("200 OK", "content-type: text/plain", "complete")
+        };
+        (response, request_path(head).to_owned())
+    })?;
+    let url = format!("http://127.0.0.1:{port}/");
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("date-retry.warc.gz");
+    let delays = Arc::new(Mutex::new(Vec::new()));
+    let delays_for_sink = Arc::clone(&delays);
+
+    let summary = Session::new(
+        archiver(gzip_config()),
+        "date-retry",
+        operator(),
+        [&url],
+        &path,
+    )?
+    .events(move |event: CaptureEvent<'_>| {
+        if let CaptureEvent::Retrying { delay, .. } = event {
+            delays_for_sink.lock().expect("delay lock").push(delay);
+        }
+        CaptureControl::Continue
+    })
+    .retry(RetryConfig {
+        attempts: 2,
+        initial_backoff: Duration::from_secs(30),
+        max_backoff: Duration::from_secs(30),
+    })
+    .run()?;
+    server.join().expect("server thread should not panic");
+
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert!(summary.is_complete());
+    // The header's date, not the 30 s backoff, set the delay.
+    let delays = delays.lock().expect("delay lock").clone();
+    assert_eq!(delays.len(), 1);
+    assert!(delays[0] <= Duration::from_secs(2), "delay {:?}", delays[0]);
+
+    Ok(())
+}
+
+#[test]
 fn session_reports_exhausted_http_status_retries() -> Result<(), Box<dyn std::error::Error>> {
     let (port, server) = serve_with(2, |head| {
         (

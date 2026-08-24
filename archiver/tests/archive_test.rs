@@ -504,6 +504,42 @@ fn event_sink_can_cancel_and_finalize_a_partial_archive() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn event_sink_can_cancel_before_the_first_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve(0)?;
+    let urls = [
+        format!("http://127.0.0.1:{port}/"),
+        format!("http://127.0.0.1:{port}/missing"),
+    ];
+    // Two workers, so the cancellation lands in the pool's initial dispatch loop.
+    let archiver = Archiver::new(Config {
+        concurrency: 2,
+        ..gzip_config()
+    })?;
+    let mut bytes = Vec::new();
+    let mut events = Vec::new();
+    let summary = {
+        let mut sink = |event: CaptureEvent<'_>| {
+            events.push(match event {
+                CaptureEvent::Started { .. } => "started",
+                CaptureEvent::Captured { .. } => "captured",
+                CaptureEvent::Written { .. } => "written",
+                CaptureEvent::Retrying { .. } => "retrying",
+                CaptureEvent::Failed { .. } => "failed",
+            });
+            CaptureControl::Cancel
+        };
+        archiver.archive_with_events(&urls, Cursor::new(&mut bytes), &mut sink)?
+    };
+    server.join().expect("server thread should not panic");
+
+    assert!(summary.cancelled);
+    assert!(summary.captures.is_empty());
+    assert_eq!(events, ["started"]);
+
+    Ok(())
+}
+
+#[test]
 fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/");
