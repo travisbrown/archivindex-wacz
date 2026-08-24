@@ -972,7 +972,9 @@ fn archive_identifies_payload_types_from_content() -> Result<(), Box<dyn std::er
         .index("indexes/index.cdx")?
         .collect::<Result<Vec<_>, _>>()?;
 
-    assert_eq!(items[0].fields.mime.as_deref(), Some("image/png"));
+    // The index mirrors the declared `Content-Type`, as cdxj-indexer does; the identified type
+    // stays on the record.
+    assert_eq!(items[0].fields.mime.as_deref(), Some("text/plain"));
 
     Ok(())
 }
