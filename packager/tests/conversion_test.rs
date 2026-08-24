@@ -2,15 +2,19 @@
 
 use std::io::{Read, Write};
 
-use archivindex_packager::{Capture, ConversionWarning, Error, PageTitleGenerator, WarcToWacz};
+use archivindex_packager::{
+    Capture, ConversionWarning, Error, PageTitleGenerator, SkipReason, WarcToWacz,
+};
 use archivindex_wacz::io::read::WaczReader;
 use archivindex_wacz::io::read::validate::ValidationOptions;
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::metadata::MetadataBody;
 use archivindex_warc::record::fields::warcinfo::WarcinfoBody;
+use archivindex_warc::record::header::RevisitProfile;
+use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
-use archivindex_warc::value::WarcDate;
+use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
 use chrono::Utc;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -292,5 +296,134 @@ fn rejects_an_invalid_zip_compression_level() -> Result<(), Box<dyn std::error::
         Error::Wacz(archivindex_wacz::io::write::Error::InvalidZipCompressionLevel(265))
     ));
     assert!(!output.exists());
+    Ok(())
+}
+
+#[test]
+fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let date = WarcDate::from(Utc::now());
+    let html = Record::<NoExtension>::response("https://example.com/html", date)?.body(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 4\r\n\r\nhtml"
+            .to_vec(),
+    )?;
+    let html_digest =
+        LabelledDigest::compute(Algorithm::Sha256, b"html").expect("sha256 is enabled");
+    let identified = Record::<NoExtension>::response("https://example.com/identified", date)?
+        .identified_payload_type(MediaType::parse(b"image/png")?)
+        .body(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\npng".to_vec())?;
+    let unknown = Record::<NoExtension>::response("https://example.com/unknown", date)?
+        .body(b"HTTP/1.1 404 Not Found\r\ncontent-length: 4\r\n\r\ngone".to_vec())?;
+    // A truncated response never receives a payload digest from the WARC writer.
+    let truncated = Record::<NoExtension>::response("https://example.com/truncated", date)?
+        .truncated(TruncatedType::Length)
+        .body(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 100\r\n\r\ntr"
+                .to_vec(),
+        )?;
+    let revisit = Record::<NoExtension>::revisit(
+        "https://example.com/revisit",
+        date,
+        RevisitProfile::IDENTICAL_PAYLOAD_DIGEST,
+    )?
+    .payload_digest(html_digest.clone())
+    .refers_to(html.core().record_id.clone())
+    .refers_to_target_uri(html.target_uri().expect("response target").clone())
+    .refers_to_date(date)
+    .truncated(TruncatedType::Length)
+    .body(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 4\r\n\r\n"
+            .to_vec(),
+    )?;
+    write_source(
+        &input,
+        vec![html, identified, unknown, truncated, revisit],
+        false,
+    )?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+
+    assert_eq!(summary.captures, 5);
+    assert!(summary.warnings.is_empty());
+    let mut reader = WaczReader::open(&output)?;
+    let validation = reader.validate(ValidationOptions::all())?;
+    assert!(validation.is_conformant(), "{validation:#?}");
+    let items = reader
+        .index("indexes/index.cdx")?
+        .collect::<Result<Vec<_>, _>>()?;
+    for item in &items {
+        assert!(archivindex_wacz::cdxj::ConformingItem::try_from(item).is_ok());
+    }
+    let fields = |path: &str| {
+        let url = format!("https://example.com/{path}");
+        &items
+            .iter()
+            .find(|item| item.fields.url == url)
+            .expect("capture is indexed")
+            .fields
+    };
+    assert_eq!(fields("html").mime.as_deref(), Some("text/html"));
+    assert_eq!(
+        fields("html").digest.as_deref(),
+        Some(html_digest.to_string().as_str())
+    );
+    assert_eq!(fields("identified").mime.as_deref(), Some("image/png"));
+    assert_eq!(fields("unknown").mime.as_deref(), Some("unk"));
+    assert_eq!(fields("unknown").status, Some(404));
+    assert_eq!(
+        fields("truncated").digest.as_deref(),
+        Some(
+            LabelledDigest::compute(Algorithm::Sha256, b"tr")
+                .expect("sha256 is enabled")
+                .to_string()
+                .as_str()
+        )
+    );
+    assert_eq!(fields("revisit").mime.as_deref(), Some("warc/revisit"));
+    assert_eq!(
+        fields("revisit").digest.as_deref(),
+        Some(html_digest.to_string().as_str())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn unparsable_http_message_is_copied_but_not_indexed() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let date = WarcDate::from(Utc::now());
+    let good = response("https://example.com/", "root", date);
+    let bad = Record::<NoExtension>::response("https://example.com/bad", date)?
+        .body(b"not an HTTP message".to_vec())?;
+    let bad_id = bad.core().record_id.as_str().to_owned();
+    write_source(&input, vec![good, bad], false)?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+
+    assert_eq!(summary.records, 2);
+    assert_eq!(summary.captures, 1);
+    assert_eq!(
+        summary.warnings,
+        [ConversionWarning::CaptureNotIndexed {
+            record_id: bad_id,
+            reason: SkipReason::UnparsableHttpMessage,
+        }]
+    );
+    let mut reader = WaczReader::open(&output)?;
+    let items = reader
+        .index("indexes/index.cdx")?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].fields.url, "https://example.com/");
+    let copied = reader
+        .warc("archive/data.warc")?
+        .iter_records::<NoExtension>()
+        .count();
+    assert_eq!(copied, 2);
+
     Ok(())
 }

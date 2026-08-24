@@ -103,7 +103,11 @@ impl ConversionSpool {
         })
     }
 
-    pub fn add_capture(&mut self, item: &cdxj::Item<'_>, page: &PageDraft) -> Result<(), Error> {
+    pub fn add_capture(
+        &mut self,
+        item: &cdxj::ConformingItem<'_>,
+        page: &PageDraft,
+    ) -> Result<(), Error> {
         self.index.push(item)?;
         let bytes = serde_json::to_vec(page)?;
         let mut pages = self.transaction.open_table(PAGES).spool()?;

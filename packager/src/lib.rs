@@ -23,14 +23,15 @@ use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::http::ResponseMetadata;
-use archivindex_warc::record::{FieldsBlock, Record, payload};
-use archivindex_warc::value::{LabelledDigest, WarcDate};
+use archivindex_warc::record::{FieldsBlock, Record};
+use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 
 use spool::{Annotation, ConversionSpool, PageDraft};
 
 const INDEX_NAME: &str = "index.cdx";
 const EXTRA_PAGES_NAME: &str = "extraPages.jsonl";
 const REVISIT_MIME: &str = "warc/revisit";
+const UNKNOWN_MIME: &str = "unk";
 
 /// An HTTP capture presented to a fallback page-title generator.
 #[derive(Clone, Copy, Debug)]
@@ -99,6 +100,33 @@ pub enum ConversionWarning {
         /// Record IDs of the ignored `warcinfo` records, in source order.
         duplicate_record_ids: Vec<String>,
     },
+    /// A `response` or `revisit` record was copied into the WARC but left out of the CDXJ index
+    /// because a field the index requires could not be determined.
+    CaptureNotIndexed {
+        /// The record ID of the capture.
+        record_id: String,
+        /// The field that could not be determined.
+        reason: SkipReason,
+    },
+}
+
+/// Why a capture could not be given a CDXJ line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SkipReason {
+    /// The block is not a parseable HTTP message, so the status is unknown.
+    UnparsableHttpMessage,
+    /// No payload digest is declared and none could be computed from the block.
+    UndeterminedPayload,
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::UnparsableHttpMessage => "its block is not a parseable HTTP message",
+            Self::UndeterminedPayload => "its payload digest is neither declared nor computable",
+        })
+    }
 }
 
 impl std::fmt::Display for ConversionWarning {
@@ -113,6 +141,9 @@ impl std::fmt::Display for ConversionWarning {
                     "source WARC contains {count} warcinfo records; used the first for package metadata and ignored: {}",
                     duplicate_record_ids.join(", ")
                 )
+            }
+            Self::CaptureNotIndexed { record_id, reason } => {
+                write!(formatter, "capture {record_id} was not indexed: {reason}")
             }
         }
     }
@@ -138,6 +169,10 @@ pub struct ConversionSummary {
 /// stream. Metadata fields linked by `WARC-Refers-To` or `WARC-Concurrent-To` classify captures:
 /// those with `via` enter `extraPages.jsonl`, while the rest enter the required page list. A
 /// metadata `title` takes precedence over one supplied by an optional [`PageTitleGenerator`].
+/// Every CDXJ line carries the fields CDXJ requires: `mime` comes from the HTTP `Content-Type`
+/// (without parameters), then from `WARC-Identified-Payload-Type`, and is `unk` otherwise, while a
+/// missing payload digest is computed from the block. A capture whose status or digest cannot be
+/// determined is copied but not indexed, and reported as a [`ConversionWarning`].
 /// WARCs declaring `pageList: metadata` in their first `warcinfo` include only captures whose
 /// linked metadata has a `pageUrl`; other WARCs retain the legacy one-page-per-capture behavior.
 pub struct WarcToWacz<'a> {
@@ -252,14 +287,19 @@ impl<'a> WarcToWacz<'a> {
             let record = record?;
             package_info.inspect(&record);
             collect_metadata(&spool, &record)?;
-            let capture = capture_info(&record, self.title_generator.as_deref_mut());
+            let capture = match capture_info(&record, self.title_generator.as_deref_mut()) {
+                Ok(capture) => capture,
+                Err(reason) => {
+                    package_info.skip_capture(record.core().record_id.as_str(), reason);
+                    None
+                }
+            };
             let raw = record.into_raw()?;
             let written = warc.write_record(&raw)?;
             records += 1;
 
             if let Some(capture) = capture {
-                let item = capture.item(warc_name, &written);
-                let page = capture.page();
+                let (item, page) = capture.into_parts(warc_name, &written);
                 spool.add_capture(&item, &page)?;
             }
         }
@@ -303,6 +343,7 @@ struct PackageInfo {
     warcinfo_count: usize,
     duplicate_warcinfo_record_ids: Vec<String>,
     pages_from_metadata: bool,
+    skipped_captures: Vec<ConversionWarning>,
 }
 
 impl PackageInfo {
@@ -330,6 +371,14 @@ impl PackageInfo {
             .is_some_and(|value| value == "metadata");
     }
 
+    fn skip_capture(&mut self, record_id: &str, reason: SkipReason) {
+        self.skipped_captures
+            .push(ConversionWarning::CaptureNotIndexed {
+                record_id: record_id.to_owned(),
+                reason,
+            });
+    }
+
     fn warnings(&self) -> Vec<ConversionWarning> {
         (self.warcinfo_count > 1)
             .then_some(ConversionWarning::MultipleWarcinfo {
@@ -337,6 +386,7 @@ impl PackageInfo {
                 duplicate_record_ids: self.duplicate_warcinfo_record_ids.clone(),
             })
             .into_iter()
+            .chain(self.skipped_captures.iter().cloned())
             .collect()
     }
 }
@@ -347,43 +397,44 @@ struct CaptureInfo {
     key: String,
     url: String,
     date: WarcDate,
-    status: Option<u16>,
-    digest: Option<LabelledDigest>,
-    mime: Option<String>,
+    status: u16,
+    digest: String,
+    mime: String,
     size: Option<u64>,
     generated_title: Option<String>,
 }
 
 impl CaptureInfo {
-    fn item(&self, warc_name: &str, written: &Written) -> cdxj::Item<'static> {
-        cdxj::Item {
-            key: Cow::Owned(self.key.clone()),
-            timestamp: cdxj::Timestamp::with_milliseconds(self.date.date_time()),
-            fields: cdxj::ParsedFields {
-                url: Cow::Owned(self.url.clone()),
-                digest: self
-                    .digest
-                    .as_ref()
-                    .map(|digest| Cow::Owned(digest.to_string())),
-                mime: self.mime.as_ref().map(|mime| Cow::Owned(mime.clone())),
+    /// Split into the CDXJ line locating the written record and the page it may become.
+    fn into_parts(
+        self,
+        warc_name: &str,
+        written: &Written,
+    ) -> (cdxj::ConformingItem<'static>, PageDraft) {
+        let date = self.date.date_time();
+        let page = PageDraft::new(
+            self.record_id,
+            self.url.clone(),
+            date,
+            self.size,
+            self.generated_title,
+        );
+        let item = cdxj::Item {
+            key: Cow::Owned(self.key),
+            timestamp: cdxj::Timestamp::with_milliseconds(date),
+            fields: cdxj::ConformingFields {
+                url: Cow::Owned(self.url),
+                digest: Cow::Owned(self.digest),
+                mime: Cow::Owned(self.mime),
                 status: self.status,
-                offset: Some(written.offset),
-                length: Some(written.length),
-                filename: Some(Cow::Owned(warc_name.to_owned())),
+                offset: written.offset,
+                length: written.length,
+                filename: Cow::Owned(warc_name.to_owned()),
                 record_digest: stored_digest(written),
                 extra: ExtraProperties::default(),
             },
-        }
-    }
-
-    fn page(self) -> PageDraft {
-        PageDraft::new(
-            self.record_id,
-            self.url,
-            self.date.date_time(),
-            self.size,
-            self.generated_title,
-        )
+        };
+        (item, page)
     }
 }
 
@@ -412,88 +463,90 @@ fn collect_metadata(spool: &ConversionSpool, record: &Record) -> Result<(), Erro
     Ok(())
 }
 
+/// Describe an HTTP `response` or `revisit` record for the index and page list.
+///
+/// Returns `Ok(None)` for records of other types and for captures of non-HTTP URLs, and an error
+/// naming the field that keeps an HTTP capture out of the index.
 fn capture_info(
     record: &Record,
     generator: Option<&mut (dyn PageTitleGenerator + '_)>,
-) -> Option<CaptureInfo> {
-    match record {
-        Record::Response { header, body } => capture_info_from_http(
-            header.core.record_id.as_str(),
-            header.target_uri.as_str(),
-            header.core.date,
-            header.payload.payload_digest.clone(),
-            header
-                .payload
-                .identified_payload_type
-                .as_ref()
-                .map(ToString::to_string),
-            body,
-            false,
-            generator,
-        ),
-        Record::Revisit { header, body } => capture_info_from_http(
-            header.core.record_id.as_str(),
-            header.target_uri.as_str(),
-            header.core.date,
-            header.payload.payload_digest.clone(),
-            Some(REVISIT_MIME.to_owned()),
-            body,
-            true,
-            generator,
-        ),
-        _ => None,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn capture_info_from_http(
-    record_id: &str,
-    target_uri: &str,
-    date: WarcDate,
-    digest: Option<LabelledDigest>,
-    mime: Option<String>,
-    message: &[u8],
-    revisit: bool,
-    generator: Option<&mut (dyn PageTitleGenerator + '_)>,
-) -> Option<CaptureInfo> {
-    let url = Canonicalizer::WAYBACK.canonicalize(target_uri).ok()?;
+) -> Result<Option<CaptureInfo>, SkipReason> {
+    let (message, revisit) = match record {
+        Record::Response { body, .. } => (body.as_slice(), false),
+        Record::Revisit { body, .. } => (body.as_slice(), true),
+        _ => return Ok(None),
+    };
+    let (Some(target_uri), Some(payload_headers)) = (record.target_uri(), record.payload()) else {
+        return Ok(None);
+    };
+    let Ok(url) = Canonicalizer::WAYBACK.canonicalize(target_uri.as_str()) else {
+        return Ok(None);
+    };
     if !matches!(url.scheme(), "http" | "https") {
-        return None;
+        return Ok(None);
     }
-    let key = Cow::from(url.surt()).into_owned();
-    let head = ResponseMetadata::parse(message);
-    let status = head.as_ref().map(|head| head.status);
+    let head = ResponseMetadata::parse(message).ok_or(SkipReason::UnparsableHttpMessage)?;
+    // A revisit has no local payload; a response's is its entity body when it can be extracted.
+    let payload = (!revisit)
+        .then(|| record.payload_bytes().ok().flatten())
+        .flatten();
+    let digest = match &payload_headers.payload_digest {
+        Some(digest) => digest.to_string(),
+        None => payload
+            .as_deref()
+            .and_then(|payload| LabelledDigest::compute(Algorithm::Sha256, payload))
+            .ok_or(SkipReason::UndeterminedPayload)?
+            .to_string(),
+    };
+    let mime = if revisit {
+        REVISIT_MIME.to_owned()
+    } else {
+        content_type_essence(&head)
+            .map(str::to_owned)
+            .or_else(|| {
+                payload_headers
+                    .identified_payload_type
+                    .as_ref()
+                    .map(|media_type| {
+                        format!("{}/{}", media_type.type_name(), media_type.subtype())
+                    })
+            })
+            .unwrap_or_else(|| UNKNOWN_MIME.to_owned())
+    };
     let entity: Cow<'_, [u8]> = if revisit {
         Cow::Borrowed(&[])
     } else {
-        payload::entity_body(message).unwrap_or_else(|_| {
-            head.as_ref().map_or(Cow::Borrowed(&[]), |head| {
-                Cow::Borrowed(&message[head.body_offset..])
-            })
-        })
+        payload.unwrap_or_else(|| Cow::Borrowed(&message[head.body_offset..]))
     };
     let generated_title = generator.and_then(|generator| {
-        status.and_then(|status| {
-            generator.title(&Capture {
-                url: target_uri,
-                status,
-                payload: &entity,
-                response: message,
-            })
+        generator.title(&Capture {
+            url: target_uri.as_str(),
+            status: head.status,
+            payload: &entity,
+            response: message,
         })
     });
 
-    Some(CaptureInfo {
-        record_id: record_id.to_owned(),
-        key,
-        url: target_uri.to_owned(),
-        date,
-        status,
+    Ok(Some(CaptureInfo {
+        record_id: record.core().record_id.as_str().to_owned(),
+        key: Cow::from(url.surt()).into_owned(),
+        url: target_uri.as_str().to_owned(),
+        date: record.core().date,
+        status: head.status,
         digest,
         mime,
         size: (!revisit).then_some(entity.len() as u64),
         generated_title,
-    })
+    }))
+}
+
+/// The `type/subtype` of the response's `Content-Type`, without its parameters.
+fn content_type_essence(head: &ResponseMetadata) -> Option<&str> {
+    head.header("content-type")
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|essence| !essence.is_empty())
 }
 
 fn stored_digest(written: &Written) -> Option<Sha256Digest> {
