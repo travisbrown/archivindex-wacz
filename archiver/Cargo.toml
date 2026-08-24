@@ -17,7 +17,6 @@ archivindex-warc = { workspace = true, features = [
   "gzip",
   "payload-identification",
   "recorder",
-  "serde",
 ] }
 chrono.workspace = true
 fluent-uri.workspace = true

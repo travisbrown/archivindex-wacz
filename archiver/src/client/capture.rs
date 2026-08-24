@@ -39,7 +39,7 @@ impl CaptureOutcome {
 }
 
 /// The precision at which `WARC-Date` fields are recorded.
-const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
+pub(super) const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
 
 /// A single captured exchange not yet written.
 pub struct Exchange {

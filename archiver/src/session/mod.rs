@@ -33,6 +33,16 @@ pub struct Software {
     pub version: String,
 }
 
+impl Default for Software {
+    /// This crate's own name and version.
+    fn default() -> Self {
+        Self {
+            name: env!("CARGO_PKG_NAME").to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+}
+
 /// A successfully captured page shown to a [`CaptureProcessor`].
 #[derive(Clone, Debug)]
 pub struct Capture<'a> {
@@ -187,10 +197,7 @@ impl<'a> Session<'a> {
             archiver,
             id: id.to_owned(),
             operator,
-            software: Software {
-                name: env!("CARGO_PKG_NAME").to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            },
+            software: Software::default(),
             seeds: seeds
                 .into_iter()
                 .map(|seed| seed.as_ref().to_owned())
