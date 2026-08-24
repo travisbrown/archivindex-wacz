@@ -384,6 +384,12 @@ mod tests {
         sorter.push_line("a\n".to_owned()).unwrap();
 
         assert!(sorter.directory.is_none());
-        assert_eq!(sorted_output(sorter).len(), 5000);
+        let mut output = String::new();
+        sorter
+            .finish()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        assert_eq!(output, "a\nb\n");
     }
 }
