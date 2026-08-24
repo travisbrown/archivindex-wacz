@@ -142,16 +142,11 @@ fn index_revisit<E: Extension>(
                         "identical-payload-digest revisit has no payload digest",
                     ))?;
             let canonical = lookup_payload(connection, digest)?;
+            // Without a known canonical record the revisit itself must never become the
+            // resource's record: it carries no payload, so a later `WARC-Refers-To` pointing at
+            // it would be unresolvable. A missing `WARC-Refers-To` is stored as NULL.
             let (record_id, warc_date) = canonical.as_ref().map_or_else(
-                || {
-                    (
-                        header
-                            .refers_to
-                            .clone()
-                            .or_else(|| Some(header.core.record_id.clone())),
-                        header.refers_to_date.or(Some(header.core.date)),
-                    )
-                },
+                || (header.refers_to.clone(), header.refers_to_date),
                 |target| (Some(target.record_id.clone()), Some(target.warc_date)),
             );
 

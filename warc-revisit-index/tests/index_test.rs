@@ -519,3 +519,43 @@ fn truncated_response_is_not_indexed() -> Result<(), Box<dyn StdError>> {
     assert!(index.lookup_resource(&key(URI_A))?.is_none());
     Ok(())
 }
+
+#[test]
+fn payload_less_revisit_never_becomes_the_resource_record() -> Result<(), Box<dyn StdError>> {
+    let index = Index::open_in_memory()?;
+    let digest = sha256(b"never indexed");
+    let revisit = |record_id: &str, warc_date: &str| {
+        Record::<NoExtension>::revisit(
+            URI_A,
+            date(warc_date),
+            RevisitProfile::IDENTICAL_PAYLOAD_DIGEST,
+        )
+        .map(|builder| {
+            builder
+                .record_id(uri(record_id))
+                .payload_digest(digest.clone())
+        })
+    };
+
+    // WARC 1.1 permits an identical-payload-digest revisit without `WARC-Refers-To`. The
+    // revisit's own identity must not be recorded as the resource's representation.
+    index.index_record(&revisit(RECORD_A, "2025-01-01T00:00:00Z")?.body(Vec::new())?)?;
+    let state = index.lookup_resource(&key(URI_A))?.expect("resource state");
+    assert_eq!(state.payload_digest, Some(digest.clone()));
+    assert_eq!(state.record_id, None);
+    assert_eq!(state.warc_date, None);
+
+    // When the revisit names its original, that identity is stored even without a payload row.
+    index.index_record(
+        &revisit(RECORD_B, "2025-01-02T00:00:00Z")?
+            .refers_to(uri(RECORD_A))
+            .refers_to_target_uri(uri(URI_A))
+            .refers_to_date(date("2024-12-31T00:00:00Z"))
+            .body(Vec::new())?,
+    )?;
+    let state = index.lookup_resource(&key(URI_A))?.expect("resource state");
+    assert_eq!(state.record_id, Some(uri(RECORD_A)));
+    assert_eq!(state.warc_date, Some(date("2024-12-31T00:00:00Z")));
+    assert!(index.lookup_payload(&digest)?.is_none());
+    Ok(())
+}
