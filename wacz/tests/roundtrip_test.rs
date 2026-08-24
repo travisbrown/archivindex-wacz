@@ -818,6 +818,45 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// A pre-rendered index whose lines are out of order is rejected before anything is written, in
+/// both formats, and the writer remains usable for a correctly ordered file.
+#[test]
+fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let earlier = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap();
+    let later = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).single().unwrap();
+    let items = [
+        item_at("https://www.example.com/page0", later)?,
+        item_at("https://www.example.com/page0", earlier)?,
+        item_at("https://www.example.com/page1", earlier)?,
+    ];
+    let conforming = conforming_items(&items)?;
+    let lines = conforming
+        .iter()
+        .map(|item| format!("{item}\n"))
+        .collect::<Vec<_>>();
+
+    for index_format in [IndexFormat::Plain, IndexFormat::ZipNum { lines: 2 }] {
+        let config = WriterConfig {
+            index_format,
+            ..WriterConfig::default()
+        };
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+        assert!(matches!(
+            writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat())),
+            Err(writer::Error::UnsortedIndex { line: 2 })
+        ));
+        // Equal `(key, timestamp)` prefixes are accepted in the order given.
+        writer.add_sorted_index_file("index.cdx", Cursor::new(lines[1..].concat()))?;
+        let wacz = writer
+            .finish_unchecked(DataPackageBuilder::default())?
+            .into_inner();
+        let mut reader = WaczReader::new(Cursor::new(wacz))?;
+        assert_eq!(reader.lookup("https://www.example.com/page0", ..)?.len(), 1);
+    }
+
+    Ok(())
+}
+
 /// An index written with no items is still readable in both formats, and a `ZipNum` summary holds
 /// only its `!meta` line.
 #[test]

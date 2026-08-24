@@ -37,6 +37,16 @@ impl<W: Write + Seek> WaczWriter<W> {
     }
 
     /// Add an already sorted, deduplicated CDXJ file without retaining the collection in memory.
+    ///
+    /// Every line is parsed before any member is written, and the file is rejected if a line sorts
+    /// before its predecessor by `(key, timestamp)`; lines sharing a prefix are accepted in the
+    /// order given.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidIndexName`] for a name that is not a direct `.cdx` member name,
+    /// [`Error::InvalidIndex`] for a line that is not a CDXJ item, and [`Error::UnsortedIndex`]
+    /// for the first line that sorts before the line preceding it.
     pub fn add_sorted_index_file<R: BufRead + Seek>(
         &mut self,
         name: &str,
@@ -45,8 +55,15 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
-        for item in cdxj::IndexReader::new(&mut reader) {
-            item.map_err(Error::InvalidIndex)?;
+        let mut previous: Option<(String, cdxj::Timestamp)> = None;
+        for (index, item) in cdxj::IndexReader::new(&mut reader).enumerate() {
+            let item = item.map_err(Error::InvalidIndex)?;
+            // The reader yields owned keys, so `into_owned` moves rather than copies.
+            let current = (item.key.into_owned(), item.timestamp);
+            if previous.is_some_and(|previous| previous > current) {
+                return Err(Error::UnsortedIndex { line: index + 1 });
+            }
+            previous = Some(current);
         }
         reader.rewind()?;
         match self.config.index_format {

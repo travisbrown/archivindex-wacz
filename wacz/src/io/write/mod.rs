@@ -111,6 +111,12 @@ pub enum Error {
     /// A pre-rendered CDXJ index is invalid.
     #[error("invalid CDXJ index")]
     InvalidIndex(#[source] crate::cdxj::Error),
+    /// A pre-rendered CDXJ index is not sorted by search key and timestamp.
+    #[error("CDXJ index line {line} sorts before the line preceding it")]
+    UnsortedIndex {
+        /// One-based number of the first line that sorts before its predecessor.
+        line: usize,
+    },
     /// A WARC path has no usable UTF-8 file name.
     #[error("invalid WARC file name: {}", .0.display())]
     InvalidFileName(PathBuf),
