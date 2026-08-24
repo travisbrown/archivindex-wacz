@@ -630,3 +630,88 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
     assert_eq!(state_b.record_id, Some(uri(RECORD_B)));
     Ok(())
 }
+
+#[test]
+fn non_200_response_registers_its_payload_but_not_the_resource() -> Result<(), Box<dyn StdError>> {
+    let index = Index::open_in_memory()?;
+    let payload = b"missing";
+    let mut message =
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 7\r\nETag: \"gone\"\r\n\r\n".to_vec();
+    message.extend_from_slice(payload);
+    let record = Record::<NoExtension>::response(URI_A, date("2025-01-01T00:00:00Z"))?
+        .record_id(uri(RECORD_A))
+        .payload_digest(sha256(payload))
+        .body(message)?;
+
+    let outcome = index.index_record(&record)?;
+
+    // An error page may still be revisited by digest, but it is not the resource's
+    // representation, so its validators must not drive conditional requests.
+    assert!(outcome.payload_inserted);
+    assert!(!outcome.resource_updated);
+    assert_eq!(
+        index
+            .lookup_payload(&sha256(payload))?
+            .map(|target| target.payload_length),
+        Some(Some(7))
+    );
+    assert!(index.lookup_resource(&key(URI_A))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn revisit_with_a_non_http_block_is_rejected() -> Result<(), Box<dyn StdError>> {
+    let index = Index::open_in_memory()?;
+    let record = Record::<NoExtension>::revisit(
+        URI_A,
+        date("2025-01-01T00:00:00Z"),
+        RevisitProfile::Other("urn:example:profile".to_owned()),
+    )?
+    .record_id(uri(RECORD_A))
+    .body(b"not an HTTP response head".to_vec())?;
+
+    let error = index
+        .index_record(&record)
+        .expect_err("a non-HTTP revisit block is malformed");
+
+    assert!(matches!(error, Error::MalformedHttpResponse(_)));
+    Ok(())
+}
+
+#[test]
+fn foreign_profile_revisit_changes_nothing() -> Result<(), Box<dyn StdError>> {
+    let index = Index::open_in_memory()?;
+    let digest = sha256(b"foreign");
+    let record = Record::<NoExtension>::revisit(
+        URI_A,
+        date("2025-01-02T00:00:00Z"),
+        RevisitProfile::Other("urn:example:profile".to_owned()),
+    )?
+    .record_id(uri(RECORD_A))
+    .payload_digest(digest.clone())
+    .refers_to(uri(RECORD_B))
+    .refers_to_date(date("2025-01-01T00:00:00Z"))
+    .body(Vec::new())?;
+
+    let outcome = index.index_record(&record)?;
+
+    assert!(!outcome.payload_inserted);
+    assert!(!outcome.resource_updated);
+    assert!(index.lookup_payload(&digest)?.is_none());
+    assert!(index.lookup_resource(&key(URI_A))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn dropped_transaction_rolls_back() -> Result<(), Box<dyn StdError>> {
+    let mut index = Index::open_in_memory()?;
+    let one = target(sha256(b"one"), RECORD_A, URI_A, "2025-01-01", Some(3));
+
+    {
+        let transaction = index.begin()?;
+        transaction.insert_payload(&one)?;
+    }
+
+    assert!(index.lookup_payload(&one.payload_digest)?.is_none());
+    Ok(())
+}
