@@ -19,7 +19,7 @@ use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
-use archivindex_warc::value::DigestAlgorithm;
+use archivindex_warc::value::Algorithm;
 use archivindex_warc::value::WarcDatePrecision;
 use archivindex_warc::version::WarcVersion;
 use chrono::SubsecRound as _;
@@ -295,7 +295,7 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
         response
             .payload()
             .and_then(|payload| payload.payload_digest.as_ref())
-            .is_some_and(|digest| *digest.algorithm() == DigestAlgorithm::Sha256)
+            .is_some_and(|digest| digest.algorithm() == Some(Algorithm::Sha256))
     );
     assert!(
         response

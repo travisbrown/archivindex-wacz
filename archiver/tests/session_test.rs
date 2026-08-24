@@ -24,7 +24,7 @@ use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
-use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
+use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
 use archivindex_warc::version::WarcVersion;
 use archivindex_warc_revisit_index::db::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
@@ -136,7 +136,7 @@ fn warc_date(value: &str) -> WarcDate {
 
 fn sha256(payload: &[u8]) -> LabelledDigest {
     let digest = Sha256Digest::compute(payload);
-    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest.0)
+    LabelledDigest::from_digest(Algorithm::Sha256, &digest.0)
 }
 
 /// Answer a request for a versioned page, whose `ETag` advances once: an unconditional request or

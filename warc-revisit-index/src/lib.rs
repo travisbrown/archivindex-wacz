@@ -20,14 +20,14 @@
 //! # Example
 //!
 //! ```
-//! use archivindex_warc::value::{DigestAlgorithm, LabelledDigest};
+//! use archivindex_warc::value::{Algorithm, LabelledDigest};
 //! use archivindex_warc_revisit_index::db::Index;
 //! use archivindex_warc_revisit_index::resource::ResourceKey;
 //! use fluent_uri::Uri;
 //!
 //! let index = Index::open_in_memory()?;
 //! let key = ResourceKey::new(Uri::parse("https://example.com/")?.to_owned());
-//! let digest = LabelledDigest::from_digest(DigestAlgorithm::Sha256, &[0; 32]);
+//! let digest = LabelledDigest::from_digest(Algorithm::Sha256, &[0; 32]);
 //!
 //! assert!(index.lookup_payload(&digest)?.is_none());
 //! assert!(index.lookup_resource(&key)?.is_none());

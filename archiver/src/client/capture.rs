@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use archivindex_warc::recorder::CapturedExchange;
-use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate, WarcDatePrecision};
+use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate, WarcDatePrecision};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState};
 use http::StatusCode;
@@ -245,7 +245,7 @@ impl Archiver {
 
 /// Express the archiver's fixed SHA-256 payload digest in WARC's labelled representation.
 pub(super) fn labelled_digest(digest: [u8; 32]) -> LabelledDigest {
-    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &digest)
+    LabelledDigest::from_digest(Algorithm::Sha256, &digest)
 }
 
 /// Whether a status redirects to the response's `Location`.

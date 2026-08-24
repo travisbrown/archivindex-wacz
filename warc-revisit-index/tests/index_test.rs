@@ -3,7 +3,7 @@ use std::error::Error as StdError;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::header::RevisitProfile;
-use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate};
+use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use archivindex_warc_revisit_index::db::Index;
 use archivindex_warc_revisit_index::error::Error;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
@@ -25,7 +25,7 @@ fn date(value: &str) -> WarcDate {
 }
 
 fn sha256(bytes: &[u8]) -> LabelledDigest {
-    LabelledDigest::from_digest(DigestAlgorithm::Sha256, &sha2::Sha256::digest(bytes))
+    LabelledDigest::from_digest(Algorithm::Sha256, &sha2::Sha256::digest(bytes))
 }
 
 fn target(
@@ -73,7 +73,7 @@ fn response(
 #[test]
 fn payload_round_trips_every_field_and_missing_is_none() -> Result<(), Box<dyn StdError>> {
     let index = Index::open_in_memory()?;
-    let digest = LabelledDigest::from_digest(DigestAlgorithm::Sha256, &[0xa5; 32]);
+    let digest = LabelledDigest::from_digest(Algorithm::Sha256, &[0xa5; 32]);
     let expected = target(
         digest.clone(),
         RECORD_A,
@@ -138,8 +138,8 @@ fn duplicate_payload_insert_is_idempotent_and_preserves_canonical_source()
 #[test]
 fn digest_algorithm_is_part_of_the_payload_key() -> Result<(), Box<dyn StdError>> {
     let index = Index::open_in_memory()?;
-    let md5 = LabelledDigest::from_digest(DigestAlgorithm::Md5, &[7; 16]);
-    let sha1 = LabelledDigest::from_digest(DigestAlgorithm::Sha1, &[7; 20]);
+    let md5 = LabelledDigest::from_digest(Algorithm::Md5, &[7; 16]);
+    let sha1 = LabelledDigest::from_digest(Algorithm::Sha1, &[7; 20]);
     let md5_target = target(md5.clone(), RECORD_A, URI_A, "2025-01-01", None);
     let sha1_target = target(sha1.clone(), RECORD_B, URI_B, "2025-01-02", None);
 

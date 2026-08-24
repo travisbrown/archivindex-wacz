@@ -8,7 +8,7 @@ use archivindex_warc::record::capture::{CaptureEvent, CaptureRecords};
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::recorder::CapturedExchange;
-use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, MediaType, WarcDate};
+use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use fluent_uri::Uri;
 
@@ -129,7 +129,7 @@ fn full_records(
         .identify_payload_type();
 
     if let Some(digest) = payload_digest {
-        event = event.payload_digest(LabelledDigest::from_digest(DigestAlgorithm::Sha256, digest));
+        event = event.payload_digest(LabelledDigest::from_digest(Algorithm::Sha256, digest));
     }
     if let Some(reason) = truncated {
         event = event.truncated(reason);

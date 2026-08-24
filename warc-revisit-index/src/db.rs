@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use archivindex_warc::value::{DigestAlgorithm, LabelledDigest, WarcDate};
+use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use fluent_uri::Uri;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -349,26 +349,27 @@ pub(crate) fn update_resource(
 }
 
 fn digest_parts(digest: &LabelledDigest) -> Result<(String, Vec<u8>), Error> {
+    let algorithm = digest.algorithm().ok_or_else(|| {
+        Error::UnsupportedDigestAlgorithm(digest.algorithm_as_read().into_owned())
+    })?;
     let bytes = digest
         .decoded()
         .ok_or_else(|| Error::UndecodableDigest(digest.to_string()))?;
-    validate_digest_length(digest.algorithm(), bytes.len())?;
-    let algorithm = digest.algorithm().label().to_owned();
-    Ok((algorithm, bytes))
+    validate_digest_length(algorithm, bytes.len())?;
+    Ok((algorithm.label().to_owned(), bytes))
 }
 
 fn digest_from_parts(label: &str, bytes: &[u8]) -> Result<LabelledDigest, Error> {
-    let algorithm = label
-        .parse::<DigestAlgorithm>()
-        .map_err(|_| Error::UnsupportedDigestAlgorithm(label.to_owned()))?;
-    validate_digest_length(&algorithm, bytes.len())?;
+    let algorithm = Algorithm::ALL
+        .into_iter()
+        .find(|algorithm| algorithm.label().eq_ignore_ascii_case(label))
+        .ok_or_else(|| Error::UnsupportedDigestAlgorithm(label.to_owned()))?;
+    validate_digest_length(algorithm, bytes.len())?;
     Ok(LabelledDigest::from_digest(algorithm, bytes))
 }
 
-fn validate_digest_length(algorithm: &DigestAlgorithm, actual: usize) -> Result<(), Error> {
-    let expected = algorithm
-        .digest_length()
-        .ok_or_else(|| Error::UnsupportedDigestAlgorithm(algorithm.label().to_owned()))?;
+fn validate_digest_length(algorithm: Algorithm, actual: usize) -> Result<(), Error> {
+    let expected = algorithm.digest_length();
     if actual == expected {
         Ok(())
     } else {
