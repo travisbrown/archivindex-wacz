@@ -112,10 +112,18 @@ pub struct DataPackage<'a> {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributors: Vec<Contributor<'a>>,
     /// When the WACZ file was created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::optional_lenient_datetime",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub created: Option<DateTime<Utc>>,
     /// When the WACZ file was last modified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::optional_lenient_datetime",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub modified: Option<DateTime<Utc>>,
     /// A description of the software that created the WACZ file.
     #[serde(
@@ -137,6 +145,7 @@ pub struct DataPackage<'a> {
     #[serde(
         rename = "mainPageDate",
         default,
+        deserialize_with = "crate::attributes::optional_lenient_datetime",
         skip_serializing_if = "Option::is_none"
     )]
     pub main_page_date: Option<DateTime<Utc>>,

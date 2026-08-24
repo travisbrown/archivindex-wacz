@@ -134,6 +134,7 @@ pub struct Page<'a> {
     #[serde(borrow)]
     pub url: Cow<'a, str>,
     /// When the page was captured.
+    #[serde(deserialize_with = "crate::attributes::lenient_datetime")]
     pub ts: DateTime<Utc>,
     /// An arbitrary identifier for the page.
     #[serde(
