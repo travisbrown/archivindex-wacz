@@ -104,7 +104,6 @@ fn index_response<E: Extension>(
                 warc_date: Some(header.core.date),
             },
         )?
-        .is_some()
     } else {
         false
     };
@@ -161,7 +160,6 @@ fn index_revisit<E: Extension>(
                     warc_date,
                 },
             )?
-            .is_some()
         }
         RevisitProfile::ServerNotModified(_) => {
             if lookup_resource(connection, &key)?.is_some() {
@@ -173,7 +171,6 @@ fn index_revisit<E: Extension>(
                         last_modified: metadata.last_modified,
                     },
                 )?
-                .is_some()
             } else if header.refers_to.is_some() && header.refers_to_date.is_some() {
                 update_resource(
                     connection,
@@ -186,7 +183,6 @@ fn index_revisit<E: Extension>(
                         warc_date: header.refers_to_date,
                     },
                 )?
-                .is_some()
             } else {
                 false
             }

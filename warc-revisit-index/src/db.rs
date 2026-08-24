@@ -133,15 +133,19 @@ impl<C> Store<C> {
 
     /// Apply a resource-state update within the transaction.
     ///
+    /// # Returns
+    ///
+    /// Whether a row was written: always for a representation, and only when the resource is
+    /// already known for a not-modified update.
+    ///
     /// # Errors
     ///
-    /// Returns an error for invalid digest data, a SQLite query failure, or malformed resulting
-    /// state.
+    /// Returns an error for invalid digest data or a SQLite query failure.
     pub fn update_resource(
         &self,
         key: &ResourceKey,
         update: ResourceStateUpdate,
-    ) -> Result<Option<ResourceState>, Error> {
+    ) -> Result<bool, Error> {
         update_resource(self.connection(), key, update)
     }
 }
@@ -164,27 +168,27 @@ pub(crate) fn lookup_payload(
     digest: &LabelledDigest,
 ) -> Result<Option<RevisitTarget>, Error> {
     let (algorithm, bytes) = digest_parts(digest)?;
-    let stored = connection
-        .query_row(
-            "SELECT payload_length, record_id, target_uri, warc_date
-             FROM payloads WHERE digest_algorithm = ?1 AND digest = ?2",
-            params![algorithm, bytes],
-            |row| {
-                Ok((
-                    row.get::<_, Option<i64>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(Error::database("look up payload"))?;
+    let stored = cached(
+        connection,
+        "SELECT payload_length, record_id, target_uri, warc_date
+         FROM payloads WHERE digest_algorithm = ?1 AND digest = ?2",
+        "look up payload",
+    )?
+    .query_row(params![algorithm.label(), bytes.as_slice()], |row| {
+        Ok((
+            row.get::<_, Option<i64>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })
+    .optional()
+    .map_err(Error::database("look up payload"))?;
 
     stored
         .map(|(length, record_id, target_uri, warc_date)| {
             Ok(RevisitTarget {
-                payload_digest: digest_from_parts(&algorithm, &bytes)?,
+                payload_digest: LabelledDigest::from_digest(algorithm, &bytes),
                 payload_length: length
                     .map(|value| unsigned("payload_length", value))
                     .transpose()?,
@@ -205,22 +209,23 @@ pub(crate) fn insert_payload(
         .payload_length
         .map(|value| signed("payload_length", value))
         .transpose()?;
-    let changed = connection
-        .execute(
-            "INSERT INTO payloads (
-                 digest_algorithm, digest, payload_length, record_id, target_uri, warc_date
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (digest_algorithm, digest) DO NOTHING",
-            params![
-                algorithm,
-                digest,
-                payload_length,
-                target.record_id.as_str(),
-                target.target_uri.as_str(),
-                target.warc_date.to_string(),
-            ],
-        )
-        .map_err(Error::database("insert payload"))?;
+    let changed = cached(
+        connection,
+        "INSERT INTO payloads (
+             digest_algorithm, digest, payload_length, record_id, target_uri, warc_date
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (digest_algorithm, digest) DO NOTHING",
+        "insert payload",
+    )?
+    .execute(params![
+        algorithm.label(),
+        digest.as_slice(),
+        payload_length,
+        target.record_id.as_str(),
+        target.target_uri.as_str(),
+        target.warc_date.to_string(),
+    ])
+    .map_err(Error::database("insert payload"))?;
     Ok(changed != 0)
 }
 
@@ -237,24 +242,24 @@ pub(crate) fn lookup_resource(
         Option<String>,
     );
 
-    let stored: Option<Stored> = connection
-        .query_row(
-            "SELECT etag, last_modified, digest_algorithm, digest, record_id, warc_date
-             FROM resource_state WHERE target_uri = ?1",
-            [key.target_uri().as_str()],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(Error::database("look up resource state"))?;
+    let stored: Option<Stored> = cached(
+        connection,
+        "SELECT etag, last_modified, digest_algorithm, digest, record_id, warc_date
+         FROM resource_state WHERE target_uri = ?1",
+        "look up resource state",
+    )?
+    .query_row([key.target_uri().as_str()], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
+    })
+    .optional()
+    .map_err(Error::database("look up resource state"))?;
 
     stored
         .map(
@@ -288,8 +293,8 @@ pub(crate) fn update_resource(
     connection: &Connection,
     key: &ResourceKey,
     update: ResourceStateUpdate,
-) -> Result<Option<ResourceState>, Error> {
-    match update {
+) -> Result<bool, Error> {
+    let changed = match update {
         ResourceStateUpdate::Representation {
             etag,
             last_modified,
@@ -302,53 +307,63 @@ pub(crate) fn update_resource(
                 .map(digest_parts)
                 .transpose()?
                 .map_or((None, None), |(algorithm, digest)| {
-                    (Some(algorithm), Some(digest))
+                    (Some(algorithm.label()), Some(digest))
                 });
-            connection
-                .execute(
-                    "INSERT INTO resource_state (
-                         target_uri, etag, last_modified, digest_algorithm, digest,
-                         record_id, warc_date
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT (target_uri) DO UPDATE SET
-                         etag = excluded.etag,
-                         last_modified = excluded.last_modified,
-                         digest_algorithm = excluded.digest_algorithm,
-                         digest = excluded.digest,
-                         record_id = excluded.record_id,
-                         warc_date = excluded.warc_date",
-                    params![
-                        key.target_uri().as_str(),
-                        etag,
-                        last_modified,
-                        algorithm,
-                        digest,
-                        record_id.as_ref().map(Uri::as_str),
-                        warc_date.map(|date| date.to_string()),
-                    ],
-                )
-                .map_err(Error::database("update resource representation"))?;
+            cached(
+                connection,
+                "INSERT INTO resource_state (
+                     target_uri, etag, last_modified, digest_algorithm, digest,
+                     record_id, warc_date
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (target_uri) DO UPDATE SET
+                     etag = excluded.etag,
+                     last_modified = excluded.last_modified,
+                     digest_algorithm = excluded.digest_algorithm,
+                     digest = excluded.digest,
+                     record_id = excluded.record_id,
+                     warc_date = excluded.warc_date",
+                "update resource representation",
+            )?
+            .execute(params![
+                key.target_uri().as_str(),
+                etag,
+                last_modified,
+                algorithm,
+                digest.as_deref(),
+                record_id.as_ref().map(Uri::as_str),
+                warc_date.map(|date| date.to_string()),
+            ])
+            .map_err(Error::database("update resource representation"))?
         }
         ResourceStateUpdate::NotModified {
             etag,
             last_modified,
-        } => {
-            connection
-                .execute(
-                    "UPDATE resource_state SET
-                         etag = COALESCE(?2, etag),
-                         last_modified = COALESCE(?3, last_modified)
-                     WHERE target_uri = ?1",
-                    params![key.target_uri().as_str(), etag, last_modified],
-                )
-                .map_err(Error::database("update not-modified resource state"))?;
-        }
-    }
-
-    lookup_resource(connection, key)
+        } => cached(
+            connection,
+            "UPDATE resource_state SET
+                 etag = COALESCE(?2, etag),
+                 last_modified = COALESCE(?3, last_modified)
+             WHERE target_uri = ?1",
+            "update not-modified resource state",
+        )?
+        .execute(params![key.target_uri().as_str(), etag, last_modified])
+        .map_err(Error::database("update not-modified resource state"))?,
+    };
+    Ok(changed > 0)
 }
 
-fn digest_parts(digest: &LabelledDigest) -> Result<(String, Vec<u8>), Error> {
+/// Fetch `sql` from the connection's statement cache, preparing it on first use.
+fn cached<'connection>(
+    connection: &'connection Connection,
+    sql: &str,
+    operation: &'static str,
+) -> Result<rusqlite::CachedStatement<'connection>, Error> {
+    connection
+        .prepare_cached(sql)
+        .map_err(Error::database(operation))
+}
+
+fn digest_parts(digest: &LabelledDigest) -> Result<(Algorithm, Vec<u8>), Error> {
     let algorithm = digest.algorithm().ok_or_else(|| {
         Error::UnsupportedDigestAlgorithm(digest.algorithm_as_read().into_owned())
     })?;
@@ -356,7 +371,7 @@ fn digest_parts(digest: &LabelledDigest) -> Result<(String, Vec<u8>), Error> {
         .decoded()
         .ok_or_else(|| Error::UndecodableDigest(digest.to_string()))?;
     validate_digest_length(algorithm, bytes.len())?;
-    Ok((algorithm.label().to_owned(), bytes))
+    Ok((algorithm, bytes))
 }
 
 fn digest_from_parts(label: &str, bytes: &[u8]) -> Result<LabelledDigest, Error> {

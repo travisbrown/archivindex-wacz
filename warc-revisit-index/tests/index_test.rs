@@ -244,17 +244,13 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
     assert_eq!(state.payload_digest, Some(digest));
     assert_eq!(state.record_id, Some(uri(RECORD_A)));
     assert_eq!(state.warc_date, Some(original_date));
-    assert!(
-        index
-            .update_resource(
-                &key(URI_B),
-                ResourceStateUpdate::NotModified {
-                    etag: None,
-                    last_modified: None,
-                },
-            )?
-            .is_none()
-    );
+    assert!(!index.update_resource(
+        &key(URI_B),
+        ResourceStateUpdate::NotModified {
+            etag: None,
+            last_modified: None,
+        },
+    )?);
     Ok(())
 }
 
