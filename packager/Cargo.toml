@@ -12,6 +12,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+archivindex-surt = { version = "0.1.0", path = "../surt/" }
 archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
 archivindex-warc = { workspace = true, features = ["gzip", "http"] }
 chrono.workspace = true
@@ -20,7 +21,6 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-url.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

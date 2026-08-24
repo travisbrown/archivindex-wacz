@@ -1,5 +1,5 @@
 [workspace]
-members = ["archiver", "archiver-cli", "packager", "wacz", "warc-revisit-index"]
+members = ["archiver", "archiver-cli", "packager", "surt", "wacz", "warc-revisit-index"]
 resolver = "3"
 
 [workspace.package]

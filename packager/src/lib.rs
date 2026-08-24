@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+use archivindex_surt::url::Canonicalizer;
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
@@ -24,7 +25,6 @@ use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::record::{FieldsBlock, Record, payload};
 use archivindex_warc::value::{LabelledDigest, WarcDate};
-use url::Url;
 
 use spool::{Annotation, ConversionSpool, PageDraft};
 
@@ -456,11 +456,11 @@ fn capture_info_from_http(
     revisit: bool,
     generator: Option<&mut (dyn PageTitleGenerator + '_)>,
 ) -> Option<CaptureInfo> {
-    let url = Url::parse(target_uri).ok()?;
+    let url = Canonicalizer::WAYBACK.canonicalize(target_uri).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
-    let key = cdxj::search_key(target_uri).ok()?;
+    let key = Cow::from(url.surt()).into_owned();
     let head = ResponseMetadata::parse(message);
     let status = head.as_ref().map(|head| head.status);
     let entity: Cow<'_, [u8]> = if revisit {

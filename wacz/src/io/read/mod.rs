@@ -45,9 +45,12 @@ pub enum Error {
     /// A page list could not be read.
     #[error(transparent)]
     Pages(#[from] crate::pages::Error),
-    /// A CDXJ index entry or search key is invalid.
+    /// A CDXJ index entry is invalid.
     #[error(transparent)]
     Cdxj(#[from] crate::cdxj::Error),
+    /// A URL to look up could not be transformed into a search key.
+    #[error(transparent)]
+    InvalidUrl(#[from] archivindex_surt::url::Error),
     /// A WARC record could not be parsed.
     #[error(transparent)]
     Warc(#[from] archivindex_warc::io::read::Error),

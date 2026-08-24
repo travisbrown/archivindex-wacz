@@ -1,0 +1,28 @@
+[package]
+name = "archivindex-surt"
+description = "Sort-friendly URI Reordering Transform (SURT) keys and URL canonicalization for web archive indexes"
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/crate/archivindex-surt/"
+keywords = ["surt", "cdx", "warc", "web", "archive"]
+edition.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+## Borrowing `serde::Deserialize` and `serde::Serialize` implementations for `Surt`.
+serde = ["dep:serde"]
+## `bounded_static` implementations for `Surt`, so that it can be a field of a `ToStatic` type.
+bounded-static = ["dep:bounded-static"]
+
+[dependencies]
+bounded-static = { version = "0.8", optional = true }
+serde = { version = "1", optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+serde_json.workspace = true
+test-strategy = "0.4"

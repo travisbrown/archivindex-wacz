@@ -12,7 +12,7 @@ use support::{plain, request_path, serve_with};
 use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
 use archivindex_archiver::config::Config;
 use archivindex_packager::WarcToWacz;
-use archivindex_wacz::cdxj;
+use archivindex_surt::Surt;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::io::read::WaczReader;
 use archivindex_warc::io::read::WarcReader;
@@ -604,7 +604,7 @@ fn archive_stops_following_at_the_redirect_limit() -> Result<(), Box<dyn std::er
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].key, cdxj::search_key(&url)?);
+    assert_eq!(items[0].key, Surt::from_url(&url)?.as_str());
 
     Ok(())
 }

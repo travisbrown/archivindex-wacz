@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
 
+use archivindex_surt::Surt;
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
@@ -40,9 +41,9 @@ fn capture_time() -> chrono::DateTime<Utc> {
 }
 
 /// Build a minimal CDXJ item for a URL captured at [`capture_time`].
-fn item_for(url: &str) -> Result<cdxj::Item<'static>, cdxj::Error> {
+fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     Ok(cdxj::Item {
-        key: Cow::Owned(cdxj::search_key(url)?),
+        key: Surt::from_url(url)?.into(),
         timestamp: capture_time().into(),
         fields: cdxj::ParsedFields {
             url: Cow::Owned(url.to_owned()),
@@ -70,7 +71,7 @@ fn conforming_items(
 fn item_at(
     url: &str,
     timestamp: chrono::DateTime<Utc>,
-) -> Result<cdxj::Item<'static>, cdxj::Error> {
+) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.timestamp = timestamp.into();
     Ok(item)
@@ -81,7 +82,7 @@ fn resolvable_item(
     url: &str,
     filename: &'static str,
     length: u64,
-) -> Result<cdxj::Item<'static>, cdxj::Error> {
+) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.fields.filename = Some(Cow::Borrowed(filename));
     item.fields.length = Some(length);
@@ -141,7 +142,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
     let capture_time = capture_time();
 
     let item = cdxj::Item {
-        key: Cow::Owned(cdxj::search_key(URL)?),
+        key: Surt::from_url(URL)?.into(),
         timestamp: capture_time.into(),
         fields: cdxj::ParsedFields {
             url: Cow::Borrowed(URL),
@@ -226,7 +227,7 @@ fn assert_round_trip(warc_name: &str, warc_data: &[u8]) -> Result<(), Box<dyn st
         .collect::<Result<Vec<_>, _>>()?;
 
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].key, "com,example,www)/page");
+    assert_eq!(items[0].key, "com,example)/page");
     assert_eq!(items[0].fields.filename.as_deref(), Some(warc_name));
 
     let records = reader
@@ -504,7 +505,7 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
     // Five items across a two-line block size: blocks of 2, 2, and 1 lines.
     let items = (0..5)
         .map(|i| item_for(&format!("https://www.example.com/page{i}")))
-        .collect::<Result<Vec<_>, cdxj::Error>>()?;
+        .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 
     let config = WriterConfig {
         index_format: IndexFormat::ZipNum { lines: 2 },
@@ -788,7 +789,7 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
     let items = urls
         .iter()
         .map(|url| item_for(url))
-        .collect::<Result<Vec<_>, cdxj::Error>>()?;
+        .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     let conforming = conforming_items(&items)?;
@@ -808,9 +809,9 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
             .map(|item| item.key.as_ref())
             .collect::<Vec<_>>(),
         vec![
-            "com,example,www)/page0",
-            "com,example,www)/page1",
-            "com,example,www)/page2",
+            "com,example)/page0",
+            "com,example)/page1",
+            "com,example)/page2",
         ]
     );
 
@@ -1579,13 +1580,13 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
         &problems[0],
         validate::IndexProblem::Capture { index_path, key, message, .. }
             if index_path == "indexes/index.cdx"
-                && key == "com,example,www)/page1"
+                && key == "com,example)/page1"
                 && message.contains("digest mismatch")
     ));
     assert!(matches!(
         &problems[1],
         validate::IndexProblem::Capture { key, message, .. }
-            if key == "com,example,www)/page2" && message.contains("outside member")
+            if key == "com,example)/page2" && message.contains("outside member")
     ));
 
     Ok(())
@@ -1605,7 +1606,7 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
                 length,
             )
         })
-        .collect::<Result<Vec<_>, cdxj::Error>>()?;
+        .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 
     let config = WriterConfig {
         index_format: IndexFormat::ZipNum { lines: 2 },

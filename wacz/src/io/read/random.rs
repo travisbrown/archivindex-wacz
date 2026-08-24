@@ -3,6 +3,7 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::RangeBounds;
 
+use archivindex_surt::Surt;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::parse::raw;
 use archivindex_warc::record::Record;
@@ -125,17 +126,17 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
-        let key = cdxj::search_key(url)?;
+        let key = Surt::from_url(url)?;
         let partition = self.partition_indexes();
         let mut captures = Vec::new();
 
         for (_, summary) in partition.summaries {
             let summary = summary?;
-            captures.extend(self.lookup_zipnum(&summary, &key, &time_range)?);
+            captures.extend(self.lookup_zipnum(&summary, key.as_str(), &time_range)?);
         }
 
         for path in partition.plain {
-            captures.extend(self.lookup_plain(&path, &key, &time_range)?);
+            captures.extend(self.lookup_plain(&path, key.as_str(), &time_range)?);
         }
 
         captures.sort_by(|left, right| {
@@ -156,8 +157,8 @@ impl<R: Read + Seek> WaczReader<R> {
         url: &str,
         time_range: B,
     ) -> Result<Vec<Capture>, Error> {
-        let key = cdxj::search_key(url)?;
-        self.lookup_index_key(path, &key, &time_range)
+        let key = Surt::from_url(url)?;
+        self.lookup_index_key(path, key.as_str(), &time_range)
     }
 
     fn lookup_index_key<B: RangeBounds<Timestamp>>(

@@ -50,12 +50,6 @@ pub enum Error {
     /// The JSON block could not be parsed.
     #[error("invalid CDXJ field block")]
     InvalidFields(#[source] serde_json::Error),
-    /// A URL to be transformed into a searchable key could not be parsed.
-    #[error(transparent)]
-    InvalidUrl(#[from] url::ParseError),
-    /// A URL to be transformed into a searchable key has no host.
-    #[error("URL has no host: {0}")]
-    MissingHost(String),
 }
 
 /// The underlying failure for a line read by [`IndexReader`].
@@ -484,63 +478,6 @@ impl<R: BufRead> Iterator for IndexReader<R> {
     }
 }
 
-/// Transform a URL into a searchable key compatible with pywb's default canonicalization.
-///
-/// The host is lowercased, its labels are reversed and joined with commas (with any single trailing
-/// dot dropped, so that `example.com.` and `example.com` share a key), and any non-default port is
-/// kept. IP address hosts keep their usual order, following the SURT convention. The path and query
-/// are lowercased, and query parameters are sorted so that lookups are insensitive to parameter
-/// order. Userinfo and the fragment are dropped.
-///
-/// # Errors
-///
-/// Fails if the URL cannot be parsed or has no host.
-pub fn search_key(url: &str) -> Result<String, Error> {
-    let parsed = url::Url::parse(url)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| Error::MissingHost(url.to_owned()))?;
-
-    let mut key = String::with_capacity(url.len());
-
-    if let Some(url::Host::Domain(domain)) = parsed.host() {
-        let domain = domain.strip_suffix('.').unwrap_or(domain);
-
-        for (i, label) in domain.split('.').rev().enumerate() {
-            if i > 0 {
-                key.push(',');
-            }
-
-            key.push_str(label);
-        }
-    } else {
-        // An IP address host (`host_str` keeps the brackets of an IPv6 address).
-        key.push_str(host);
-    }
-
-    // `Url::port` is `None` when the port is the default for the scheme.
-    if let Some(port) = parsed.port() {
-        key.push(':');
-        key.push_str(&port.to_string());
-    }
-
-    key.push(')');
-    key.push_str(&parsed.path().to_lowercase());
-
-    if let Some(query) = parsed.query()
-        && !query.is_empty()
-    {
-        let lowered = query.to_lowercase();
-        let mut parameters = lowered.split('&').collect::<Vec<_>>();
-        parameters.sort_unstable();
-
-        key.push('?');
-        key.push_str(&parameters.join("&"));
-    }
-
-    Ok(key)
-}
-
 /// Split a CDXJ-style line into its key-and-timestamp prefix and JSON field block.
 pub(crate) fn split_prefix(line: &str) -> Option<(&str, &str)> {
     let (json, _) = line.match_indices(' ').nth(1)?;
@@ -774,75 +711,5 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.ends_with('…'))
         );
-    }
-
-    #[test]
-    fn search_key_reverses_and_lowercases() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(
-            search_key("https://www.Example.com/Some/Path")?,
-            "com,example,www)/some/path"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_key_sorts_query_parameters() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(
-            search_key("https://example.com/page?b=2&A=1")?,
-            "com,example)/page?a=1&b=2"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_key_keeps_non_default_ports() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(
-            search_key("http://example.com:8080/")?,
-            "com,example:8080)/"
-        );
-        assert_eq!(search_key("https://example.com:443/")?, "com,example)/");
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_key_drops_trailing_host_dots_and_userinfo() -> Result<(), Box<dyn std::error::Error>>
-    {
-        assert_eq!(search_key("https://example.com./x")?, "com,example)/x");
-        assert_eq!(
-            search_key("https://user:pass@example.com/")?,
-            "com,example)/"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_key_keeps_ip_hosts_in_order() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(search_key("http://127.0.0.1:8080/a")?, "127.0.0.1:8080)/a");
-        assert_eq!(search_key("http://[2001:db8::1]/")?, "[2001:db8::1])/");
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_key_keeps_braces_in_queries() -> Result<(), Box<dyn std::error::Error>> {
-        // `{` is legal unencoded in a query string and must survive into the key.
-        assert_eq!(
-            search_key("https://example.com/?a={b}")?,
-            "com,example)/?a={b}"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_key_rejects_hostless_urls() {
-        assert!(matches!(
-            search_key("data:text/plain,hello"),
-            Err(Error::MissingHost(_))
-        ));
     }
 }

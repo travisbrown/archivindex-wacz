@@ -56,8 +56,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Check archivindex-wacz in isolation
-        run: cargo check --locked -p archivindex-wacz
+      - name: Check archivindex-surt and archivindex-wacz in isolation
+        run: cargo check --locked -p archivindex-surt -p archivindex-wacz
 
   platforms:
     name: Test on ${{ matrix.os }}
@@ -84,6 +84,7 @@ jobs:
         run: cargo check --locked --workspace --all-features
       - name: Inspect publishable package contents
         run: |
+          cargo package --allow-dirty --list -p archivindex-surt
           cargo package --allow-dirty --list -p archivindex-wacz
           cargo package --allow-dirty --list -p archivindex-warc-revisit-index
           cargo package --allow-dirty --list -p archivindex-archiver
