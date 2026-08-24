@@ -1,19 +1,23 @@
 //! SHA-256 digests in the `sha256:<hex>` encoding used by WACZ manifests.
 
 use std::fmt;
-use std::io::Read;
+use std::io::{self, BufReader, Read};
 use std::str::FromStr;
 
+use archivindex_warc::value::marker::Sha256;
+use archivindex_warc::value::{Hasher, Supported as _};
 use bounded_static::{IntoBoundedStatic, ToBoundedStatic};
 use serde::de::{Deserializer, Unexpected, Visitor};
 use serde::ser::Serializer;
-use sha2::Digest as _;
 
 /// The prefix that identifies the digest algorithm in the string encoding.
 const PREFIX: &str = "sha256:";
 
 /// The length of the hexadecimal digest representation without its prefix.
 const HEX_LENGTH: usize = 64;
+
+/// The read buffer size used when hashing a stream.
+const HASH_BUFFER_SIZE: usize = 128 * 1024;
 
 /// An error type for digest string parsing.
 #[derive(Debug, thiserror::Error)]
@@ -42,27 +46,34 @@ impl Sha256Digest {
     /// Compute the digest of a byte buffer.
     #[must_use]
     pub fn compute<B: AsRef<[u8]>>(bytes: B) -> Self {
-        Self(sha2::Sha256::digest(bytes.as_ref()).into())
+        let mut hasher = Sha256::hasher();
+        hasher.update(bytes.as_ref());
+        Self::from_hasher(hasher)
     }
 
     /// Compute the digest of a stream, returning the digest and the number of bytes read.
-    pub fn from_reader<R: Read>(mut reader: R) -> Result<(Self, u64), std::io::Error> {
-        let mut hasher = sha2::Sha256::new();
-        let mut buffer = [0; 8192];
-        let mut length = 0;
+    ///
+    /// # Errors
+    ///
+    /// Returns any error raised while reading from `reader`.
+    pub fn from_reader<R: Read>(reader: R) -> Result<(Self, u64), io::Error> {
+        let mut hasher = Sha256::hasher();
+        // `io::copy` reads through a `BufReader`'s own buffer, so this sizes the reads.
+        let length = io::copy(
+            &mut BufReader::with_capacity(HASH_BUFFER_SIZE, reader),
+            &mut hasher,
+        )?;
+        Ok((Self::from_hasher(hasher), length))
+    }
 
-        loop {
-            let read = reader.read(&mut buffer)?;
-
-            if read == 0 {
-                break;
-            }
-
-            hasher.update(&buffer[..read]);
-            length += read as u64;
-        }
-
-        Ok((Self(hasher.finalize().into()), length))
+    /// Finish a SHA-256 hasher created with [`Sha256::hasher`].
+    pub(crate) fn from_hasher(hasher: Hasher) -> Self {
+        Self(
+            hasher
+                .finalize()
+                .try_into()
+                .expect("invariant violation: a SHA-256 digest is 32 bytes"),
+        )
     }
 }
 

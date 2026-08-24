@@ -8,9 +8,10 @@
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
+use archivindex_warc::value::Supported as _;
+use archivindex_warc::value::marker::Sha256;
 use bounded_static::{IntoBoundedStatic, ToStatic};
 use chrono::{DateTime, SecondsFormat, Utc};
-use sha2::Digest as _;
 
 use crate::lines::Lines;
 use crate::{ExtraProperties, LineContext};
@@ -253,9 +254,9 @@ impl<R: BufRead> Iterator for PageListReader<R> {
 /// characters of the lowercase hexadecimal digest. Lengths above 64 yield the full digest.
 #[must_use]
 pub fn synthetic_id(ts: &DateTime<Utc>, url: &str, length: usize) -> String {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(ts.to_rfc3339_opts(SecondsFormat::AutoSi, true));
-    hasher.update(url);
+    let mut hasher = Sha256::hasher();
+    hasher.update(ts.to_rfc3339_opts(SecondsFormat::AutoSi, true).as_bytes());
+    hasher.update(url.as_bytes());
 
     let mut id = data_encoding::HEXLOWER.encode(&hasher.finalize());
     id.truncate(length);

@@ -2,7 +2,8 @@
 
 use std::io::{Read, Seek, Write};
 
-use sha2::Digest as _;
+use archivindex_warc::value::marker::Sha256;
+use archivindex_warc::value::{Hasher, Supported as _};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -88,7 +89,7 @@ impl<W: Write + Seek> WaczWriter<W> {
 
 pub(super) struct HashingWriter<W> {
     underlying: W,
-    hasher: sha2::Sha256,
+    hasher: Hasher,
     bytes: u64,
 }
 
@@ -96,13 +97,13 @@ impl<W> HashingWriter<W> {
     pub(super) fn new(underlying: W) -> Self {
         Self {
             underlying,
-            hasher: sha2::Sha256::new(),
+            hasher: Sha256::hasher(),
             bytes: 0,
         }
     }
 
     pub(super) fn finish(self) -> (Sha256Digest, u64) {
-        (Sha256Digest(self.hasher.finalize().into()), self.bytes)
+        (Sha256Digest::from_hasher(self.hasher), self.bytes)
     }
 
     pub(super) const fn bytes(&self) -> u64 {
