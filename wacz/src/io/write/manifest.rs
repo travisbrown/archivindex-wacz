@@ -84,9 +84,10 @@ impl<W: Write + Seek> WaczWriter<W> {
         package.software.get_or_insert(Cow::Borrowed(SOFTWARE));
 
         let manifest = serde_json::to_vec_pretty(&package).map_err(Error::Manifest)?;
+        // Both manifests are small and fully buffered, so neither needs ZIP64 extra fields.
         zip.start_file(
             DATA_PACKAGE_PATH,
-            options_for(DATA_PACKAGE_PATH, config.zip_compression_level),
+            options_for(DATA_PACKAGE_PATH, config.zip_compression_level).large_file(false),
         )?;
         zip.write_all(&manifest)?;
         let digest = DataPackageDigest {
@@ -97,7 +98,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         let digest_bytes = serde_json::to_vec_pretty(&digest).map_err(Error::Manifest)?;
         zip.start_file(
             DATA_PACKAGE_DIGEST_PATH,
-            options_for(DATA_PACKAGE_DIGEST_PATH, config.zip_compression_level),
+            options_for(DATA_PACKAGE_DIGEST_PATH, config.zip_compression_level).large_file(false),
         )?;
         zip.write_all(&digest_bytes)?;
         let mut output = zip.finish()?;
