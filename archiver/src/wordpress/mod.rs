@@ -213,22 +213,14 @@ impl CommentCaptureProcessor {
 
     /// Title a parsed comment batch by its ID and GMT date ranges.
     fn title(&self, comments: &[Comment]) -> Option<String> {
-        let first_id = comments.iter().map(|comment| comment.id).min()?;
-        let last_id = comments.iter().map(|comment| comment.id).max()?;
-        let first_date = comments
-            .iter()
-            .filter_map(Comment::date)
-            .min()?
-            .date_naive();
-        let last_date = comments
-            .iter()
-            .filter_map(Comment::date)
-            .max()?
-            .date_naive();
+        let (first_id, last_id) = bounds(comments.iter().map(|comment| comment.id))?;
+        let (first_date, last_date) = bounds(comments.iter().filter_map(Comment::date))?;
 
         Some(format!(
-            "{} comments {first_id}-{last_id} ({first_date} to {last_date})",
-            self.site_name
+            "{} comments {first_id}-{last_id} ({} to {})",
+            self.site_name,
+            first_date.date_naive(),
+            last_date.date_naive()
         ))
     }
 }
@@ -404,6 +396,14 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+/// The minimum and maximum of `items` in one pass, or `None` when there are none.
+fn bounds<T: Copy + Ord>(mut items: impl Iterator<Item = T>) -> Option<(T, T)> {
+    let first = items.next()?;
+    Some(items.fold((first, first), |(min, max), item| {
+        (min.min(item), max.max(item))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -433,8 +433,10 @@ mod tests {
             status,
             payload,
             response,
-            response_metadata: archivindex_warc::record::http::ResponseMetadata::parse(response)
-                .expect("a complete test response"),
+            response_metadata: std::borrow::Cow::Owned(
+                archivindex_warc::record::http::ResponseMetadata::parse(response)
+                    .expect("a complete test response"),
+            ),
         }
     }
 

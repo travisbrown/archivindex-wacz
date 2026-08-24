@@ -1,5 +1,6 @@
 //! Queue execution, processor dispatch, and retry policy.
 
+use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::thread;
 use std::time::Duration;
@@ -174,7 +175,7 @@ impl Session<'_> {
             status: last.status,
             payload: last.payload(),
             response: &last.captured.response,
-            response_metadata: last.captured.response_metadata.clone(),
+            response_metadata: Cow::Borrowed(&last.captured.response_metadata),
         };
         let Inspection {
             links,

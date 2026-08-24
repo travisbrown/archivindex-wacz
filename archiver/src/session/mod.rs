@@ -6,6 +6,7 @@
 //! `304 Not Modified` instead of repeating the payload. Sessions retry transient failures and
 //! preserve completed work when a later recording failure ends the crawl.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -63,7 +64,7 @@ pub struct Capture<'a> {
     pub payload: &'a [u8],
     /// The complete recorded HTTP response.
     pub response: &'a [u8],
-    pub(crate) response_metadata: archivindex_warc::record::http::ResponseMetadata,
+    pub(crate) response_metadata: Cow<'a, archivindex_warc::record::http::ResponseMetadata>,
 }
 
 impl Capture<'_> {

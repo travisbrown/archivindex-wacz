@@ -40,12 +40,12 @@ pub(super) fn write_record<W: Write>(
 
 /// Write one exchange's request, response, and metadata records.
 ///
-/// When `revisit_of` names the earlier capture whose payload this exchange revisits, the response
-/// is stored as a `revisit` record holding only the response head: under the `server-not-modified`
-/// profile for a `304 Not Modified` answering a conditional request, and otherwise under the
-/// `identical-payload-digest` profile. Otherwise the full response is stored, and when its payload
-/// is digested the returned [`RevisitTarget`] identifies the new record so that later revisits can
-/// reference it.
+/// A `304 Not Modified` answering a conditional request revisits the capture it revalidated under
+/// the `server-not-modified` profile. Otherwise, when `revisit_of` names an earlier capture with
+/// this exchange's payload, the response is stored as a `revisit` record holding only the response
+/// head under the `identical-payload-digest` profile. Otherwise the full response is stored, and
+/// when its payload is digested the returned [`RevisitTarget`] identifies the new record so that
+/// later revisits can reference it.
 pub(super) fn write_exchange<W: Write>(
     writer: &mut WarcWriter<W>,
     exchange: Exchange,
@@ -64,6 +64,7 @@ pub(super) fn write_exchange<W: Write>(
         ..
     } = exchange;
 
+    let revisit_of = revalidated.as_ref().or(revisit_of);
     let (records, target_uri) = if let Some(original) = revisit_of {
         let profile = if revalidated.is_some() {
             RevisitProfile::SERVER_NOT_MODIFIED

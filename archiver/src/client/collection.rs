@@ -229,14 +229,14 @@ impl Collection {
             let etag = exchange.validator("etag");
             let last_modified = exchange.validator("last-modified");
             let status = exchange.status;
-            let revalidated = exchange.revalidated.clone();
-            let revisit_of = match &revalidated {
-                Some(target) => Some(target.clone()),
-                None => key
-                    .as_ref()
+            let revalidated = exchange.revalidated.is_some();
+            let looked_up = if revalidated {
+                None
+            } else {
+                key.as_ref()
                     .map(|digest| self.lookup_payload(digest))
                     .transpose()?
-                    .flatten(),
+                    .flatten()
             };
             let target = write_exchange(
                 &mut self.warc,
@@ -247,7 +247,7 @@ impl Collection {
                     via: via.filter(|_| hop == 0),
                     title: title.filter(|_| hop == redirects),
                 },
-                revisit_of.as_ref(),
+                looked_up.as_ref(),
             )?;
 
             if key.is_some()
@@ -256,7 +256,7 @@ impl Collection {
                 self.session_index.insert_payload(target)?;
             }
 
-            if status == 304 && revalidated.is_some() {
+            if status == 304 && revalidated {
                 self.session_index.update_resource(
                     &resource_key,
                     ResourceStateUpdate::NotModified {
@@ -266,7 +266,7 @@ impl Collection {
                 )?;
             } else if status == 200
                 && key.is_some()
-                && let Some(original) = revisit_of.as_ref().or(target.as_ref())
+                && let Some(original) = looked_up.as_ref().or(target.as_ref())
             {
                 self.session_index.update_resource(
                     &resource_key,
