@@ -69,10 +69,16 @@ fn index_response<E: Extension>(
     }
     let metadata = http_metadata(body)?;
     let payload_digest = header.payload.payload_digest.clone();
-    let payload_length = record
-        .payload_bytes()
-        .map_err(Error::MalformedWarcPayload)?
-        .map(|payload| payload.len() as u64);
+    // Without a transfer coding the entity body is the stored body, whose length needs no
+    // decoding; only a coded body has to be decoded to be measured.
+    let payload_length = if metadata.transfer_encoded {
+        record
+            .payload_bytes()
+            .map_err(Error::MalformedWarcPayload)?
+            .map(|payload| payload.len() as u64)
+    } else {
+        Some((body.len() - metadata.body_offset) as u64)
+    };
 
     let payload_inserted = if let (Some(payload_digest), Some(payload_length)) =
         (payload_digest.as_ref(), payload_length)
@@ -201,6 +207,10 @@ struct HttpMetadata {
     status: u16,
     etag: Option<String>,
     last_modified: Option<String>,
+    /// Where the stored body begins.
+    body_offset: usize,
+    /// Whether the head declares a `Transfer-Encoding`.
+    transfer_encoded: bool,
 }
 
 fn http_metadata(message: &[u8]) -> Result<HttpMetadata, Error> {
@@ -216,5 +226,7 @@ fn http_metadata(message: &[u8]) -> Result<HttpMetadata, Error> {
             .header("last-modified")
             .and_then(|value| std::str::from_utf8(value).ok())
             .map(str::to_owned),
+        body_offset: metadata.body_offset,
+        transfer_encoded: metadata.header("transfer-encoding").is_some(),
     })
 }
