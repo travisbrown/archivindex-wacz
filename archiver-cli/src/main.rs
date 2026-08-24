@@ -288,6 +288,10 @@ enum Error {
     Url(#[from] url::ParseError),
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::client::Error),
+    #[error(transparent)]
+    UserAgent(#[from] archivindex_archiver::client::InvalidUserAgent),
+    #[error(transparent)]
+    SessionId(#[from] archivindex_archiver::session::InvalidSessionId),
     #[error("WARC conversion error: {0}")]
     Convert(#[from] archivindex_packager::Error),
     #[error("WordPress comment reading error: {0}")]

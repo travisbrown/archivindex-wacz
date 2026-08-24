@@ -68,11 +68,11 @@ pub enum Error {
         message: String,
     },
     /// The configured `User-Agent` cannot be sent or recorded safely.
-    #[error("invalid User-Agent header value: {0:?}")]
-    InvalidUserAgent(String),
+    #[error(transparent)]
+    InvalidUserAgent(#[from] InvalidUserAgent),
     /// A session identifier is empty or contains a non-URI-unreserved character.
-    #[error("invalid session identifier: {0:?}")]
-    InvalidSessionId(String),
+    #[error(transparent)]
+    InvalidSessionId(#[from] crate::session::InvalidSessionId),
     /// A revisit index could not be opened, queried, or updated.
     #[error(transparent)]
     RevisitIndex(#[from] archivindex_warc_revisit_index::error::Error),
@@ -89,6 +89,11 @@ pub enum Error {
     #[error(transparent)]
     WarcWrite(#[from] archivindex_warc::io::write::Error),
 }
+
+/// The configured `User-Agent` cannot be sent or recorded safely.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("invalid User-Agent header value: {0:?}")]
+pub struct InvalidUserAgent(String);
 
 /// The outcome of an archiving run.
 #[derive(Debug, Default)]
@@ -224,9 +229,13 @@ pub struct Archiver {
 
 impl Archiver {
     /// Create a new archiving client.
-    pub fn new(config: Config) -> Result<Self, Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidUserAgent`] if the configured `User-Agent` is not a valid header value.
+    pub fn new(config: Config) -> Result<Self, InvalidUserAgent> {
         let user_agent = HeaderValue::from_str(&config.user_agent)
-            .map_err(|_| Error::InvalidUserAgent(config.user_agent.clone()))?;
+            .map_err(|_| InvalidUserAgent(config.user_agent.clone()))?;
         let mut headers = HeaderMap::with_capacity(2);
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         headers.insert(USER_AGENT, user_agent);

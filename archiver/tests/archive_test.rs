@@ -1107,7 +1107,7 @@ fn new_rejects_an_invalid_user_agent() {
         ..gzip_config()
     });
 
-    assert!(matches!(result, Err(Error::InvalidUserAgent(_))));
+    assert!(result.is_err());
 }
 
 #[test]

@@ -15,6 +15,11 @@ use crate::client::{
 
 mod run;
 
+/// A session identifier is empty or contains a non-URI-unreserved character.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("invalid session identifier: {0:?}")]
+pub struct InvalidSessionId(String);
+
 /// The operator named in a session's `warcinfo` record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Operator {
@@ -178,19 +183,24 @@ pub struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// Create a session, validating its URI-unreserved identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSessionId`] if `id` is empty or contains a character outside the URI
+    /// unreserved set.
     pub fn new<I: IntoIterator<Item = S>, S: AsRef<str>, P: Into<PathBuf>>(
         archiver: Archiver,
         id: &str,
         operator: Operator,
         seeds: I,
         output: P,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, InvalidSessionId> {
         if id.is_empty()
             || !id.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
             })
         {
-            return Err(Error::InvalidSessionId(id.to_owned()));
+            return Err(InvalidSessionId(id.to_owned()));
         }
 
         Ok(Self {
