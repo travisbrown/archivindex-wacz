@@ -4,10 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, mpsc};
 use std::thread;
 
-use super::{
-    Archiver, CaptureControl, CaptureEvent, CaptureEventSink, CaptureOutcome, Collection, Error,
-    notify_outcome,
-};
+use super::capture::CaptureOutcome;
+use super::collection::Collection;
+use super::{Archiver, CaptureControl, CaptureEvent, CaptureEventSink, Error, notify_outcome};
 
 type IndexedOutcome = (usize, String, CaptureOutcome);
 

@@ -12,9 +12,10 @@ use fluent_uri::Uri;
 use tempfile::{NamedTempFile, TempPath};
 
 use super::capture::Original;
+use super::capture::{CaptureOutcome, Exchange};
 use super::warc_fields::{WarcinfoOptions, warcinfo_record};
 use super::warc_mapping::{MetadataOptions, write_exchange, write_record};
-use super::{ArchiveSummary, CaptureOutcome, CaptureSummary, Error, Exchange, Failure};
+use super::{ArchiveSummary, CaptureSummary, Error, Failure};
 
 /// Files accumulated while captures are written to a spooled WARC file.
 pub struct Collection {

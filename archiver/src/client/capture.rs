@@ -13,7 +13,8 @@ use http::StatusCode;
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use url::{Position, Url};
 
-use super::{Archiver, Collection, Error};
+use super::collection::Collection;
+use super::{Archiver, Error};
 
 /// Captured exchanges, with any terminal fetch failure represented explicitly.
 pub enum CaptureOutcome {

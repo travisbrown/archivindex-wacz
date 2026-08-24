@@ -11,14 +11,14 @@ use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::config::Config;
 
-mod capture;
-mod collection;
+pub(crate) mod capture;
+pub(crate) mod collection;
 mod pool;
 mod warc_fields;
 mod warc_mapping;
 
-pub(crate) use capture::{CaptureOutcome, Exchange};
-pub(crate) use collection::Collection;
+use capture::CaptureOutcome;
+use collection::Collection;
 use warc_fields::WarcinfoOptions;
 
 const WARC_NAME: &str = "data.warc";
