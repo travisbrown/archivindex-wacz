@@ -91,9 +91,6 @@ pub enum Error {
     /// A WARC record could not be written.
     #[error(transparent)]
     WarcWrite(#[from] archivindex_warc::io::write::Error),
-    /// A completed WARC record could not be read for persistent indexing.
-    #[error(transparent)]
-    WarcRead(#[from] archivindex_warc::io::read::Error),
 }
 
 impl From<archivindex_warc::record::fields::serde::Error> for Error {

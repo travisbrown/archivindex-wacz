@@ -555,3 +555,78 @@ fn payload_less_revisit_never_becomes_the_resource_record() -> Result<(), Box<dy
     assert!(index.lookup_payload(&digest)?.is_none());
     Ok(())
 }
+
+#[test]
+fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), Box<dyn StdError>> {
+    let mut durable = Index::open_in_memory()?;
+    let session = Index::open_in_memory()?;
+    let shared = sha256(b"shared");
+    let fresh = sha256(b"fresh");
+    let earlier = target(
+        shared.clone(),
+        RECORD_A,
+        URI_A,
+        "2024-01-01T00:00:00Z",
+        Some(6),
+    );
+    let later = target(
+        shared.clone(),
+        RECORD_B,
+        URI_B,
+        "2024-06-01T00:00:00Z",
+        Some(6),
+    );
+    let new = target(fresh.clone(), RECORD_B, URI_B, "2024-06-01T00:00:00Z", None);
+    durable.insert_payload(&earlier)?;
+    durable.update_resource(
+        &key(URI_A),
+        ResourceStateUpdate::Representation {
+            etag: Some("\"old\"".to_owned()),
+            last_modified: None,
+            payload_digest: Some(shared.clone()),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(date("2024-01-01T00:00:00Z")),
+        },
+    )?;
+    session.insert_payload(&later)?;
+    session.insert_payload(&new)?;
+    session.update_resource(
+        &key(URI_A),
+        ResourceStateUpdate::Representation {
+            etag: Some("\"new\"".to_owned()),
+            last_modified: Some("Sat, 01 Jun 2024 00:00:00 GMT".to_owned()),
+            payload_digest: None,
+            record_id: None,
+            warc_date: None,
+        },
+    )?;
+    session.update_resource(
+        &key(URI_B),
+        ResourceStateUpdate::Representation {
+            etag: None,
+            last_modified: None,
+            payload_digest: Some(fresh.clone()),
+            record_id: Some(uri(RECORD_B)),
+            warc_date: Some(date("2024-06-01T00:00:00Z")),
+        },
+    )?;
+
+    let transaction = durable.begin()?;
+    transaction.merge_from(&session)?;
+    transaction.commit()?;
+
+    assert_eq!(durable.lookup_payload(&shared)?, Some(earlier));
+    assert_eq!(durable.lookup_payload(&fresh)?, Some(new));
+    let state_a = durable.lookup_resource(&key(URI_A))?.expect("merged state");
+    assert_eq!(state_a.etag.as_deref(), Some("\"new\""));
+    assert_eq!(
+        state_a.last_modified.as_deref(),
+        Some("Sat, 01 Jun 2024 00:00:00 GMT")
+    );
+    assert_eq!(state_a.payload_digest, None);
+    assert_eq!(state_a.record_id, None);
+    let state_b = durable.lookup_resource(&key(URI_B))?.expect("merged state");
+    assert_eq!(state_b.payload_digest, Some(fresh));
+    assert_eq!(state_b.record_id, Some(uri(RECORD_B)));
+    Ok(())
+}

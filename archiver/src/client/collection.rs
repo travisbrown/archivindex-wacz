@@ -1,16 +1,13 @@
 //! WARC spooling and revisit-state accumulation.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Seek, Write};
+use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::io::write::WarcWriter;
-use archivindex_warc::record::extension::NoExtension;
-use archivindex_warc_revisit_index::db::{Index, Transaction};
+use archivindex_warc_revisit_index::db::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
-use flate2::bufread::MultiGzDecoder;
 use fluent_uri::Uri;
 use tempfile::{NamedTempFile, TempPath};
 
@@ -312,8 +309,8 @@ impl Collection {
             warcinfo_id: _,
             summary,
             mut persistent_index,
-            gzip,
-            session_index: _,
+            gzip: _,
+            session_index,
         } = self;
         let mut source = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
         source.rewind()?;
@@ -337,9 +334,12 @@ impl Collection {
                 .map_err(|error| error.error)?;
         }
 
+        // The session index already holds every row the published WARC would yield, so it is
+        // copied into durable state rather than re-read from the file.
         if let Some(index) = &mut persistent_index {
-            let mut durable = File::open(path)?;
-            publish_warc(index, &mut durable, gzip)?;
+            let transaction = index.begin()?;
+            transaction.merge_from(&session_index)?;
+            transaction.commit()?;
         }
         Ok(summary)
     }
@@ -349,31 +349,4 @@ fn partial_path(output: &Path) -> PathBuf {
     let mut path = output.as_os_str().to_os_string();
     path.push(".partial");
     path.into()
-}
-
-/// Publish the completed WARC's records to durable crawl state as one atomic update.
-fn publish_warc(index: &mut Index, file: &mut File, gzip: bool) -> Result<(), Error> {
-    file.rewind()?;
-    let transaction = index.begin()?;
-
-    if gzip {
-        let decoder = MultiGzDecoder::new(BufReader::new(file));
-        index_records(BufReader::new(decoder), &transaction)?;
-    } else {
-        index_records(BufReader::new(file), &transaction)?;
-    }
-
-    transaction.commit()?;
-    Ok(())
-}
-
-/// Parse and index every semantic record from one completed WARC stream.
-fn index_records<R: std::io::BufRead>(
-    reader: R,
-    transaction: &Transaction<'_>,
-) -> Result<(), Error> {
-    for record in WarcReader::new(reader).iter_records::<NoExtension>() {
-        transaction.index_record(&record?)?;
-    }
-    Ok(())
 }

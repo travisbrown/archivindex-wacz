@@ -14,6 +14,22 @@ const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
+const INSERT_PAYLOAD: &str = "INSERT INTO payloads (
+     digest_algorithm, digest, payload_length, record_id, target_uri, warc_date
+ ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ ON CONFLICT (digest_algorithm, digest) DO NOTHING";
+
+const UPSERT_RESOURCE: &str = "INSERT INTO resource_state (
+     target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date
+ ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+ ON CONFLICT (target_uri) DO UPDATE SET
+     etag = excluded.etag,
+     last_modified = excluded.last_modified,
+     digest_algorithm = excluded.digest_algorithm,
+     digest = excluded.digest,
+     record_id = excluded.record_id,
+     warc_date = excluded.warc_date";
+
 /// A database connection view shared by persistent indexes and bulk transactions.
 pub struct Store<C> {
     connection: C,
@@ -151,6 +167,34 @@ impl<C> Store<C> {
 }
 
 impl Transaction<'_> {
+    /// Copy every row of `source` into this transaction.
+    ///
+    /// Payloads already known here keep their earlier canonical record, as with
+    /// [`Store::insert_payload`]; resource state takes `source`'s row, as with a representation
+    /// update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either database fails to read or write a row.
+    pub fn merge_from(&self, source: &Index) -> Result<(), Error> {
+        copy_rows(
+            source.connection(),
+            "SELECT digest_algorithm, digest, payload_length, record_id, target_uri, warc_date
+             FROM payloads",
+            self.connection(),
+            INSERT_PAYLOAD,
+            "merge payloads",
+        )?;
+        copy_rows(
+            source.connection(),
+            "SELECT target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date
+             FROM resource_state",
+            self.connection(),
+            UPSERT_RESOURCE,
+            "merge resource state",
+        )
+    }
+
     /// Commit all changes atomically.
     ///
     /// # Errors
@@ -209,23 +253,16 @@ pub(crate) fn insert_payload(
         .payload_length
         .map(|value| signed("payload_length", value))
         .transpose()?;
-    let changed = cached(
-        connection,
-        "INSERT INTO payloads (
-             digest_algorithm, digest, payload_length, record_id, target_uri, warc_date
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT (digest_algorithm, digest) DO NOTHING",
-        "insert payload",
-    )?
-    .execute(params![
-        algorithm.label(),
-        digest.as_slice(),
-        payload_length,
-        target.record_id.as_str(),
-        target.target_uri.as_str(),
-        target.warc_date.to_string(),
-    ])
-    .map_err(Error::database("insert payload"))?;
+    let changed = cached(connection, INSERT_PAYLOAD, "insert payload")?
+        .execute(params![
+            algorithm.label(),
+            digest.as_slice(),
+            payload_length,
+            target.record_id.as_str(),
+            target.target_uri.as_str(),
+            target.warc_date.to_string(),
+        ])
+        .map_err(Error::database("insert payload"))?;
     Ok(changed != 0)
 }
 
@@ -311,17 +348,7 @@ pub(crate) fn update_resource(
                 });
             cached(
                 connection,
-                "INSERT INTO resource_state (
-                     target_uri, etag, last_modified, digest_algorithm, digest,
-                     record_id, warc_date
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT (target_uri) DO UPDATE SET
-                     etag = excluded.etag,
-                     last_modified = excluded.last_modified,
-                     digest_algorithm = excluded.digest_algorithm,
-                     digest = excluded.digest,
-                     record_id = excluded.record_id,
-                     warc_date = excluded.warc_date",
+                UPSERT_RESOURCE,
                 "update resource representation",
             )?
             .execute(params![
@@ -350,6 +377,30 @@ pub(crate) fn update_resource(
         .map_err(Error::database("update not-modified resource state"))?,
     };
     Ok(changed > 0)
+}
+
+/// Feed every row `select` yields on `source` to `insert` on `target`, column for column.
+fn copy_rows(
+    source: &Connection,
+    select: &str,
+    target: &Connection,
+    insert: &str,
+    operation: &'static str,
+) -> Result<(), Error> {
+    let mut select = source.prepare(select).map_err(Error::database(operation))?;
+    let mut insert = cached(target, insert, operation)?;
+    let columns = select.column_count();
+    let mut rows = select.query([]).map_err(Error::database(operation))?;
+    while let Some(row) = rows.next().map_err(Error::database(operation))? {
+        let values = (0..columns)
+            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Error::database(operation))?;
+        insert
+            .execute(rusqlite::params_from_iter(values))
+            .map_err(Error::database(operation))?;
+    }
+    Ok(())
 }
 
 /// Fetch `sql` from the connection's statement cache, preparing it on first use.
