@@ -6,7 +6,7 @@ use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use archivindex_warc_revisit_index::db::Index;
-use archivindex_warc_revisit_index::error::Error;
+use archivindex_warc_revisit_index::error::{Error, OpenError};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
 use fluent_uri::Uri;
@@ -333,7 +333,7 @@ fn incompatible_schema_version_is_rejected_clearly() -> Result<(), Box<dyn StdEr
 
     assert!(matches!(
         Index::open(path),
-        Err(Error::SchemaVersion {
+        Err(OpenError::SchemaVersion {
             expected: 2,
             found: 99
         })

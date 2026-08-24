@@ -1,17 +1,27 @@
 //! Errors produced by the crawl-state index.
 
-/// An error opening, querying, or ingesting into the crawl-state database.
+/// A SQLite operation failed.
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// A SQLite operation failed.
-    #[error("SQLite operation `{operation}` failed: {source}")]
-    Database {
-        /// The operation being performed.
-        operation: &'static str,
-        /// The underlying SQLite failure.
-        #[source]
-        source: rusqlite::Error,
-    },
+#[error("SQLite operation `{operation}` failed: {source}")]
+pub struct DatabaseError {
+    operation: &'static str,
+    #[source]
+    source: rusqlite::Error,
+}
+
+impl DatabaseError {
+    /// Name the operation a SQLite failure interrupted, for `map_err`.
+    pub(crate) const fn during(operation: &'static str) -> impl FnOnce(rusqlite::Error) -> Self {
+        move |source| Self { operation, source }
+    }
+}
+
+/// An error opening the crawl-state database.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// SQLite could not open, configure, or initialize the database.
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
     /// The database was created by an incompatible schema version.
     #[error("unsupported crawl-state schema version {found}; expected {expected}")]
     SchemaVersion {
@@ -20,6 +30,14 @@ pub enum Error {
         /// The version stored in SQLite.
         found: u32,
     },
+}
+
+/// An error querying or ingesting into the crawl-state database.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// A SQLite operation failed.
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
     /// A digest uses an algorithm this index cannot safely normalize.
     #[error("unsupported digest algorithm `{0}`")]
     UnsupportedDigestAlgorithm(String),
@@ -78,12 +96,6 @@ pub enum Error {
     #[error("malformed archived HTTP response: {0}")]
     MalformedHttpResponse(&'static str),
     /// A WARC record's declared payload could not be extracted.
-    #[error("malformed WARC payload metadata: {0}")]
-    MalformedWarcPayload(String),
-}
-
-impl Error {
-    pub(crate) const fn database(operation: &'static str) -> impl FnOnce(rusqlite::Error) -> Self {
-        move |source| Self::Database { operation, source }
-    }
+    #[error("malformed WARC payload: {0}")]
+    MalformedWarcPayload(#[source] archivindex_warc::record::payload::Error),
 }

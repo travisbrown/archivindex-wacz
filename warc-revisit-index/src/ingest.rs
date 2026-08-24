@@ -71,7 +71,7 @@ fn index_response<E: Extension>(
     let payload_digest = header.payload.payload_digest.clone();
     let payload_length = record
         .payload_bytes()
-        .map_err(|error| Error::MalformedWarcPayload(error.to_string()))?
+        .map_err(Error::MalformedWarcPayload)?
         .map(|payload| payload.len() as u64);
 
     let payload_inserted = if let (Some(payload_digest), Some(payload_length)) =

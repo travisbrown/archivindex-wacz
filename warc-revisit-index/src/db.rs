@@ -6,7 +6,7 @@ use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use fluent_uri::Uri;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::Error;
+use crate::error::{DatabaseError, Error, OpenError};
 use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 
@@ -49,8 +49,8 @@ impl Store<Connection> {
     ///
     /// Returns an error when SQLite cannot open or configure the database, schema initialization
     /// fails, or the database declares an unsupported schema version.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        let connection = Connection::open(path).map_err(Error::database("open database"))?;
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, OpenError> {
+        let connection = Connection::open(path).map_err(DatabaseError::during("open database"))?;
         Self::initialize(connection)
     }
 
@@ -59,33 +59,33 @@ impl Store<Connection> {
     /// # Errors
     ///
     /// Returns an error when SQLite cannot create, configure, or initialize the database.
-    pub fn open_in_memory() -> Result<Self, Error> {
-        let connection =
-            Connection::open_in_memory().map_err(Error::database("open in-memory database"))?;
+    pub fn open_in_memory() -> Result<Self, OpenError> {
+        let connection = Connection::open_in_memory()
+            .map_err(DatabaseError::during("open in-memory database"))?;
         Self::initialize(connection)
     }
 
-    fn initialize(connection: Connection) -> Result<Self, Error> {
+    fn initialize(connection: Connection) -> Result<Self, OpenError> {
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
                  PRAGMA journal_mode = WAL;
                  PRAGMA synchronous = NORMAL;",
             )
-            .map_err(Error::database("configure database"))?;
+            .map_err(DatabaseError::during("configure database"))?;
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(Error::database("read schema version"))?;
+            .map_err(DatabaseError::during("read schema version"))?;
 
         if version == 0 {
             connection
                 .execute_batch(SCHEMA)
-                .map_err(Error::database("initialize schema"))?;
+                .map_err(DatabaseError::during("initialize schema"))?;
             connection
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(Error::database("write schema version"))?;
+                .map_err(DatabaseError::during("write schema version"))?;
         } else if version != SCHEMA_VERSION {
-            return Err(Error::SchemaVersion {
+            return Err(OpenError::SchemaVersion {
                 expected: SCHEMA_VERSION,
                 found: version,
             });
@@ -102,11 +102,11 @@ impl Store<Connection> {
     /// # Errors
     ///
     /// Returns an error when SQLite cannot begin the transaction.
-    pub fn begin(&mut self) -> Result<Transaction<'_>, Error> {
+    pub fn begin(&mut self) -> Result<Transaction<'_>, DatabaseError> {
         let transaction = self
             .connection
             .transaction()
-            .map_err(Error::database("begin transaction"))?;
+            .map_err(DatabaseError::during("begin transaction"))?;
         Ok(Store {
             connection: transaction,
             connection_ref: |transaction| transaction,
@@ -200,10 +200,10 @@ impl Transaction<'_> {
     /// # Errors
     ///
     /// Returns an error when SQLite cannot commit the transaction.
-    pub fn commit(self) -> Result<(), Error> {
+    pub fn commit(self) -> Result<(), DatabaseError> {
         self.connection
             .commit()
-            .map_err(Error::database("commit transaction"))
+            .map_err(DatabaseError::during("commit transaction"))
     }
 }
 
@@ -227,7 +227,7 @@ pub(crate) fn lookup_payload(
         ))
     })
     .optional()
-    .map_err(Error::database("look up payload"))?;
+    .map_err(DatabaseError::during("look up payload"))?;
 
     stored
         .map(|(length, record_id, target_uri, warc_date)| {
@@ -262,7 +262,7 @@ pub(crate) fn insert_payload(
             target.target_uri.as_str(),
             target.warc_date.to_string(),
         ])
-        .map_err(Error::database("insert payload"))?;
+        .map_err(DatabaseError::during("insert payload"))?;
     Ok(changed != 0)
 }
 
@@ -296,7 +296,7 @@ pub(crate) fn lookup_resource(
         ))
     })
     .optional()
-    .map_err(Error::database("look up resource state"))?;
+    .map_err(DatabaseError::during("look up resource state"))?;
 
     stored
         .map(
@@ -360,7 +360,7 @@ pub(crate) fn update_resource(
                 record_id.as_ref().map(Uri::as_str),
                 warc_date.map(|date| date.to_string()),
             ])
-            .map_err(Error::database("update resource representation"))?
+            .map_err(DatabaseError::during("update resource representation"))?
         }
         ResourceStateUpdate::NotModified {
             etag,
@@ -374,7 +374,7 @@ pub(crate) fn update_resource(
             "update not-modified resource state",
         )?
         .execute(params![key.target_uri().as_str(), etag, last_modified])
-        .map_err(Error::database("update not-modified resource state"))?,
+        .map_err(DatabaseError::during("update not-modified resource state"))?,
     };
     Ok(changed > 0)
 }
@@ -387,18 +387,20 @@ fn copy_rows(
     insert: &str,
     operation: &'static str,
 ) -> Result<(), Error> {
-    let mut select = source.prepare(select).map_err(Error::database(operation))?;
+    let mut select = source
+        .prepare(select)
+        .map_err(DatabaseError::during(operation))?;
     let mut insert = cached(target, insert, operation)?;
     let columns = select.column_count();
-    let mut rows = select.query([]).map_err(Error::database(operation))?;
-    while let Some(row) = rows.next().map_err(Error::database(operation))? {
+    let mut rows = select.query([]).map_err(DatabaseError::during(operation))?;
+    while let Some(row) = rows.next().map_err(DatabaseError::during(operation))? {
         let values = (0..columns)
             .map(|column| row.get::<_, rusqlite::types::Value>(column))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(Error::database(operation))?;
+            .map_err(DatabaseError::during(operation))?;
         insert
             .execute(rusqlite::params_from_iter(values))
-            .map_err(Error::database(operation))?;
+            .map_err(DatabaseError::during(operation))?;
     }
     Ok(())
 }
@@ -408,10 +410,10 @@ fn cached<'connection>(
     connection: &'connection Connection,
     sql: &str,
     operation: &'static str,
-) -> Result<rusqlite::CachedStatement<'connection>, Error> {
+) -> Result<rusqlite::CachedStatement<'connection>, DatabaseError> {
     connection
         .prepare_cached(sql)
-        .map_err(Error::database(operation))
+        .map_err(DatabaseError::during(operation))
 }
 
 fn digest_parts(digest: &LabelledDigest) -> Result<(Algorithm, Vec<u8>), Error> {

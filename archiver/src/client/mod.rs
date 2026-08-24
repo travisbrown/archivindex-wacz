@@ -73,7 +73,10 @@ pub enum Error {
     /// A session identifier is empty or contains a non-URI-unreserved character.
     #[error(transparent)]
     InvalidSessionId(#[from] crate::session::InvalidSessionId),
-    /// A revisit index could not be opened, queried, or updated.
+    /// A revisit index could not be opened.
+    #[error(transparent)]
+    RevisitIndexOpen(#[from] archivindex_warc_revisit_index::error::OpenError),
+    /// A revisit index could not be queried or updated.
     #[error(transparent)]
     RevisitIndex(#[from] archivindex_warc_revisit_index::error::Error),
     /// A WARC content block could not be attached to its record.
@@ -88,6 +91,12 @@ pub enum Error {
     /// A WARC record could not be written.
     #[error(transparent)]
     WarcWrite(#[from] archivindex_warc::io::write::Error),
+}
+
+impl From<archivindex_warc_revisit_index::error::DatabaseError> for Error {
+    fn from(error: archivindex_warc_revisit_index::error::DatabaseError) -> Self {
+        Self::RevisitIndex(error.into())
+    }
 }
 
 /// The configured `User-Agent` cannot be sent or recorded safely.

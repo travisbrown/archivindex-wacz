@@ -315,7 +315,8 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
             NEW
         };
         let new_payload_is_durable = Index::open(&database_for_server)
-            .and_then(|index| index.lookup_payload(&sha256(NEW.as_bytes())))
+            .expect("open durable revisit index")
+            .lookup_payload(&sha256(NEW.as_bytes()))
             .expect("inspect durable revisit index")
             .is_some();
         (
