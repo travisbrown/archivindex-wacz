@@ -1,4 +1,8 @@
 //! Disk-backed intermediate state for WARC-to-WACZ conversion.
+//!
+//! A `metadata` record may precede or follow the capture it describes, so page drafts and the
+//! annotations for them are kept in a private redb database, keyed by capture sequence and by
+//! annotated record id respectively, and joined once the whole source has been read.
 
 use std::borrow::Cow;
 use std::io::Seek;
@@ -7,11 +11,12 @@ use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::cdxj;
 use archivindex_wacz::io::write::index::IndexSpool;
 use archivindex_wacz::pages::{Page, PageListHeader, PageListWriter};
-use redb::{ReadableTable as _, TableDefinition};
+use redb::{ReadableTable as _, Table, TableDefinition, WriteTransaction};
 
 const PAGES: TableDefinition<'static, u64, &[u8]> = TableDefinition::new("pages");
 const ANNOTATIONS: TableDefinition<'static, &str, &[u8]> = TableDefinition::new("annotations");
 
+/// A failure of the temporary conversion state.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -35,6 +40,7 @@ pub struct PageDraft {
 }
 
 impl PageDraft {
+    /// Describe the page a capture may become.
     pub const fn new(
         record_id: String,
         url: String,
@@ -52,6 +58,7 @@ impl PageDraft {
     }
 }
 
+/// Page properties contributed by `metadata` records.
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 pub struct Annotation {
     title: Option<String>,
@@ -60,6 +67,7 @@ pub struct Annotation {
 }
 
 impl Annotation {
+    /// Collect the page properties of one `metadata` record.
     pub const fn new(title: Option<String>, via: bool, page_url: Option<String>) -> Self {
         Self {
             title,
@@ -67,15 +75,57 @@ impl Annotation {
             page_url,
         }
     }
+
+    /// Apply a later annotation: present fields replace earlier ones and `via` is sticky.
+    fn merge(&mut self, update: &Self) {
+        if let Some(title) = &update.title {
+            self.title = Some(title.clone());
+        }
+        self.via |= update.via;
+        if let Some(page_url) = &update.page_url {
+            self.page_url = Some(page_url.clone());
+        }
+    }
 }
 
-pub struct ConversionSpool {
+/// The private database holding a conversion's page drafts and annotations.
+///
+/// It lives in a temporary directory removed when the store is dropped, and outlives the
+/// [`WriteTransaction`] that a [`ConversionSpool`] works in.
+pub struct SpoolStore {
     _directory: tempfile::TempDir,
-    transaction: redb::WriteTransaction,
+    database: redb::Database,
+}
+
+impl SpoolStore {
+    /// Create the database in a fresh temporary directory.
+    pub fn new() -> Result<Self, Error> {
+        let directory = tempfile::tempdir()?;
+        let database = redb::Database::create(directory.path().join("conversion.redb")).spool()?;
+        Ok(Self {
+            _directory: directory,
+            database,
+        })
+    }
+
+    /// Begin the transaction a conversion's spool works in; it is never committed, since the
+    /// store is discarded with the conversion.
+    pub fn begin(&self) -> Result<WriteTransaction, Error> {
+        self.database.begin_write().spool()
+    }
+}
+
+/// The index lines, page drafts and annotations gathered while a source is read.
+///
+/// Both tables stay open for the whole conversion instead of being reopened per call.
+pub struct ConversionSpool<'txn> {
+    pages: Table<'txn, u64, &'static [u8]>,
+    annotations: Table<'txn, &'static str, &'static [u8]>,
     index: IndexSpool,
     captures: u64,
 }
 
+/// The members and counts a finished spool contributes to the package.
 pub struct SpoolOutputs {
     pub index: IndexSpool,
     pub pages: std::fs::File,
@@ -86,23 +136,18 @@ pub struct SpoolOutputs {
     pub main_page: Option<(String, chrono::DateTime<chrono::Utc>)>,
 }
 
-impl ConversionSpool {
-    pub fn new() -> Result<Self, Error> {
-        let directory = tempfile::tempdir()?;
-        let database = redb::Database::create(directory.path().join("conversion.redb")).spool()?;
-        let transaction = database.begin_write().spool()?;
-        {
-            transaction.open_table(PAGES).spool()?;
-            transaction.open_table(ANNOTATIONS).spool()?;
-        }
+impl<'txn> ConversionSpool<'txn> {
+    /// Open the spool's tables in `transaction`.
+    pub fn new(transaction: &'txn WriteTransaction) -> Result<Self, Error> {
         Ok(Self {
-            _directory: directory,
-            transaction,
+            pages: transaction.open_table(PAGES).spool()?,
+            annotations: transaction.open_table(ANNOTATIONS).spool()?,
             index: IndexSpool::new(),
             captures: 0,
         })
     }
 
+    /// Record an indexed capture and the page it may become.
     pub fn add_capture(
         &mut self,
         item: &cdxj::ConformingItem<'_>,
@@ -110,43 +155,40 @@ impl ConversionSpool {
     ) -> Result<(), Error> {
         self.index.push(item)?;
         let bytes = serde_json::to_vec(page)?;
-        let mut pages = self.transaction.open_table(PAGES).spool()?;
-        pages.insert(self.captures, bytes.as_slice()).spool()?;
+        self.pages.insert(self.captures, bytes.as_slice()).spool()?;
         self.captures += 1;
         Ok(())
     }
 
-    pub fn annotate<I>(&self, record_ids: I, update: &Annotation) -> Result<(), Error>
+    /// Attach page properties to every record id a `metadata` record refers to.
+    pub fn annotate<I>(&mut self, record_ids: I, update: &Annotation) -> Result<(), Error>
     where
         I: IntoIterator,
         I::Item: AsRef<str>,
     {
-        let mut annotations = self.transaction.open_table(ANNOTATIONS).spool()?;
         for record_id in record_ids {
             let record_id = record_id.as_ref();
-            let mut annotation: Annotation = annotations
+            let mut annotation: Annotation = self
+                .annotations
                 .get(record_id)
                 .spool()?
                 .map(|value| serde_json::from_slice(value.value()))
                 .transpose()?
                 .unwrap_or_default();
-            if let Some(title) = &update.title {
-                annotation.title = Some(title.clone());
-            }
-            annotation.via |= update.via;
-            if let Some(page_url) = &update.page_url {
-                annotation.page_url = Some(page_url.clone());
-            }
+            annotation.merge(update);
             let bytes = serde_json::to_vec(&annotation)?;
-            annotations.insert(record_id, bytes.as_slice()).spool()?;
+            self.annotations
+                .insert(record_id, bytes.as_slice())
+                .spool()?;
         }
         Ok(())
     }
 
+    /// Join the drafts with their annotations and render both page lists in capture order.
     pub fn finish(self, pages_from_metadata: bool) -> Result<SpoolOutputs, Error> {
         let Self {
-            _directory,
-            transaction,
+            pages: stored_pages,
+            annotations,
             index,
             captures,
         } = self;
@@ -164,8 +206,6 @@ impl ConversionSpool {
             };
             let mut page_writer = PageListWriter::new(&mut pages, &PageListHeader::default())?;
             let mut extra_page_writer = PageListWriter::new(&mut extra_page_file, &extra_header)?;
-            let stored_pages = transaction.open_table(PAGES).spool()?;
-            let annotations = transaction.open_table(ANNOTATIONS).spool()?;
             for entry in stored_pages.iter().spool()? {
                 let (_, value) = entry.spool()?;
                 let draft: PageDraft = serde_json::from_slice(value.value())?;
@@ -192,20 +232,18 @@ impl ConversionSpool {
                     size: draft.size,
                     extra: ExtraProperties::default(),
                 };
-                if annotation.via {
-                    extra_page_writer.write(&page)?;
-                } else {
-                    page_writer.write(&page)?;
-                }
                 pages_count += 1;
                 if annotation.via {
+                    extra_page_writer.write(&page)?;
                     extra_pages += 1;
-                } else if main_page.is_none() {
-                    main_page = Some((url, draft.date));
+                } else {
+                    page_writer.write(&page)?;
+                    if main_page.is_none() {
+                        main_page = Some((url, draft.date));
+                    }
                 }
             }
         }
-        transaction.commit().spool()?;
         pages.rewind()?;
         extra_page_file.rewind()?;
         Ok(SpoolOutputs {

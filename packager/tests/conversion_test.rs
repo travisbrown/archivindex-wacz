@@ -471,3 +471,30 @@ fn records_are_copied_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(items[0].fields.digest.as_deref(), Some(expected.as_str()));
     Ok(())
 }
+
+#[test]
+fn metadata_annotates_its_page_in_any_order() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let date = WarcDate::from(Utc::now());
+    let root = response("https://example.com/", "root", date);
+    // One metadata record precedes the capture and another follows it; their properties merge.
+    let title = metadata(&root, b"title: Early title\r\n", date);
+    let via = metadata(&root, b"via: https://example.com/parent\r\n", date);
+    write_source(&input, vec![title, root, via], false)?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+    assert_eq!(summary.captures, 1);
+    assert_eq!(summary.pages, 1);
+
+    let mut reader = WaczReader::open(&output)?;
+    assert_eq!(reader.pages()?.count(), 0);
+    let extra_pages = reader
+        .page_list("pages/extraPages.jsonl")?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(extra_pages.len(), 1);
+    assert_eq!(extra_pages[0].url, "https://example.com/");
+    assert_eq!(extra_pages[0].title.as_deref(), Some("Early title"));
+    Ok(())
+}

@@ -28,7 +28,7 @@ use archivindex_warc::record::record_type::RecordType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{Algorithm, LabelledDigest};
 
-use spool::{Annotation, ConversionSpool, PageDraft};
+use spool::{Annotation, ConversionSpool, PageDraft, SpoolStore};
 
 const INDEX_NAME: &str = "index.cdx";
 const EXTRA_PAGES_NAME: &str = "extraPages.jsonl";
@@ -282,7 +282,9 @@ impl<'a> WarcToWacz<'a> {
         };
         let mut wacz = WaczWriter::create_with_config(&self.output, writer_config)?;
         let mut warc = wacz.start_warc(warc_name)?;
-        let mut spool = ConversionSpool::new()?;
+        let store = SpoolStore::new()?;
+        let transaction = store.begin()?;
+        let mut spool = ConversionSpool::new(&transaction)?;
         let mut package_info = PackageInfo::default();
         let mut records = 0;
 
@@ -296,7 +298,7 @@ impl<'a> WarcToWacz<'a> {
             // The raw record has been written, so converting it can take its body without a copy.
             let record = parse_record(record)?;
             package_info.inspect(&record);
-            collect_metadata(&spool, &record)?;
+            collect_metadata(&mut spool, &record)?;
             match capture_parts(
                 &record,
                 self.title_generator.as_deref_mut(),
@@ -426,7 +428,7 @@ impl PackageInfo {
     }
 }
 
-fn collect_metadata(spool: &ConversionSpool, record: &Record) -> Result<(), Error> {
+fn collect_metadata(spool: &mut ConversionSpool<'_>, record: &Record) -> Result<(), Error> {
     let Record::Metadata {
         header,
         body: FieldsBlock::Fields(fields),
