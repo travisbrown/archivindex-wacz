@@ -62,6 +62,11 @@ fn index_response<E: Extension>(
     let Record::Response { header, body } = record else {
         unreachable!("index_response is only called for response records");
     };
+
+    // A truncated body is not the resource's representation, and nothing may revisit it.
+    if header.core.truncated.is_some() {
+        return Ok(IndexRecordOutcome::default());
+    }
     let metadata = http_metadata(body)?;
     let payload_digest = header.payload.payload_digest.clone();
     let payload_length = record

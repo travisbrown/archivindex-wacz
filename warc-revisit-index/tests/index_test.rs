@@ -3,6 +3,7 @@ use std::error::Error as StdError;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::header::RevisitProfile;
+use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use archivindex_warc_revisit_index::db::Index;
 use archivindex_warc_revisit_index::error::Error;
@@ -494,5 +495,27 @@ fn matching_payload_at_a_second_uri_reuses_first_target_but_keeps_resource_keys_
         index.lookup_resource(&key(URI_B))?.unwrap().etag.as_deref(),
         Some("\"b\"")
     );
+    Ok(())
+}
+
+#[test]
+fn truncated_response_is_not_indexed() -> Result<(), Box<dyn StdError>> {
+    let index = Index::open_in_memory()?;
+    let payload = b"hel";
+    let mut message = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nETag: \"v1\"\r\n\r\n".to_vec();
+    message.extend_from_slice(payload);
+    let record = Record::<NoExtension>::response(URI_A, date("2025-01-01T00:00:00Z"))?
+        .record_id(uri(RECORD_A))
+        .payload_digest(sha256(payload))
+        .truncated(TruncatedType::Length)
+        .body(message)?;
+
+    let outcome = index.index_record(&record)?;
+
+    // A partial body is neither a revisit target nor the resource's representation.
+    assert!(!outcome.payload_inserted);
+    assert!(!outcome.resource_updated);
+    assert!(index.lookup_payload(&sha256(payload))?.is_none());
+    assert!(index.lookup_resource(&key(URI_A))?.is_none());
     Ok(())
 }

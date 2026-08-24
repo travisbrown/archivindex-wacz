@@ -1196,3 +1196,39 @@ fn archive_encodes_url_characters_the_uri_grammar_rejects() -> Result<(), Box<dy
 
     Ok(())
 }
+
+#[test]
+fn archive_never_revisits_a_truncated_capture() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve(2)?;
+    // Two URLs with byte-identical responses, both cut short by the limit.
+    let urls = [
+        format!("http://127.0.0.1:{port}/first"),
+        format!("http://127.0.0.1:{port}/second"),
+    ];
+    let limit = respond("/first").len() as u64 - 2;
+
+    let archiver = Archiver::new(Config {
+        max_response_length: Some(limit),
+        gzip_warc: false,
+        ..gzip_config()
+    })?;
+    let mut bytes = Vec::new();
+    let summary = archiver.archive(&urls, Cursor::new(&mut bytes))?;
+    server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+
+    let mut reader = package_bytes(&bytes)?;
+    let records = reader
+        .warc("archive/data.warc")?
+        .iter_records::<NoExtension>()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // The second response is stored in full rather than as a revisit of the truncated first.
+    assert_eq!(records.len(), 7);
+    assert!(matches!(records[2], Record::Response { .. }));
+    assert!(matches!(records[5], Record::Response { .. }));
+    assert_eq!(records[5].core().truncated, Some(TruncatedType::Length));
+
+    Ok(())
+}
