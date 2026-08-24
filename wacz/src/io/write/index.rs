@@ -106,7 +106,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         let idx_name = format!("{}.idx", name.strip_suffix(".cdx").unwrap_or(name));
         let data_path = format!("{INDEXES_PREFIX}{data_name}");
         let idx_path = format!("{INDEXES_PREFIX}{idx_name}");
-        let mut summary = tempfile::tempfile()?;
+        let mut summary = BufWriter::new(tempfile::tempfile()?);
         let header = SummaryHeader {
             format: Cow::Borrowed(FORMAT),
             filename: Cow::Borrowed(&data_name),
@@ -115,56 +115,51 @@ impl<W: Write + Seek> WaczWriter<W> {
             serde_json::to_string(&header).expect("summary header serialization cannot fail");
         writeln!(summary, "!meta 0 {header}")?;
         let data_options = options_for(&data_path, self.config.zip_compression_level);
+        let compression = Compression::new(self.config.gzip_compression_level);
+        let lines_per_block = lines_per_block.max(1);
         self.add_member(&data_path, data_options, |writer| {
             let mut offset = 0_u64;
-            let mut block = Vec::with_capacity(lines_per_block.max(1));
-            loop {
-                let mut line = String::new();
-                let eof = reader.read_line(&mut line)? == 0;
-                if !eof {
-                    block.push(line);
-                }
-                if block.len() == lines_per_block.max(1) || (!block.is_empty() && eof) {
-                    let (prefix, _) = cdxj::split_prefix(&block[0])
-                        .expect("validated CDXJ lines have a key and timestamp");
-                    let mut compressed = tempfile::tempfile()?;
-                    {
-                        let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
-                        for value in &block {
-                            encoder.write_all(value.as_bytes())?;
-                        }
-                        encoder.finish()?;
+            let mut line = String::new();
+            let mut prefix = String::new();
+            let mut compressed = Vec::new();
+            // Each block is one gzip member encoded into a reused buffer, digested and written
+            // from memory; the line buffer is reused across the whole stream.
+            while reader.read_line(&mut line)? != 0 {
+                let (first_prefix, _) = cdxj::split_prefix(&line)
+                    .expect("validated CDXJ lines have a key and timestamp");
+                prefix.clear();
+                prefix.push_str(first_prefix);
+                let mut encoder = GzEncoder::new(&mut compressed, compression);
+                let mut lines = 0;
+                loop {
+                    encoder.write_all(line.as_bytes())?;
+                    lines += 1;
+                    line.clear();
+                    if lines == lines_per_block || reader.read_line(&mut line)? == 0 {
+                        break;
                     }
-                    let length = compressed.stream_position()?;
-                    compressed.rewind()?;
-                    let (digest, copied) = Sha256Digest::from_reader(&mut compressed)?;
-                    compressed.rewind()?;
-                    std::io::copy(&mut compressed, writer)?;
-                    debug_assert_eq!(length, copied);
-                    let entry = SummaryEntry {
-                        offset,
-                        length,
-                        digest,
-                    };
-                    let entry = serde_json::to_string(&entry)
-                        .expect("summary entry serialization cannot fail");
-                    writeln!(summary, "{prefix} {entry}")?;
-                    offset += length;
-                    block.clear();
                 }
-                if eof {
-                    if offset == 0 {
-                        let compressed =
-                            GzEncoder::new(Vec::new(), Compression::default()).finish()?;
-                        writer.write_all(&compressed)?;
-                    }
-                    break;
-                }
+                let block = encoder.finish()?;
+                writer.write_all(block)?;
+                let length = block.len() as u64;
+                let entry = SummaryEntry {
+                    offset,
+                    length,
+                    digest: Sha256Digest::compute(block.as_slice()),
+                };
+                let entry =
+                    serde_json::to_string(&entry).expect("summary entry serialization cannot fail");
+                writeln!(summary, "{prefix} {entry}")?;
+                offset += length;
+                block.clear();
+            }
+            if offset == 0 {
+                let empty = GzEncoder::new(Vec::new(), compression).finish()?;
+                writer.write_all(&empty)?;
             }
             Ok(())
         })?;
-        summary.rewind()?;
-        self.add_typed_resource(&idx_path, summary)
+        self.add_typed_resource(&idx_path, finish_writer(summary)?)
     }
 }
 

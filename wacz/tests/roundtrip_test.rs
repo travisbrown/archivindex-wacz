@@ -857,6 +857,32 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// `ZipNum` blocks are gzip members encoded at the configured gzip compression level.
+#[test]
+fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
+    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    for (level, expected_xfl) in [(1, 4), (9, 2)] {
+        let config = WriterConfig {
+            index_format: IndexFormat::zipnum(),
+            gzip_compression_level: level,
+            ..WriterConfig::default()
+        };
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+        writer.add_index("index.cdx", [&item])?;
+        let wacz = writer
+            .finish_unchecked(DataPackageBuilder::default())?
+            .into_inner();
+        let mut archive = zip::ZipArchive::new(Cursor::new(&wacz))?;
+        let mut data = Vec::new();
+        archive
+            .by_name("indexes/index.cdx.gz")?
+            .read_to_end(&mut data)?;
+
+        assert_eq!(data[8], expected_xfl, "gzip XFL byte at level {level}");
+    }
+    Ok(())
+}
+
 /// An index written with no items is still readable in both formats, and a `ZipNum` summary holds
 /// only its `!meta` line.
 #[test]
