@@ -427,3 +427,47 @@ fn unparsable_http_message_is_copied_but_not_indexed() -> Result<(), Box<dyn std
 
     Ok(())
 }
+
+/// Source records are copied byte for byte, and only the record types the conversion reads are
+/// parsed semantically, so a payload digest missing from the source is computed for the index
+/// without being added to the record.
+#[test]
+fn records_are_copied_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let date = WarcDate::from(Utc::now());
+    let mut request = Record::<NoExtension>::request("https://example.com/", date)?
+        .body(b"GET / HTTP/1.1\r\n\r\n".to_vec())?
+        .into_raw()?;
+    // Without the mandatory `WARC-Date` the request is not a valid semantic record, but it is
+    // still a well-formed raw record, and request records are never parsed.
+    request
+        .header
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("WARC-Date"));
+    let mut source = Vec::new();
+    let mut writer = WarcWriter::new(&mut source);
+    writer.write(&warcinfo(b"title: Verbatim\r\n", date).into_raw()?)?;
+    writer.write(&request)?;
+    writer.write(&response("https://example.com/", "raw", date).into_raw_without_digests()?)?;
+    writer.flush()?;
+    std::fs::write(&input, &source)?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+
+    assert_eq!(summary.records, 3);
+    assert_eq!(summary.captures, 1);
+    assert!(summary.warnings.is_empty());
+    let mut reader = WaczReader::open(&output)?;
+    assert_eq!(reader.member_bytes("archive/data.warc")?, source);
+    let items = reader
+        .index("indexes/index.cdx")?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = LabelledDigest::compute(Algorithm::Sha256, b"raw")
+        .expect("sha256 digest")
+        .to_string();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].fields.digest.as_deref(), Some(expected.as_str()));
+    Ok(())
+}

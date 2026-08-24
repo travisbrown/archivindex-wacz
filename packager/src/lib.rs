@@ -18,13 +18,15 @@ use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::write::{IndexFormat, WaczWriter, WriterConfig};
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::io::write::{DEFAULT_GZIP_COMPRESSION_LEVEL, Written};
+use archivindex_warc::parse::{raw, untyped};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::http::ResponseMetadata;
+use archivindex_warc::record::record_type::RecordType;
 use archivindex_warc::record::{FieldsBlock, Record};
-use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
+use archivindex_warc::value::{Algorithm, LabelledDigest};
 
 use spool::{Annotation, ConversionSpool, PageDraft};
 
@@ -61,9 +63,6 @@ pub enum Error {
     /// A WARC record could not be parsed.
     #[error(transparent)]
     WarcRead(#[from] warc_read::Error),
-    /// A semantic WARC record could not be rendered again.
-    #[error(transparent)]
-    WarcRender(#[from] archivindex_warc::record::RenderError),
     /// A normalized WARC record could not be written.
     #[error(transparent)]
     WarcWrite(#[from] archivindex_warc::io::write::Error),
@@ -164,15 +163,19 @@ pub struct ConversionSummary {
 
 /// A conversion from one existing WARC file to a new WACZ package.
 ///
-/// Records are parsed semantically and normalized into a new WARC member. This makes offsets and
+/// Records are copied into a new WARC member exactly as read: header fields and blocks are written
+/// byte for byte, so only the gzip framing can differ from the source. This makes offsets and
 /// lengths independently addressable even when the input was a continuously compressed gzip
-/// stream. Metadata fields linked by `WARC-Refers-To` or `WARC-Concurrent-To` classify captures:
+/// stream. Only `warcinfo`, `metadata`, `response`, and `revisit` records are parsed semantically;
+/// records of other types are validated as raw records and copied unread. Metadata fields linked
+/// by `WARC-Refers-To` or `WARC-Concurrent-To` classify captures:
 /// those with `via` enter `extraPages.jsonl`, while the rest enter the required page list. A
 /// metadata `title` takes precedence over one supplied by an optional [`PageTitleGenerator`].
 /// Every CDXJ line carries the fields CDXJ requires: `mime` comes from the HTTP `Content-Type`
 /// (without parameters), then from `WARC-Identified-Payload-Type`, and is `unk` otherwise, while a
-/// missing payload digest is computed from the block. A capture whose status or digest cannot be
-/// determined is copied but not indexed, and reported as a [`ConversionWarning`].
+/// missing payload digest is computed from the block for the index without being added to the
+/// record. A capture whose status or digest cannot be determined is copied but not indexed, and
+/// reported as a [`ConversionWarning`].
 /// WARCs declaring `pageList: metadata` in their first `warcinfo` include only captures whose
 /// linked metadata has a `pageUrl`; other WARCs retain the legacy one-page-per-capture behavior.
 pub struct WarcToWacz<'a> {
@@ -283,24 +286,28 @@ impl<'a> WarcToWacz<'a> {
         let mut package_info = PackageInfo::default();
         let mut records = 0;
 
-        for record in reader.iter_records::<NoExtension>() {
+        for record in reader.iter_raw_records() {
             let record = record?;
+            let written = warc.write_record(&record)?;
+            records += 1;
+            if !is_inspected(&record.header) {
+                continue;
+            }
+            // The raw record has been written, so converting it can take its body without a copy.
+            let record = parse_record(record)?;
             package_info.inspect(&record);
             collect_metadata(&spool, &record)?;
-            let capture = match capture_info(&record, self.title_generator.as_deref_mut()) {
-                Ok(capture) => capture,
+            match capture_parts(
+                &record,
+                self.title_generator.as_deref_mut(),
+                warc_name,
+                &written,
+            ) {
+                Ok(Some((item, page))) => spool.add_capture(&item, &page)?,
+                Ok(None) => {}
                 Err(reason) => {
                     package_info.skip_capture(record.core().record_id.as_str(), reason);
-                    None
                 }
-            };
-            let raw = record.into_raw()?;
-            let written = warc.write_record(&raw)?;
-            records += 1;
-
-            if let Some(capture) = capture {
-                let (item, page) = capture.into_parts(warc_name, &written);
-                spool.add_capture(&item, &page)?;
             }
         }
 
@@ -334,6 +341,34 @@ impl<'a> WarcToWacz<'a> {
             warnings,
         })
     }
+}
+
+/// The record types whose fields the conversion reads; all others are copied unparsed.
+const INSPECTED_TYPES: [RecordType; 4] = [
+    RecordType::Warcinfo,
+    RecordType::Metadata,
+    RecordType::Response,
+    RecordType::Revisit,
+];
+
+/// Whether a raw record declares one of the [`INSPECTED_TYPES`].
+///
+/// The comparison is deliberately lenient about case and surrounding white space: the semantic
+/// parser decides what the value means, and this only avoids parsing records it will not use.
+fn is_inspected(header: &raw::RecordHeader) -> bool {
+    header.get("WARC-Type").is_some_and(|value| {
+        let value = value.trim_ascii();
+        INSPECTED_TYPES
+            .iter()
+            .any(|record_type| value.eq_ignore_ascii_case(record_type.as_str().as_bytes()))
+    })
+}
+
+/// Convert an already written raw record to its semantic representation.
+fn parse_record(record: raw::Record) -> Result<Record, warc_read::Error> {
+    Ok(Record::<NoExtension>::try_from(untyped::Record::try_from(
+        record,
+    )?)?)
 }
 
 #[derive(Default)]
@@ -391,53 +426,6 @@ impl PackageInfo {
     }
 }
 
-/// A response or revisit's data needed after its record has been written.
-struct CaptureInfo {
-    record_id: String,
-    key: String,
-    url: String,
-    date: WarcDate,
-    status: u16,
-    digest: String,
-    mime: String,
-    size: Option<u64>,
-    generated_title: Option<String>,
-}
-
-impl CaptureInfo {
-    /// Split into the CDXJ line locating the written record and the page it may become.
-    fn into_parts(
-        self,
-        warc_name: &str,
-        written: &Written,
-    ) -> (cdxj::ConformingItem<'static>, PageDraft) {
-        let date = self.date.date_time();
-        let page = PageDraft::new(
-            self.record_id,
-            self.url.clone(),
-            date,
-            self.size,
-            self.generated_title,
-        );
-        let item = cdxj::Item {
-            key: Cow::Owned(self.key),
-            timestamp: cdxj::Timestamp::with_milliseconds(date),
-            fields: cdxj::ConformingFields {
-                url: Cow::Owned(self.url),
-                digest: Cow::Owned(self.digest),
-                mime: Cow::Owned(self.mime),
-                status: self.status,
-                offset: written.offset,
-                length: written.length,
-                filename: Cow::Owned(warc_name.to_owned()),
-                record_digest: stored_digest(written),
-                extra: ExtraProperties::default(),
-            },
-        };
-        (item, page)
-    }
-}
-
 fn collect_metadata(spool: &ConversionSpool, record: &Record) -> Result<(), Error> {
     let Record::Metadata {
         header,
@@ -463,14 +451,17 @@ fn collect_metadata(spool: &ConversionSpool, record: &Record) -> Result<(), Erro
     Ok(())
 }
 
-/// Describe an HTTP `response` or `revisit` record for the index and page list.
+/// Describe an HTTP `response` or `revisit` record, written at `written`, as the CDXJ line
+/// locating it and the page it may become.
 ///
 /// Returns `Ok(None)` for records of other types and for captures of non-HTTP URLs, and an error
 /// naming the field that keeps an HTTP capture out of the index.
-fn capture_info(
+fn capture_parts(
     record: &Record,
     generator: Option<&mut (dyn PageTitleGenerator + '_)>,
-) -> Result<Option<CaptureInfo>, SkipReason> {
+    warc_name: &str,
+    written: &Written,
+) -> Result<Option<(cdxj::ConformingItem<'static>, PageDraft)>, SkipReason> {
     let (message, revisit) = match record {
         Record::Response { body, .. } => (body.as_slice(), false),
         Record::Revisit { body, .. } => (body.as_slice(), true),
@@ -479,10 +470,10 @@ fn capture_info(
     let (Some(target_uri), Some(payload_headers)) = (record.target_uri(), record.payload()) else {
         return Ok(None);
     };
-    let Ok(url) = Canonicalizer::WAYBACK.canonicalize(target_uri.as_str()) else {
+    let Ok(canonical) = Canonicalizer::WAYBACK.canonicalize(target_uri.as_str()) else {
         return Ok(None);
     };
-    if !matches!(url.scheme(), "http" | "https") {
+    if !matches!(canonical.scheme(), "http" | "https") {
         return Ok(None);
     }
     let head = ResponseMetadata::parse(message).ok_or(SkipReason::UnparsableHttpMessage)?;
@@ -527,17 +518,31 @@ fn capture_info(
         })
     });
 
-    Ok(Some(CaptureInfo {
-        record_id: record.core().record_id.as_str().to_owned(),
-        key: Cow::from(url.surt()).into_owned(),
-        url: target_uri.as_str().to_owned(),
-        date: record.core().date,
-        status: head.status,
-        digest,
-        mime,
-        size: (!revisit).then_some(entity.len() as u64),
+    let date = record.core().date.date_time();
+    let url = target_uri.as_str().to_owned();
+    let page = PageDraft::new(
+        record.core().record_id.as_str().to_owned(),
+        url.clone(),
+        date,
+        (!revisit).then_some(entity.len() as u64),
         generated_title,
-    }))
+    );
+    let item = cdxj::Item {
+        key: Cow::Owned(Cow::from(canonical.surt()).into_owned()),
+        timestamp: cdxj::Timestamp::with_milliseconds(date),
+        fields: cdxj::ConformingFields {
+            url: Cow::Owned(url),
+            digest: Cow::Owned(digest),
+            mime: Cow::Owned(mime),
+            status: head.status,
+            offset: written.offset,
+            length: written.length,
+            filename: Cow::Owned(warc_name.to_owned()),
+            record_digest: stored_digest(written),
+            extra: ExtraProperties::default(),
+        },
+    };
+    Ok(Some((item, page)))
 }
 
 /// The `type/subtype` of the response's `Content-Type`, without its parameters.
