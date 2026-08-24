@@ -89,7 +89,7 @@ impl Collection {
         warcinfo: &WarcinfoOptions<'_>,
         persistent_index: Option<Index>,
     ) -> Result<Self, Error> {
-        let mut warc = WarcWriter::new(BufWriter::new(file)).with_digests();
+        let mut warc = WarcWriter::new(BufWriter::new(file));
         let warcinfo = warcinfo_record(warc_name, warcinfo)?;
         let warcinfo_id = warcinfo.core().record_id.clone();
         write_record(&mut warc, warcinfo, gzip)?;
@@ -221,7 +221,7 @@ impl Collection {
             last = Some((
                 exchange.date.date_time(),
                 exchange.status,
-                exchange.payload_length,
+                exchange.payload_length(),
             ));
             let key = exchange.revisit_key();
             let resource_key = exchange.resource_key();

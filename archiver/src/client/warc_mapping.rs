@@ -2,17 +2,16 @@
 
 use std::io::Write;
 
-use archivindex_warc::io::write::{WarcWriter, Written};
+use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::capture::{CaptureEvent, CaptureRecords};
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::recorder::CapturedExchange;
-use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
+use archivindex_warc::value::{LabelledDigest, MediaType, WarcDate};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use fluent_uri::Uri;
 
-use super::capture::labelled_digest;
 use super::warc_fields::{MetadataValues, metadata_record};
 use super::{Error, Exchange};
 
@@ -28,14 +27,14 @@ pub(super) fn write_record<W: Write>(
     writer: &mut WarcWriter<W>,
     record: Record,
     gzip: bool,
-) -> Result<Written, Error> {
+) -> Result<(), Error> {
     let record = record.into_raw()?;
     if gzip {
-        writer.write_gzip(&record)
+        writer.write_gzip(&record)?;
     } else {
-        writer.write(&record)
+        writer.write(&record)?;
     }
-    .map_err(Error::from)
+    Ok(())
 }
 
 /// Write one exchange's request, response, and metadata records.
@@ -54,13 +53,14 @@ pub(super) fn write_exchange<W: Write>(
     metadata: MetadataOptions<'_>,
     revisit_of: Option<&RevisitTarget>,
 ) -> Result<Option<RevisitTarget>, Error> {
+    let payload_length = exchange.payload_length();
     let Exchange {
         date,
         status: _,
         payload_digest,
-        payload_length,
         revalidated,
         captured,
+        ..
     } = exchange;
 
     let (records, target_uri) = if let Some(original) = revisit_of {
@@ -84,7 +84,7 @@ pub(super) fn write_exchange<W: Write>(
     // A revisit's payload is the original's, whatever the revisiting response itself carried.
     let digest = revisit_of
         .map(|original| original.payload_digest.clone())
-        .or_else(|| payload_digest.map(labelled_digest));
+        .or(payload_digest);
     let target = revisit_of
         .is_none()
         .then_some(digest)
@@ -110,7 +110,7 @@ fn full_records(
     captured: CapturedExchange,
     date: WarcDate,
     warcinfo_id: &Uri<String>,
-    payload_digest: Option<&[u8; 32]>,
+    payload_digest: Option<&LabelledDigest>,
     metadata: MetadataOptions<'_>,
 ) -> Result<(CaptureRecords, Uri<String>), Error> {
     let CapturedExchange {
@@ -129,7 +129,7 @@ fn full_records(
         .identify_payload_type();
 
     if let Some(digest) = payload_digest {
-        event = event.payload_digest(LabelledDigest::from_digest(Algorithm::Sha256, digest));
+        event = event.payload_digest(digest.clone());
     }
     if let Some(reason) = truncated {
         event = event.truncated(reason);

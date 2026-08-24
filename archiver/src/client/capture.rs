@@ -4,13 +4,13 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use archivindex_warc::recorder::CapturedExchange;
-use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate, WarcDatePrecision};
+use archivindex_warc::value::marker::Sha256;
+use archivindex_warc::value::{LabelledDigest, Supported as _, WarcDate, WarcDatePrecision};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState};
 use fluent_uri::Uri;
 use http::StatusCode;
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
-use sha2::{Digest, Sha256};
 use url::{Position, Url};
 
 use super::{Archiver, Collection, Error};
@@ -46,9 +46,11 @@ pub struct Exchange {
     /// The capture date at the recorded precision, shared by the WARC records.
     pub(super) date: WarcDate,
     pub(crate) status: u16,
-    /// The response entity-body digest, absent when transfer decoding fails.
-    pub(super) payload_digest: Option<[u8; 32]>,
-    pub(super) payload_length: u64,
+    /// The transfer-decoded entity body, absent when the stored body already is the entity body
+    /// or when transfer decoding fails.
+    decoded: Option<Vec<u8>>,
+    /// The SHA-256 digest of the entity body, absent when transfer decoding fails.
+    pub(super) payload_digest: Option<LabelledDigest>,
     /// The earlier capture that this `304 Not Modified` response, answering a conditional request,
     /// confirms unchanged.
     pub(super) revalidated: Option<RevisitTarget>,
@@ -69,8 +71,9 @@ impl Exchange {
             .map(|target| target.payload_digest.clone())
             .or_else(|| {
                 self.payload_digest
-                    .filter(|_| self.payload_length > 0 && self.captured.truncated.is_none())
-                    .map(labelled_digest)
+                    .as_ref()
+                    .filter(|_| !self.payload().is_empty() && self.captured.truncated.is_none())
+                    .cloned()
             })
     }
 
@@ -88,10 +91,16 @@ impl Exchange {
             .map(str::to_owned)
     }
 
-    pub(crate) fn payload(&self) -> Cow<'_, [u8]> {
-        self.captured
-            .entity_body()
-            .unwrap_or_else(|_| Cow::Borrowed(self.captured.stored_body()))
+    /// The entity body, or the stored body when transfer decoding fails.
+    pub(crate) fn payload(&self) -> &[u8] {
+        self.decoded
+            .as_deref()
+            .unwrap_or_else(|| self.captured.stored_body())
+    }
+
+    /// The length of [`payload`](Self::payload).
+    pub(super) fn payload_length(&self) -> u64 {
+        self.payload().len() as u64
     }
 }
 
@@ -232,28 +241,34 @@ impl Archiver {
         let revalidated = original
             .filter(|_| status == StatusCode::NOT_MODIFIED.as_u16())
             .map(|original| original.target);
-        let (payload_digest, payload_length) = captured.entity_body().map_or_else(
-            |_| (None, captured.stored_body().len() as u64),
-            |payload| (Some(Sha256::digest(&payload).into()), payload.len() as u64),
-        );
+        // The entity body is decoded and digested once here; the digest decides whether the
+        // response is written as a revisit, and the decoded body serves the processor.
+        let (decoded, payload_digest) = captured.entity_body().map_or((None, None), |payload| {
+            let mut hasher = Sha256::hasher();
+            hasher.update(&payload);
+            let decoded = match payload {
+                Cow::Owned(decoded) => Some(decoded),
+                // An identity body is normally the stored body itself; only a body split
+                // differently from the recorded header boundary is kept apart.
+                Cow::Borrowed(body) => {
+                    (body.len() != captured.stored_body().len()).then(|| body.to_vec())
+                }
+            };
+            (decoded, Some(hasher.finalize_labelled()))
+        });
 
         Ok((
             Exchange {
                 date: WarcDate::new(captured.date, DATE_PRECISION),
                 status,
+                decoded,
                 payload_digest,
-                payload_length,
                 revalidated,
                 captured,
             },
             location,
         ))
     }
-}
-
-/// Express the archiver's fixed SHA-256 payload digest in WARC's labelled representation.
-pub(super) fn labelled_digest(digest: [u8; 32]) -> LabelledDigest {
-    LabelledDigest::from_digest(Algorithm::Sha256, &digest)
 }
 
 /// Whether a status redirects to the response's `Location`.

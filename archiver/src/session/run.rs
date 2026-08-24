@@ -169,12 +169,11 @@ impl Session<'_> {
         let last = exchanges
             .last()
             .expect("a capture without an error has at least one exchange");
-        let payload = last.payload();
         let capture = Capture {
             url,
             final_url: last.captured.target_uri.as_str(),
             status: last.status,
-            payload: &payload,
+            payload: last.payload(),
             response: &last.captured.response,
             response_metadata: last.captured.response_metadata.clone(),
         };
