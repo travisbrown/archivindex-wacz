@@ -87,7 +87,8 @@ fn respond(path: &str) -> Vec<u8> {
         );
     }
 
-    match path {
+    // Canned responses are chosen by path alone, so a query string never changes them.
+    match path.split('?').next().unwrap_or(path) {
         "/" => plain("200 OK", "content-type: text/html", "<html>home</html>"),
         "/redirect" => plain(
             "302 Found",
@@ -1156,6 +1157,41 @@ fn archive_concurrently_preserves_input_order() -> Result<(), Box<dyn std::error
             .map(|page| page.url.as_ref())
             .collect::<Vec<_>>(),
         urls.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn archive_encodes_url_characters_the_uri_grammar_rejects() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (port, server) = serve(1)?;
+    // A WHATWG URL serializes `|` unencoded, which the URI grammar does not allow.
+    let url = format!("http://127.0.0.1:{port}/target?x=1|2");
+
+    let archiver = Archiver::new(Config {
+        gzip_warc: false,
+        ..gzip_config()
+    })?;
+    let mut bytes = Vec::new();
+    let summary = archiver.archive([&url], Cursor::new(&mut bytes))?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert!(requests[0].starts_with(b"GET /target?x=1%7C2 HTTP/1.1\r\n"));
+
+    let mut reader = package_bytes(&bytes)?;
+    let records = reader
+        .warc("archive/data.warc")?
+        .iter_records::<NoExtension>()
+        .collect::<Result<Vec<_>, _>>()?;
+    let Record::Response { header, .. } = &records[2] else {
+        panic!("the capture should store a response record");
+    };
+
+    assert_eq!(
+        header.target_uri.as_str(),
+        format!("http://127.0.0.1:{port}/target?x=1%7C2")
     );
 
     Ok(())

@@ -1,11 +1,13 @@
 //! HTTP capture, conditional revalidation, and redirect handling.
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 
 use archivindex_warc::recorder::CapturedExchange;
 use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate, WarcDatePrecision};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState};
+use fluent_uri::Uri;
 use http::StatusCode;
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use sha2::{Digest, Sha256};
@@ -195,8 +197,8 @@ impl Archiver {
             return Err(Error::MissingHost(url.to_string()));
         }
 
-        let target = url
-            .as_str()
+        let request_target = request_target(url);
+        let target = request_target
             .parse::<http::Uri>()
             .map_err(|source| Error::InvalidUri {
                 url: url.to_string(),
@@ -204,7 +206,13 @@ impl Archiver {
             })?;
         // The collection keys captures by the recorded target URI, which carries no fragment.
         let original = revalidate
-            .map(|collection| collection.original(&url[..Position::AfterQuery]))
+            .map(|collection| {
+                let target_uri = Uri::parse(request_target.as_ref())
+                    .map_err(archivindex_warc::recorder::Error::TargetUri)?
+                    .to_owned();
+
+                collection.original(target_uri)
+            })
             .transpose()?
             .flatten();
         let headers = original
@@ -251,6 +259,35 @@ pub(super) fn labelled_digest(digest: [u8; 32]) -> LabelledDigest {
 /// Whether a status redirects to the response's `Location`.
 const fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// The URL as an RFC 3986 request target without its fragment.
+///
+/// The WHATWG serializer leaves `|`, `^`, `[`, and `]` unencoded in paths and queries, where the
+/// URI grammar allows them only percent-encoded, so they are encoded here; everything else in a
+/// serialized URL is already a valid URI.
+fn request_target(url: &Url) -> Cow<'_, str> {
+    let text = &url[..Position::AfterQuery];
+    let path_start = url[..Position::BeforePath].len();
+    let needs_encoding = |character: char| matches!(character, '|' | '^' | '[' | ']');
+
+    if !text[path_start..].contains(needs_encoding) {
+        return Cow::Borrowed(text);
+    }
+
+    let mut encoded = String::with_capacity(text.len() + 8);
+    encoded.push_str(&text[..path_start]);
+
+    for character in text[path_start..].chars() {
+        if needs_encoding(character) {
+            // Writing to a `String` cannot fail, so the `fmt::Result` carries no information.
+            let _ = write!(encoded, "%{:02X}", u32::from(character));
+        } else {
+            encoded.push(character);
+        }
+    }
+
+    Cow::Owned(encoded)
 }
 
 /// The redirect target of a response, when present and followable over HTTP.

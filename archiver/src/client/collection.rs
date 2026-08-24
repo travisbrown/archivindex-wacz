@@ -112,10 +112,7 @@ impl Collection {
     }
 
     /// The earlier capture of a target URI that a new capture may ask the server to revalidate.
-    pub(super) fn original(&self, url: &str) -> Result<Option<Original>, Error> {
-        let target_uri = Uri::parse(url)
-            .expect("invariant violation: a parsed URL failed to reparse as a URI")
-            .to_owned();
+    pub(super) fn original(&self, target_uri: Uri<String>) -> Result<Option<Original>, Error> {
         let key = ResourceKey::new(target_uri);
 
         if let Some(state) = self.session_index.lookup_resource(&key)? {
