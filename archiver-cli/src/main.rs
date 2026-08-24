@@ -49,8 +49,8 @@ fn run() -> Result<(), Error> {
 fn archive(options: ArchiveOptions) -> Result<(), Error> {
     let config = options.config.into_config(options.concurrency);
     let archiver = Archiver::new(config)?;
-    let input_error = Rc::new(RefCell::new(None));
-    let urls = read_urls(std::io::stdin().lock(), Rc::clone(&input_error));
+    let mut input_error = None;
+    let urls = read_urls(std::io::stdin().lock(), &mut input_error);
     let progress = progress_spinner("Archiving", "URLs");
     let mut events = |event: CaptureEvent<'_>| {
         if matches!(event, CaptureEvent::Written { .. }) {
@@ -61,7 +61,6 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
     let result = archiver.archive_to_path_with_events(urls, &options.output, &mut events);
     progress.finish_and_clear();
     let summary = result?;
-    let input_error = input_error.borrow_mut().take();
     if let Some(error) = &input_error {
         log::warn!("Stopped reading input early: {error}");
     }
@@ -238,10 +237,13 @@ fn read_wp_comments(options: ReadWpCommentsOptions) -> Result<(), Error> {
 }
 
 /// Read one URL per line, trimming surrounding whitespace and skipping blank lines.
-fn read_urls<R: BufRead>(
+///
+/// A read failure ends the iterator and is stored in `error`, which the caller inspects once the
+/// iterator has been consumed.
+fn read_urls<'a, R: BufRead + 'a>(
     reader: R,
-    error: Rc<RefCell<Option<std::io::Error>>>,
-) -> impl Iterator<Item = String> {
+    error: &'a mut Option<std::io::Error>,
+) -> impl Iterator<Item = String> + 'a {
     reader
         .lines()
         .map_while(move |line| match line {
@@ -250,7 +252,7 @@ fn read_urls<R: BufRead>(
                 Some((!url.is_empty()).then(|| url.to_owned()))
             }
             Err(source) => {
-                *error.borrow_mut() = Some(source);
+                *error = Some(source);
                 None
             }
         })
@@ -481,12 +483,11 @@ mod tests {
     fn read_urls_trims_and_skips_blank_lines() {
         let input = "https://example.com/\n\n  https://example.org/  \n";
 
-        let error = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let urls =
-            super::read_urls(input.as_bytes(), std::rc::Rc::clone(&error)).collect::<Vec<_>>();
+        let mut error = None;
+        let urls = super::read_urls(input.as_bytes(), &mut error).collect::<Vec<_>>();
 
         assert_eq!(urls, ["https://example.com/", "https://example.org/"]);
-        assert!(error.borrow().is_none());
+        assert!(error.is_none());
     }
 
     #[test]
