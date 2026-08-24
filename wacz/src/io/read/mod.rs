@@ -1,5 +1,6 @@
 //! Reading files from an existing WACZ.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -170,6 +171,7 @@ pub(super) enum DigestFile {
 pub struct WaczReader<R> {
     archive: ZipArchive<R>,
     duplicate_members: Vec<String>,
+    plain_indexes: HashMap<String, random::PlainIndex>,
 }
 
 impl WaczReader<BufReader<File>> {
@@ -190,6 +192,7 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(Self {
             archive: ZipArchive::new(reader)?,
             duplicate_members,
+            plain_indexes: HashMap::new(),
         })
     }
 

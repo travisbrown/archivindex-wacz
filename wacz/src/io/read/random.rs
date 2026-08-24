@@ -1,7 +1,7 @@
 //! Random-access index and capture reading.
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
 
 use archivindex_surt::Surt;
 use archivindex_surt::url::Canonicalizer;
@@ -55,6 +55,33 @@ pub struct ZipNumSummary {
     pub data_path: String,
     /// Blocks in summary order.
     pub blocks: Vec<ZipNumBlock>,
+}
+
+/// A decoded plain CDXJ index, kept by the reader so later lookups do not inflate it again.
+pub(super) struct PlainIndex {
+    text: String,
+    /// The byte range of every non-empty line, without its line ending.
+    lines: Vec<Range<usize>>,
+}
+
+impl PlainIndex {
+    fn new(text: String) -> Self {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for line in text.split_inclusive('\n') {
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            if !content.is_empty() {
+                lines.push(start..start + content.len());
+            }
+            start += line.len();
+        }
+        Self { text, lines }
+    }
+
+    fn line(&self, range: &Range<usize>) -> &str {
+        &self.text[range.clone()]
+    }
 }
 
 pub(super) struct IndexPartition {
@@ -123,7 +150,7 @@ impl<R: Read + Seek> WaczReader<R> {
     /// under the `warcio.js` key of Browsertrix and `wabac.js` when the two differ (typically by
     /// a trailing slash), so packages from either family are searched correctly.
     ///
-    /// Plain indexes are searched using binary search after reading the index member. `ZipNum`
+    /// Plain indexes are decoded once per reader, kept in memory, and binary-searched. `ZipNum`
     /// summaries are binary-searched first, and only candidate gzip blocks are fetched. Results
     /// are ordered chronologically, with their source index retained in [`Capture::index_path`].
     pub fn lookup<B: RangeBounds<Timestamp>>(
@@ -229,21 +256,16 @@ impl<R: Read + Seek> WaczReader<R> {
         keys: &[Surt<'static>],
         time_range: &B,
     ) -> Result<Vec<Capture>, Error> {
-        let bytes = self.decoded_member_bytes(path)?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| Error::InvalidIndexEncoding(path.to_owned()))?;
-        let lines = text
-            .lines()
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
+        let index = self.plain_index(path)?;
         let mut captures = Vec::new();
 
         for key in keys {
             let key = key.as_str();
-            let first =
-                lines.partition_point(|line| line_key(line).is_some_and(|found| found < key));
+            let first = index.lines.partition_point(|range| {
+                line_key(index.line(range)).is_some_and(|found| found < key)
+            });
 
-            for line in &lines[first..] {
+            for line in index.lines[first..].iter().map(|range| index.line(range)) {
                 if line_key(line) != Some(key) {
                     break;
                 }
@@ -259,6 +281,21 @@ impl<R: Read + Seek> WaczReader<R> {
         }
 
         Ok(captures)
+    }
+
+    /// The decoded lines of a plain index, read from its member on first use.
+    fn plain_index(&mut self, path: &str) -> Result<&PlainIndex, Error> {
+        if !self.plain_indexes.contains_key(path) {
+            let bytes = self.decoded_member_bytes(path)?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| Error::InvalidIndexEncoding(path.to_owned()))?;
+            self.plain_indexes
+                .insert(path.to_owned(), PlainIndex::new(text));
+        }
+        Ok(self
+            .plain_indexes
+            .get(path)
+            .expect("plain index was cached above"))
     }
 
     fn lookup_zipnum<B: RangeBounds<Timestamp>>(
@@ -496,7 +533,48 @@ fn verify_digest(path: &str, bytes: &[u8], expected: Sha256Digest) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
+    use chrono::{TimeZone, Utc};
+
     use super::*;
+
+    #[test]
+    fn plain_indexes_are_decoded_once_per_reader() {
+        let item = cdxj::Item {
+            key: Cow::Borrowed("com,example)/"),
+            timestamp: Utc
+                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+                .single()
+                .unwrap()
+                .into(),
+            fields: cdxj::ConformingFields {
+                url: Cow::Borrowed("https://example.com/"),
+                digest: Cow::Borrowed("sha256:00"),
+                mime: Cow::Borrowed("text/html"),
+                status: 200,
+                offset: 0,
+                length: 10,
+                filename: Cow::Borrowed("data.warc"),
+                record_digest: None,
+                extra: crate::ExtraProperties::default(),
+            },
+        };
+        let mut writer = crate::io::write::WaczWriter::new(Cursor::new(Vec::new()));
+        writer.add_index("index.cdx", [&item]).unwrap();
+        let wacz = writer
+            .finish_unchecked(crate::frictionless::DataPackageBuilder::default())
+            .unwrap()
+            .into_inner();
+        let mut reader = WaczReader::new(Cursor::new(wacz)).unwrap();
+
+        let first = reader.lookup("https://example.com/", ..).unwrap();
+        let second = reader.lookup("https://example.com/", ..).unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, second);
+        assert_eq!(reader.plain_indexes.len(), 1);
+    }
 
     #[test]
     fn zipnum_errors_carry_line_context() {
