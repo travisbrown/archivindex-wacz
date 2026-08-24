@@ -1,10 +1,16 @@
 //! Shared line-oriented reading for CDXJ and JSON Lines files.
 
-use std::io::BufRead;
+use std::io::{self, BufRead, Read};
 
 use crate::LineContext;
 
 const EXCERPT_CHAR_LIMIT: usize = 160;
+
+/// The longest line accepted from a member, excluding its line ending.
+///
+/// Page entries can carry extracted full text, so the bound is generous; it exists so that a
+/// hostile member cannot make the reader buffer an unbounded line.
+pub const MAX_LINE_BYTES: usize = 16 << 20;
 
 /// An I/O failure annotated with the line being read.
 #[derive(Debug, thiserror::Error)]
@@ -21,7 +27,7 @@ pub struct Error {
 pub struct Lines<R> {
     underlying: R,
     /// Scratch buffer reused across lines; returned content is only valid until the next call.
-    line: String,
+    line: Vec<u8>,
     line_number: usize,
     source: String,
     fused: bool,
@@ -32,7 +38,7 @@ impl<R: BufRead> Lines<R> {
     pub fn with_source(underlying: R, source: impl Into<String>) -> Self {
         Self {
             underlying,
-            line: String::new(),
+            line: Vec::new(),
             line_number: 0,
             source: source.into(),
             fused: false,
@@ -44,6 +50,11 @@ impl<R: BufRead> Lines<R> {
     ///
     /// Blank lines (such as a trailing newline at the end of a file) are skipped rather than
     /// returned, but still counted; `None` marks the end of the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and yields nothing further, when the underlying read fails, when a line
+    /// is longer than [`MAX_LINE_BYTES`], or when a line is not valid UTF-8.
     pub fn next_content(&mut self) -> Result<Option<(LineContext, &str)>, Error> {
         if self.fused {
             return Ok(None);
@@ -52,35 +63,68 @@ impl<R: BufRead> Lines<R> {
         loop {
             self.line.clear();
 
-            let read = self
-                .underlying
-                .read_line(&mut self.line)
-                .map_err(|source| {
-                    self.fused = true;
-                    Error {
-                        context: LineContext {
-                            source: self.source.clone(),
-                            line: self.line_number + 1,
-                            excerpt: None,
-                        },
-                        source,
-                    }
-                })?;
+            // Reading one byte past the limit distinguishes an over-long line from one that is
+            // exactly the limit; the stray byte is never returned.
+            let read = Read::by_ref(&mut self.underlying)
+                .take(MAX_LINE_BYTES as u64 + 1)
+                .read_until(b'\n', &mut self.line)
+                .map_err(|source| self.fail(self.line_number + 1, source))?;
             if read == 0 {
                 self.fused = true;
                 return Ok(None);
             }
 
             self.line_number += 1;
-            let line_text = self.line.trim_end_matches(['\r', '\n']);
+            let trimmed = self.line.len()
+                - self
+                    .line
+                    .iter()
+                    .rev()
+                    .take_while(|byte| matches!(byte, b'\r' | b'\n'))
+                    .count();
 
-            if !line_text.is_empty() {
-                let length = line_text.len();
+            if trimmed > MAX_LINE_BYTES {
+                let source = io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("line exceeds {MAX_LINE_BYTES} bytes"),
+                );
+                return Err(self.fail(self.line_number, source));
+            }
+
+            if trimmed > 0 {
+                // The arms touch disjoint fields, so the returned borrow of `line` may coexist
+                // with fusing the source; a `&mut self` helper could not be called here.
+                let line_text = match std::str::from_utf8(&self.line[..trimmed]) {
+                    Ok(line_text) => line_text,
+                    Err(error) => {
+                        self.fused = true;
+                        let source = io::Error::new(io::ErrorKind::InvalidData, error);
+                        return Err(line_error(&self.source, self.line_number, source));
+                    }
+                };
                 let location = context(&self.source, self.line_number, line_text);
 
-                return Ok(Some((location, &self.line[..length])));
+                return Ok(Some((location, line_text)));
             }
         }
+    }
+
+    /// Fuse the source and describe a failure on line `line`.
+    fn fail(&mut self, line: usize, source: io::Error) -> Error {
+        self.fused = true;
+        line_error(&self.source, line, source)
+    }
+}
+
+/// Describe an I/O failure on line `line`, without an excerpt.
+fn line_error(source_name: &str, line: usize, source: io::Error) -> Error {
+    Error {
+        context: LineContext {
+            source: source_name.to_owned(),
+            line,
+            excerpt: None,
+        },
+        source,
     }
 }
 
@@ -135,6 +179,32 @@ mod tests {
         assert_eq!(lines.next_content()?, None);
 
         Ok(())
+    }
+
+    #[test]
+    fn over_long_and_invalid_lines_are_rejected() {
+        let mut input = vec![b'a'; MAX_LINE_BYTES];
+        input.extend_from_slice(b"\r\n");
+        input.extend_from_slice(&vec![b'b'; MAX_LINE_BYTES + 1]);
+        input.push(b'\n');
+        let mut lines = Lines::with_source(&input[..], "long.jsonl");
+
+        let (location, line_text) = lines
+            .next_content()
+            .expect("a line at the limit")
+            .expect("l");
+        assert_eq!((location.line, line_text.len()), (1, MAX_LINE_BYTES));
+        // The first line's `\n` was left behind the limit and counts as a blank second line.
+        let error = lines.next_content().expect_err("one byte over the limit");
+        assert_eq!(
+            (error.context.line, error.source.kind()),
+            (3, io::ErrorKind::InvalidData)
+        );
+        assert!(lines.next_content().expect("fused source").is_none());
+
+        let mut lines = Lines::with_source(&b"\xff\n"[..], "bad.jsonl");
+        let error = lines.next_content().expect_err("invalid UTF-8");
+        assert_eq!(error.source.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
