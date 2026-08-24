@@ -66,9 +66,10 @@ pub enum InvalidLineSource {
 /// A 14- or 17-digit CDX timestamp (`YYYYmmddHHMMSS[sss]`, always UTC).
 ///
 /// The shorter form has whole-second precision; the longer form appends three millisecond digits.
-/// Parsing and display preserve which form was used. Equality, hashing, and ordering compare the
-/// represented instant, so the two encodings of an exact whole second are equal and timestamps of
-/// either precision order chronologically.
+/// Parsing and display preserve which form was used. Equality, hashing, and ordering agree with
+/// the serialized form: timestamps order chronologically, and of two encodings of the same
+/// instant the 14-digit form sorts first, as it does as text. Index lines therefore keep their
+/// sorted order whether compared as values or as bytes.
 #[derive(Clone, Copy, Debug, ToStatic)]
 pub struct Timestamp {
     instant: DateTime<Utc>,
@@ -151,7 +152,7 @@ impl FromStr for Timestamp {
 
 impl PartialEq for Timestamp {
     fn eq(&self, other: &Self) -> bool {
-        self.instant == other.instant
+        self.instant == other.instant && self.milliseconds == other.milliseconds
     }
 }
 
@@ -165,13 +166,16 @@ impl PartialOrd for Timestamp {
 
 impl Ord for Timestamp {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.instant.cmp(&other.instant)
+        self.instant
+            .cmp(&other.instant)
+            .then(self.milliseconds.cmp(&other.milliseconds))
     }
 }
 
 impl Hash for Timestamp {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.instant.hash(state);
+        self.milliseconds.hash(state);
     }
 }
 
@@ -313,6 +317,8 @@ pub struct ParsedFields<'a> {
 ///
 /// Unlike [`ParsedFields`], every property required by CDXJ 0.1.0 is present. Optional extension
 /// properties, including the WACZ stored-record digest, remain optional.
+/// `status`, `offset`, and `length` are serialized as JSON strings, matching what `cdxj-indexer`
+/// and py-wacz write; the parser accepts numbers as well.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Serialize)]
 pub struct ConformingFields<'a> {
     /// The original URL of the capture.
@@ -661,17 +667,24 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_of_both_precisions_order_chronologically()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let previous = "20201007212235999".parse::<Timestamp>()?;
-        let seconds = "20201007212236".parse::<Timestamp>()?;
-        let zero_milliseconds = "20201007212236000".parse::<Timestamp>()?;
-        let later = "20201007212236001".parse::<Timestamp>()?;
+    fn timestamps_order_like_their_serialized_forms() -> Result<(), Box<dyn std::error::Error>> {
+        let forms = [
+            "20201007212235999",
+            "20201007212236",
+            "20201007212236000",
+            "20201007212236001",
+            "20201007212237",
+        ];
+        let timestamps = forms
+            .iter()
+            .map(|form| form.parse::<Timestamp>())
+            .collect::<Result<Vec<_>, _>>()?;
 
-        assert!(previous < seconds);
-        assert_eq!(seconds, zero_milliseconds);
-        assert_eq!(seconds.cmp(&zero_milliseconds), std::cmp::Ordering::Equal);
-        assert!(zero_milliseconds < later);
+        for window in timestamps.windows(2) {
+            assert!(window[0] < window[1], "{} < {}", window[0], window[1]);
+        }
+        assert_ne!(timestamps[1], timestamps[2]);
+        assert_eq!(timestamps[1], "20201007212236".parse::<Timestamp>()?);
 
         Ok(())
     }

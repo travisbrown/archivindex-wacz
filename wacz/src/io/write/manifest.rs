@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Seek, Write};
 
+use chrono::SubsecRound as _;
 use chrono::Utc;
 
 use super::resource::options_for;
@@ -76,7 +77,10 @@ impl<W: Write + Seek> WaczWriter<W> {
             poisoned: _,
         } = self;
         let mut package = metadata.into_data_package(resources);
-        package.created.get_or_insert_with(Utc::now);
+        let created = *package
+            .created
+            .get_or_insert_with(|| Utc::now().trunc_subsecs(3));
+        package.modified.get_or_insert(created);
         package.software.get_or_insert(Cow::Borrowed(SOFTWARE));
 
         let manifest = serde_json::to_vec_pretty(&package).map_err(Error::Manifest)?;

@@ -127,6 +127,7 @@ pub struct DataPackage<'a> {
     /// The URL of the primary entry page for replay.
     #[serde(
         rename = "mainPageUrl",
+        alias = "mainPageURL",
         default,
         deserialize_with = "crate::attributes::borrowed_option_str",
         skip_serializing_if = "Option::is_none"
