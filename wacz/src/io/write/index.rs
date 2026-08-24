@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::io::{BufRead, BufReader, Seek, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+use std::path::PathBuf;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -166,25 +168,51 @@ impl<W: Write + Seek> WaczWriter<W> {
     }
 }
 
-const SORT_CHUNK_LINES: usize = 4096;
+/// The number of bytes of lines buffered in memory before they are sorted into a run.
+const SORT_RUN_BYTES: usize = 64 << 20;
+/// The number of runs merged at once.
 const SORT_MERGE_FAN_IN: usize = 64;
 
 /// A disk-backed, incrementally populated CDXJ sorter.
 ///
-/// Lines are sorted and deduplicated in bounded-memory runs. The completed spool can be passed to
-/// [`WaczWriter::add_spooled_index`] after another streaming member has released the writer.
+/// Lines are sorted and deduplicated in bounded-memory runs, each a closed file in a private
+/// temporary directory, and runs are merged with bounded fan-in as they accumulate, so neither
+/// memory nor open descriptors grow with the number of lines. The completed spool can be passed
+/// to [`WaczWriter::add_spooled_index`] after another streaming member has released the writer.
 pub struct IndexSpool {
     chunk: Vec<String>,
-    runs: Vec<std::fs::File>,
+    chunk_bytes: usize,
+    run_bytes: usize,
+    fan_in: usize,
+    directory: Option<tempfile::TempDir>,
+    runs: Vec<Run>,
+    created_runs: usize,
+}
+
+/// A sorted, deduplicated run file; `level` counts the merges that produced it.
+struct Run {
+    path: PathBuf,
+    level: u32,
 }
 
 impl IndexSpool {
     /// Create an empty index spool.
+    ///
+    /// No temporary storage is used until the buffered lines exceed the run size.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_limits(SORT_RUN_BYTES, SORT_MERGE_FAN_IN)
+    }
+
+    fn with_limits(run_bytes: usize, fan_in: usize) -> Self {
         Self {
-            chunk: Vec::with_capacity(SORT_CHUNK_LINES),
+            chunk: Vec::new(),
+            chunk_bytes: 0,
+            run_bytes,
+            fan_in: fan_in.max(2),
+            directory: None,
             runs: Vec::new(),
+            created_runs: 0,
         }
     }
 
@@ -197,43 +225,65 @@ impl IndexSpool {
     }
 
     fn push_line(&mut self, line: String) -> Result<(), std::io::Error> {
+        self.chunk_bytes += line.len();
         self.chunk.push(line);
-        if self.chunk.len() == SORT_CHUNK_LINES {
+        if self.chunk_bytes >= self.run_bytes {
             self.flush_run()?;
         }
         Ok(())
     }
 
+    /// Sort the buffered lines into a new run, then merge runs while the newest `fan_in` of them
+    /// share a level, so every line is rewritten once per level rather than once per run.
     fn flush_run(&mut self) -> Result<(), std::io::Error> {
-        self.chunk.sort_unstable();
-        self.chunk.dedup();
-        let mut run = tempfile::tempfile()?;
-        for line in self.chunk.drain(..) {
-            run.write_all(line.as_bytes())?;
+        let path = self.run_path()?;
+        write_sorted(&mut self.chunk, File::create(&path)?)?;
+        self.chunk_bytes = 0;
+        self.runs.push(Run { path, level: 0 });
+        while self.runs.len() >= self.fan_in && self.newest_share_level() {
+            self.merge_newest()?;
         }
-        run.rewind()?;
-        self.runs.push(run);
         Ok(())
     }
 
-    fn finish(mut self) -> Result<std::fs::File, std::io::Error> {
-        if !self.chunk.is_empty() || self.runs.is_empty() {
+    fn newest_share_level(&self) -> bool {
+        let newest = &self.runs[self.runs.len() - self.fan_in..];
+        newest.iter().all(|run| run.level == newest[0].level)
+    }
+
+    /// Merge the newest `fan_in` runs into one run of the next level, removing their files.
+    fn merge_newest(&mut self) -> Result<(), std::io::Error> {
+        let path = self.run_path()?;
+        let group = self.runs.split_off(self.runs.len() - self.fan_in);
+        merge_runs(&group, File::create(&path)?)?;
+        self.runs.push(Run {
+            path,
+            level: group[0].level + 1,
+        });
+        Ok(())
+    }
+
+    fn run_path(&mut self) -> Result<PathBuf, std::io::Error> {
+        let directory = match self.directory.as_ref() {
+            Some(directory) => directory,
+            None => self.directory.insert(tempfile::tempdir()?),
+        };
+        let path = directory.path().join(format!("run-{}", self.created_runs));
+        self.created_runs += 1;
+        Ok(path)
+    }
+
+    fn finish(mut self) -> Result<File, std::io::Error> {
+        if self.runs.is_empty() {
+            return write_sorted(&mut self.chunk, tempfile::tempfile()?);
+        }
+        if !self.chunk.is_empty() {
             self.flush_run()?;
         }
-        let mut runs = self.runs;
-        while runs.len() > SORT_MERGE_FAN_IN {
-            let mut source = runs.into_iter();
-            let mut merged = Vec::new();
-            loop {
-                let group = source.by_ref().take(SORT_MERGE_FAN_IN).collect::<Vec<_>>();
-                if group.is_empty() {
-                    break;
-                }
-                merged.push(merge_runs(group)?);
-            }
-            runs = merged;
+        while self.runs.len() > self.fan_in {
+            self.merge_newest()?;
         }
-        merge_runs(runs)
+        merge_runs(&self.runs, tempfile::tempfile()?)
     }
 }
 
@@ -243,29 +293,57 @@ impl Default for IndexSpool {
     }
 }
 
-fn merge_runs(runs: Vec<std::fs::File>) -> Result<std::fs::File, std::io::Error> {
-    let mut readers = runs.into_iter().map(BufReader::new).collect::<Vec<_>>();
-    let mut heap = BinaryHeap::new();
+/// Sort and deduplicate `chunk` into `sink`, leaving the chunk empty and the sink rewound.
+fn write_sorted(chunk: &mut Vec<String>, sink: File) -> Result<File, std::io::Error> {
+    chunk.sort_unstable();
+    chunk.dedup();
+    let mut writer = BufWriter::new(sink);
+    for line in chunk.drain(..) {
+        writer.write_all(line.as_bytes())?;
+    }
+    finish_writer(writer)
+}
+
+/// Merge sorted runs into `sink`, dropping repeated lines, then remove the run files.
+fn merge_runs(runs: &[Run], sink: File) -> Result<File, std::io::Error> {
+    let mut readers = runs
+        .iter()
+        .map(|run| File::open(&run.path).map(BufReader::new))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::with_capacity(readers.len());
     for (index, reader) in readers.iter_mut().enumerate() {
         let mut line = String::new();
         if reader.read_line(&mut line)? != 0 {
             heap.push(Reverse((line, index)));
         }
     }
-    let mut output = tempfile::tempfile()?;
+    let mut output = BufWriter::new(sink);
     let mut previous = String::new();
-    while let Some(Reverse((line, index))) = heap.pop() {
+    // Each popped line's buffer is reused for the next line of the same run; an emitted line
+    // swaps buffers with `previous` instead of being copied.
+    while let Some(Reverse((mut line, index))) = heap.pop() {
         if line != previous {
             output.write_all(line.as_bytes())?;
-            previous.clone_from(&line);
+            std::mem::swap(&mut previous, &mut line);
         }
-        let mut next = String::new();
-        if readers[index].read_line(&mut next)? != 0 {
-            heap.push(Reverse((next, index)));
+        line.clear();
+        if readers[index].read_line(&mut line)? != 0 {
+            heap.push(Reverse((line, index)));
         }
     }
-    output.rewind()?;
-    Ok(output)
+    drop(readers);
+    for run in runs {
+        std::fs::remove_file(&run.path)?;
+    }
+    finish_writer(output)
+}
+
+fn finish_writer(writer: BufWriter<File>) -> Result<File, std::io::Error> {
+    let mut file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
+    file.rewind()?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -274,9 +352,7 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn external_sort_crosses_run_boundaries_and_deduplicates() {
-        let mut sorter = IndexSpool::new();
+    fn sorted_output(mut sorter: IndexSpool) -> Vec<String> {
         for value in (0..5000).rev() {
             sorter.push_line(format!("{value:04}\n")).unwrap();
         }
@@ -287,11 +363,27 @@ mod tests {
             .unwrap()
             .read_to_string(&mut output)
             .unwrap();
-        let lines = output.lines().collect::<Vec<_>>();
+        output.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn external_sort_merges_runs_across_levels_and_deduplicates() {
+        // Runs of about a dozen lines and a fan-in of two force merges at many levels.
+        let lines = sorted_output(IndexSpool::with_limits(64, 2));
 
         assert_eq!(lines.len(), 5000);
-        assert_eq!(lines.first(), Some(&"0000"));
-        assert_eq!(lines.last(), Some(&"4999"));
+        assert_eq!(lines.first().map(String::as_str), Some("0000"));
+        assert_eq!(lines.last().map(String::as_str), Some("4999"));
         assert!(lines.is_sorted());
+    }
+
+    #[test]
+    fn in_memory_sort_never_creates_a_run_directory() {
+        let mut sorter = IndexSpool::new();
+        sorter.push_line("b\n".to_owned()).unwrap();
+        sorter.push_line("a\n".to_owned()).unwrap();
+
+        assert!(sorter.directory.is_none());
+        assert_eq!(sorted_output(sorter).len(), 5000);
     }
 }
