@@ -101,14 +101,9 @@ name = "archivindex-archiver-cli"
 version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
- "archivindex-packager",
- "archivindex-wacz",
- "archivindex-wordpress",
  "cli-helpers",
  "indicatif",
- "serde_json",
  "thiserror 2.0.20",
- "url",
 ]
 
 [[package]]
@@ -141,6 +136,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-strategy",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "archivindex-packager-cli"
+version = "0.1.0"
+dependencies = [
+ "archivindex-packager",
+ "archivindex-wacz",
+ "cli-helpers",
  "thiserror 2.0.20",
 ]
 
@@ -235,6 +240,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-strategy",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
+name = "archivindex-wordpress-cli"
+version = "0.1.0"
+dependencies = [
+ "archivindex-archiver",
+ "archivindex-wordpress",
+ "cli-helpers",
+ "indicatif",
+ "serde_json",
  "thiserror 2.0.20",
  "url",
 ]

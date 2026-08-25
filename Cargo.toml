@@ -4,10 +4,12 @@ members = [
   "archiver-cli",
   "cdx",
   "packager",
+  "packager-cli",
   "surt",
   "wacz",
   "warc-revisit-index",
   "wordpress",
+  "wordpress-cli",
 ]
 resolver = "3"
 

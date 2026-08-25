@@ -1,25 +1,16 @@
-//! Command-line tools for writing WARC captures and packaging WACZ distributions.
+//! A command-line front end for archiving URLs into WARC files.
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
 #![forbid(unsafe_code)]
 
-use std::cell::RefCell;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::rc::Rc;
 use std::time::Duration;
 
 use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
-use archivindex_archiver::session::{
-    Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
-};
 use archivindex_archiver::{Archiver, Config};
-use archivindex_packager::WarcToWacz;
-use archivindex_wacz::io::write::IndexFormat;
-use archivindex_wordpress::read::read_comments;
-use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
 use cli_helpers::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -39,9 +30,6 @@ fn run() -> Result<(), Error> {
 
     match opts.command {
         Command::Archive(options) => archive(options),
-        Command::ArchiveWpComments(options) => archive_wp_comments(options),
-        Command::WarcToWacz(options) => warc_to_wacz(&options),
-        Command::ReadWpComments(options) => read_wp_comments(options),
     }
 }
 
@@ -83,159 +71,6 @@ fn archive(options: ArchiveOptions) -> Result<(), Error> {
     }
 }
 
-/// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
-fn archive_wp_comments(options: ArchiveWpCommentsOptions) -> Result<(), Error> {
-    let titles = options.titles;
-    let processor =
-        CommentCaptureProcessor::new(&options.base_url)?.second_sweep(options.second_sweep);
-    let first_url = processor.first_comment_url();
-    let comment_progress = Rc::new(RefCell::new(None));
-    let processor = ProgressingCommentProcessor {
-        processor,
-        progress: Rc::clone(&comment_progress),
-    };
-    let retry_defaults = RetryConfig::default();
-    let retry = RetryConfig {
-        attempts: options.retry_attempts.unwrap_or(retry_defaults.attempts),
-        initial_backoff: options
-            .retry_initial_backoff
-            .map_or(retry_defaults.initial_backoff, Duration::from_secs),
-        max_backoff: options
-            .retry_max_backoff
-            .map_or(retry_defaults.max_backoff, Duration::from_secs),
-    };
-    let config = options.config.into_config(None);
-    let archiver = Archiver::new(config)?;
-    let progress = message_spinner("Downloading comments");
-    let event_progress = progress.clone();
-    let event_comment_progress = Rc::clone(&comment_progress);
-    let operator = Operator {
-        name: options.operator,
-        email: options.operator_email,
-    };
-    let mut session = Session::new(
-        archiver,
-        &options.session_name,
-        operator,
-        [first_url],
-        &options.output,
-    )?
-    .processor(processor)
-    .events(move |event: CaptureEvent<'_>| {
-        if matches!(event, CaptureEvent::Written { .. })
-            && let Some(snapshot) = *event_comment_progress.borrow()
-        {
-            event_progress.set_message(snapshot.to_string());
-        }
-        CaptureControl::Continue
-    })
-    .retry(retry)
-    .request_delay(Duration::from_secs(options.request_delay));
-
-    if titles {
-        session = session.titles();
-    }
-
-    if let Some(revisit_index) = options.revisit_index {
-        session = session.revisit_index(revisit_index);
-    }
-    if let Some(limit) = options.limit {
-        session = session.limit(limit);
-    }
-
-    let summary = session.run()?;
-    progress.finish_and_clear();
-
-    for failure in &summary.failures {
-        log::warn!("Failed to capture {}: {}", failure.url, failure.error);
-    }
-    if let Some(error) = &summary.fatal_error {
-        log::warn!("The session ended early: {error}");
-    }
-
-    if let Some(snapshot) = *comment_progress.borrow() {
-        if let Some(shortfall) = snapshot.visibility_shortfall() {
-            log::warn!(
-                "WordPress counted {} comments before visibility filtering but returned {} visible comments ({shortfall} omitted)",
-                snapshot.total,
-                snapshot.downloaded
-            );
-        }
-        println!("{snapshot} to {}", options.output.display());
-    } else {
-        println!("Downloaded no comments to {}", options.output.display());
-    }
-
-    if summary.is_complete() {
-        Ok(())
-    } else {
-        Err(Error::PartialArchive(options.output))
-    }
-}
-
-struct ProgressingCommentProcessor {
-    processor: CommentCaptureProcessor,
-    progress: Rc<RefCell<Option<CommentProgress>>>,
-}
-
-impl CaptureProcessor for ProgressingCommentProcessor {
-    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        let inspection = self.processor.inspect(capture);
-        *self.progress.borrow_mut() = self.processor.progress();
-        inspection
-    }
-}
-
-/// Convert an existing WARC file into an indexed WACZ package.
-fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
-    let index_format = if options.compressed_index {
-        IndexFormat::zipnum()
-    } else {
-        IndexFormat::Plain
-    };
-    let summary = WarcToWacz::new(&options.warc, &options.output)
-        .index_format(index_format)
-        .gzip_warc(options.gzip_warc)
-        .gzip_compression_level(options.gzip_compression_level)
-        .zip_compression_level(options.zip_compression_level)
-        .run()?;
-
-    for warning in &summary.warnings {
-        log::warn!("{warning}");
-    }
-    println!(
-        "Converted {} records and {} captures from {} to {}",
-        summary.records,
-        summary.captures,
-        options.warc.display(),
-        options.output.display()
-    );
-    Ok(())
-}
-
-/// Read, sort, and deduplicate `WordPress` comments captured in a WARC file.
-fn read_wp_comments(options: ReadWpCommentsOptions) -> Result<(), Error> {
-    let result = read_comments(options.warc)?;
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-
-    for comment in result.comments {
-        serde_json::to_writer(&mut output, &comment)?;
-        writeln!(output)?;
-    }
-
-    for warning in result.warnings {
-        log::warn!(
-            "Conflicting objects for WordPress comment {}: {} != {}",
-            warning.id,
-            warning.first,
-            warning.second
-        );
-    }
-
-    Ok(())
-}
-
 /// Read one URL per line, trimming surrounding whitespace and skipping blank lines.
 ///
 /// A read failure ends iteration and is stored in `error`.
@@ -268,37 +103,18 @@ fn progress_spinner(message: &'static str, unit: &str) -> ProgressBar {
     progress
 }
 
-fn message_spinner(message: &'static str) -> ProgressBar {
-    let progress = ProgressBar::new_spinner();
-    progress.set_style(
-        ProgressStyle::with_template("{msg} {spinner}").expect("valid progress spinner template"),
-    );
-    progress.set_message(message);
-    progress
-}
-
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("a partial archive was published at {}", .0.display())]
     PartialArchive(PathBuf),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
     #[error("CLI argument reading error: {0}")]
     Args(#[from] cli_helpers::Error),
-    #[error("invalid WordPress base URL: {0}")]
-    Url(#[from] url::ParseError),
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::Error),
     #[error(transparent)]
     UserAgent(#[from] archivindex_archiver::UserAgentError),
     #[error(transparent)]
     SessionId(#[from] archivindex_archiver::session::SessionIdError),
-    #[error("WARC conversion error: {0}")]
-    Convert(#[from] archivindex_packager::Error),
-    #[error("WordPress comment reading error: {0}")]
-    ReadComments(#[from] archivindex_wordpress::read::Error),
-    #[error("JSON writing error: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 impl Error {
@@ -324,12 +140,6 @@ struct Opts {
 enum Command {
     /// Archive URLs read one per line from standard input.
     Archive(ArchiveOptions),
-    /// Archive comments iteratively through a site's `WordPress` REST API v2 endpoint.
-    ArchiveWpComments(ArchiveWpCommentsOptions),
-    /// Convert an existing WARC file into an indexed WACZ package.
-    WarcToWacz(WarcToWaczOptions),
-    /// Read comments captured from the `WordPress` REST API in a WARC file.
-    ReadWpComments(ReadWpCommentsOptions),
 }
 
 /// Options for archiving URLs read from standard input.
@@ -345,82 +155,7 @@ struct ArchiveOptions {
     concurrency: Option<usize>,
 }
 
-/// Options for archiving comments from the `WordPress` REST API.
-#[derive(Debug, clap::Args)]
-struct ArchiveWpCommentsOptions {
-    #[clap(flatten)]
-    config: ConfigOptions,
-    /// Base URL of the `WordPress` site.
-    #[clap(long)]
-    base_url: String,
-    /// Path of the WARC file to write (an existing file is not overwritten).
-    #[clap(long)]
-    output: PathBuf,
-    /// URL-safe name identifying the session and its WARC file.
-    #[clap(long)]
-    session_name: String,
-    /// Name of the operator running the crawl, recorded in `warcinfo`.
-    #[clap(long)]
-    operator: String,
-    /// Email address of the operator running the crawl, recorded in `warcinfo`.
-    #[clap(long)]
-    operator_email: Option<String>,
-    /// Persistent payload-revisit and conditional-request state database.
-    #[clap(long)]
-    revisit_index: Option<PathBuf>,
-    /// Stop successfully after capturing this many comment batches.
-    #[clap(long)]
-    limit: Option<usize>,
-    /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
-    #[clap(long)]
-    second_sweep: bool,
-    /// Record titles in the session's `warcinfo` and per-capture metadata records.
-    #[clap(long)]
-    titles: bool,
-    /// Total attempts for a transiently failing URL (defaults to 3; zero is treated as one).
-    #[clap(long)]
-    retry_attempts: Option<usize>,
-    /// Seconds before the first retry (defaults to 1; subsequent delays double).
-    #[clap(long)]
-    retry_initial_backoff: Option<u64>,
-    /// Maximum retry delay in seconds (defaults to 30).
-    #[clap(long)]
-    retry_max_backoff: Option<u64>,
-    /// Seconds to wait between successive comment-batch requests (defaults to 0).
-    #[clap(long, default_value_t = 0)]
-    request_delay: u64,
-}
-
-/// Options for converting an existing WARC file into a WACZ package.
-#[derive(Debug, clap::Args)]
-struct WarcToWaczOptions {
-    /// Plain or gzip-compressed WARC file to convert.
-    warc: PathBuf,
-    /// Path of the WACZ file to write (an existing file is not overwritten).
-    #[clap(long)]
-    output: PathBuf,
-    /// Write the index as a compressed `ZipNum` pair instead of plain CDXJ.
-    #[clap(long)]
-    compressed_index: bool,
-    /// Gzip a plain input WARC, compressing each record independently for random access.
-    #[clap(long)]
-    gzip_warc: bool,
-    /// Gzip compression level for packaged WARC records (0-9; defaults to 6).
-    #[clap(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(0..=9))]
-    gzip_compression_level: u32,
-    /// ZIP DEFLATE level for compressible WACZ members (1-264; defaults to 6).
-    #[clap(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=264))]
-    zip_compression_level: u32,
-}
-
-/// Options for reading comments from a WARC file.
-#[derive(Debug, clap::Args)]
-struct ReadWpCommentsOptions {
-    /// Path of the plain or gzip-compressed WARC file to read.
-    warc: PathBuf,
-}
-
-/// Capture settings shared by both workflows.
+/// Capture settings for the archiving workflow.
 #[derive(Debug, clap::Args)]
 struct ConfigOptions {
     /// Compress each WARC record as an independent gzip member.
@@ -459,7 +194,6 @@ impl ConfigOptions {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::process::ExitCode;
 
     use cli_helpers::prelude::Parser;
@@ -473,7 +207,10 @@ mod tests {
             ExitCode::from(2)
         );
         assert_eq!(
-            Error::Io(std::io::Error::other("failed")).exit_code(),
+            Error::Archive(archivindex_archiver::Error::MissingHost(
+                "mailto:a@b".to_owned()
+            ))
+            .exit_code(),
             ExitCode::FAILURE
         );
     }
@@ -490,49 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn wordpress_command_reads_required_options_and_limit() {
-        let options = Opts::try_parse_from([
-            "archivindex-archiver",
-            "archive-wp-comments",
-            "--base-url",
-            "https://example.com/",
-            "--output",
-            "comments.warc.gz",
-            "--session-name",
-            "comments-2026",
-            "--operator",
-            "A. Archivist",
-            "--revisit-index",
-            "crawl-state.sqlite3",
-            "--limit",
-            "12",
-            "--second-sweep",
-            "--request-delay",
-            "7",
-            "--gzip",
-        ])
-        .expect("valid options");
-
-        let Command::ArchiveWpComments(options) = options.command else {
-            panic!("expected the WordPress command");
-        };
-
-        assert_eq!(options.base_url, "https://example.com/");
-        assert_eq!(options.output, PathBuf::from("comments.warc.gz"));
-        assert_eq!(options.session_name, "comments-2026");
-        assert_eq!(options.operator, "A. Archivist");
-        assert_eq!(
-            options.revisit_index,
-            Some(PathBuf::from("crawl-state.sqlite3"))
-        );
-        assert_eq!(options.limit, Some(12));
-        assert!(options.second_sweep);
-        assert!(!options.titles);
-        assert_eq!(options.request_delay, 7);
-        assert!(options.config.gzip);
-    }
-
-    #[test]
     fn archive_defaults_to_an_uncompressed_warc() {
         let options = Opts::try_parse_from([
             "archivindex-archiver",
@@ -542,109 +236,8 @@ mod tests {
         ])
         .expect("valid options");
 
-        let Command::Archive(options) = options.command else {
-            panic!("expected the archive command");
-        };
+        let Command::Archive(options) = options.command;
 
         assert!(!options.config.gzip);
-    }
-
-    #[test]
-    fn wordpress_command_enables_titles_explicitly() {
-        let options = Opts::try_parse_from([
-            "archivindex-archiver",
-            "archive-wp-comments",
-            "--base-url",
-            "https://example.com/",
-            "--output",
-            "comments.warc.gz",
-            "--session-name",
-            "comments-2026",
-            "--operator",
-            "A. Archivist",
-            "--titles",
-        ])
-        .expect("valid options");
-
-        let Command::ArchiveWpComments(options) = options.command else {
-            panic!("expected the WordPress command");
-        };
-
-        assert!(options.titles);
-    }
-
-    #[test]
-    fn read_wordpress_comments_command_takes_a_warc_path() {
-        let options = Opts::try_parse_from([
-            "archivindex-archiver",
-            "read-wp-comments",
-            "comments.warc.gz",
-        ])
-        .expect("valid options");
-
-        let Command::ReadWpComments(options) = options.command else {
-            panic!("expected the WordPress reading command");
-        };
-
-        assert_eq!(options.warc, PathBuf::from("comments.warc.gz"));
-    }
-
-    #[test]
-    fn warc_conversion_command_reads_paths_and_index_format() {
-        let options = Opts::try_parse_from([
-            "archivindex-archiver",
-            "warc-to-wacz",
-            "capture.warc.gz",
-            "--output",
-            "capture.wacz",
-            "--compressed-index",
-            "--gzip-warc",
-            "--gzip-compression-level",
-            "9",
-            "--zip-compression-level",
-            "264",
-        ])
-        .expect("valid options");
-
-        let Command::WarcToWacz(options) = options.command else {
-            panic!("expected the WARC conversion command");
-        };
-        assert_eq!(options.warc, PathBuf::from("capture.warc.gz"));
-        assert_eq!(options.output, PathBuf::from("capture.wacz"));
-        assert!(options.compressed_index);
-        assert!(options.gzip_warc);
-        assert_eq!(options.gzip_compression_level, 9);
-        assert_eq!(options.zip_compression_level, 264);
-    }
-
-    #[test]
-    fn warc_conversion_command_rejects_invalid_gzip_compression_levels() {
-        let result = Opts::try_parse_from([
-            "archivindex-archiver",
-            "warc-to-wacz",
-            "capture.warc",
-            "--output",
-            "capture.wacz",
-            "--gzip-warc",
-            "--gzip-compression-level",
-            "10",
-        ]);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn warc_conversion_command_rejects_invalid_zip_compression_levels() {
-        let result = Opts::try_parse_from([
-            "archivindex-archiver",
-            "warc-to-wacz",
-            "capture.warc",
-            "--output",
-            "capture.wacz",
-            "--zip-compression-level",
-            "265",
-        ]);
-
-        assert!(result.is_err());
     }
 }

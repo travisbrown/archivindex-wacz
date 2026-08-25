@@ -1,0 +1,21 @@
+[package]
+name = "archivindex-packager-cli"
+authors.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[[bin]]
+name = "archivindex-packager"
+path = "src/main.rs"
+# Avoid a rustdoc output-filename collision with the `archivindex-packager` library crate.
+doc = false
+
+[dependencies]
+archivindex-packager = { version = "0.1.0", path = "../packager/" }
+archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
+cli-helpers.workspace = true
+thiserror.workspace = true

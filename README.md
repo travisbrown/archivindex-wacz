@@ -17,13 +17,20 @@ Tools for capturing web pages and packaging them as web archive collections.
 | [`archivindex-packager`](packager/) | Packaging WARC captures as indexed WACZ distributions |
 | [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into WARC files |
 | [`archivindex-wordpress`](wordpress/) | Capturing and reading WordPress REST API resources |
+| [`archivindex-warc-revisit-index`](warc-revisit-index/) | A revisit index over WARC records: payload sources and conditional-request state |
 | [`archivindex-archiver-cli`](archiver-cli/) | An `archivindex-archiver` command-line front end |
-| [`archivindex-warc-revisit-index`](warc-revisit-index/) | Persistent WARC payload-revisit and HTTP resource state |
+| [`archivindex-packager-cli`](packager-cli/) | An `archivindex-packager` command-line front end |
+| [`archivindex-wordpress-cli`](wordpress-cli/) | An `archivindex-wordpress` command-line front end |
 
 The WARC reading and writing core these crates are built on lives in a separate repository,
 [`archivindex-warc`][archivindex-warc], and is used here as a source dependency.
 
 ## Usage
+
+Each library with a command-line front end has its own binary, so a command below is invoked
+through the binary that owns it.
+
+### Archiving
 
 The `archive` command reads one URL per line from standard input and writes a single WARC file:
 
@@ -39,7 +46,9 @@ Capture commands exit with status 0 only when the requested capture is complete.
 that a usable but partial archive was published; operational failures that prevent publication use
 status 1.
 
-The `archive-wp-comments` command captures comment batches from a WordPress REST API into a crawl
+### WordPress comments
+
+The `archive-comments` command captures comment batches from a WordPress REST API into a crawl
 session. It fixes a creation-time cutoff and pages by comment ID. One sweep is sufficient when the
 reported total is stable and matches the distinct IDs captured; otherwise a second consistency
 sweep runs automatically. Pass `--second-sweep` to request that validation sweep unconditionally.
@@ -47,7 +56,7 @@ sweep runs automatically. Pass `--second-sweep` to request that validation sweep
 Use `--request-delay` to wait a specified number of seconds between batch requests:
 
 ```bash
-cargo run --bin archivindex-archiver -- archive-wp-comments \
+cargo run --bin archivindex-wordpress -- archive-comments \
   --base-url https://example.com/ \
   --output comments.warc \
   --session-name comments-2026 \
@@ -58,12 +67,14 @@ cargo run --bin archivindex-archiver -- archive-wp-comments \
   --limit 10
 ```
 
-The `read-wp-comments` command writes the archived comments as JSON Lines in ascending comment ID
+The `read-comments` command writes the archived comments as JSON Lines in ascending comment ID
 order. Conflicting captures of the same comment are reported through the warning log:
 
 ```bash
-cargo run --bin archivindex-archiver -- read-wp-comments comments.warc > comments.jsonl
+cargo run --bin archivindex-wordpress -- read-comments comments.warc > comments.jsonl
 ```
+
+### WACZ packaging
 
 The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A
 metadata record's `title` field supplies the linked page title. Captures whose metadata contains a
@@ -72,7 +83,7 @@ metadata record's `title` field supplies the linked page title. Captures whose m
 IDs are reported as conversion warnings:
 
 ```bash
-cargo run --bin archivindex-archiver -- warc-to-wacz capture.warc.gz \
+cargo run --bin archivindex-packager -- warc-to-wacz capture.warc.gz \
   --output capture.wacz
 ```
 
@@ -80,7 +91,7 @@ For a plain input WARC, pass `--gzip-warc` to store it as `archive/data.warc.gz`
 written as an independent gzip member so indexed captures remain directly addressable:
 
 ```bash
-cargo run --bin archivindex-archiver -- warc-to-wacz capture.warc \
+cargo run --bin archivindex-packager -- warc-to-wacz capture.warc \
   --output capture.wacz \
   --gzip-warc \
   --gzip-compression-level 9
