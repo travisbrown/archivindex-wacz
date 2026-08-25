@@ -1,21 +1,20 @@
 //! A revisit index derived from WARC records.
 //!
 //! Everything here exists to support revisit records: to decide whether a capture may be written
-//! as one, and to name the record it refers back to. The index keeps two deliberately separate
-//! tables in one SQLite database:
+//! as one, and to name the record it refers back to. Two deliberately separate tables in one
+//! SQLite database answer those two questions:
 //!
-//! - The payload index maps a digest to the canonical payload-bearing WARC record: the
+//! - The payload table maps a digest to the canonical payload-bearing WARC record: the
 //!   `WARC-Refers-To` target of any revisit, whether an `identical-payload-digest` revisit found
 //!   the digest again or a `server-not-modified` revisit confirmed it unchanged.
-//! - The resource-state index maps a resource/request identity to its HTTP validators and the
+//! - The resource-state table maps a resource/request identity to its HTTP validators and the
 //!   digest of its prior representation. The validators drive conditional requests; the digest
-//!   leads, through the payload index, to the record a `server-not-modified` revisit refers to.
+//!   leads, through the payload table, to the record a `server-not-modified` revisit refers to.
 //!
 //! The index is derived, rebuildable state; WARC files remain the source of truth. A database
 //! written by an incompatible schema version is not migrated: delete it and index the records
-//! again. This crate
-//! is intentionally unaware of WACZ. A caller may ingest records from standalone WARC files,
-//! WARC streams extracted from WACZ packages, or any other source.
+//! again. This crate is intentionally unaware of WACZ. A caller may ingest records from standalone
+//! WARC files, WARC streams extracted from WACZ packages, or any other source.
 //!
 //! Resource identity is currently one canonical GET representation per target URI. The
 //! [`resource::ResourceKey`] wrapper leaves room for explicitly representing method, authorization
@@ -57,10 +56,10 @@ mod strategies;
 
 use rusqlite::Connection;
 
-/// A database handle shared by persistent indexes and bulk transactions.
+/// A database handle shared by the persistent index and its bulk transactions.
 ///
-/// The type parameter is one of the two handles below; the crate seals it, so `Store` has no
-/// other instantiation.
+/// The type parameter is either an open SQLite connection ([`Index`]) or a transaction on one
+/// ([`Transaction`]); the crate seals it, so there is no third instantiation.
 pub struct Store<C> {
     connection: C,
 }
@@ -105,7 +104,10 @@ pub enum OpenError {
     /// The database was created by an incompatible schema version.
     ///
     /// The index is derived state and is never migrated; delete the database and rebuild it.
-    #[error("unsupported revisit index schema version {found}; expected {expected}")]
+    #[error(
+        "unsupported revisit index schema version {found}; expected {expected}. The index is \
+         derived state: delete the database and index the records again."
+    )]
     SchemaVersion {
         /// The version understood by this crate.
         expected: u32,
