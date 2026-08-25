@@ -26,7 +26,8 @@ pub enum Error {
 ///
 /// The searchable key, timestamp, and original URL are required. Other standard fields are
 /// optional because classic layouts and CDX Server field selections vary. A single hyphen in a
-/// text representation becomes `None`; unknown fields are retained in [`extra`](Self::extra).
+/// text representation becomes `None`; fields that are not modeled are retained in
+/// [`extra`](Self::extra).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Capture<'a> {
     /// Searchable URL key, usually a SURT but retained as text for non-URL records and legacy data.
@@ -55,7 +56,7 @@ pub struct Capture<'a> {
     pub record_digest: Option<Cow<'a, str>>,
     /// Resolved original location for revisit records.
     pub original: Option<Location<'a>>,
-    /// Additional fields, keyed by their representation-specific names.
+    /// Fields that are not modeled, keyed by the names or legend markers they appeared with.
     pub extra: ExtraProperties,
 }
 
@@ -157,18 +158,10 @@ pub(crate) fn from_fields<'a>(fields: &[(Field<'_>, Cow<'a, str>)]) -> Result<Ca
     let mut extra = ExtraProperties::default();
 
     for (field, value) in fields {
-        if matches!(
-            field,
-            Field::Other(_)
-                | Field::OldDigest
-                | Field::IpAddress
-                | Field::ArcDocumentLength
-                | Field::Legacy(_)
-        ) {
-            let name = field.as_name();
+        if let (Field::Other(name), Some(value)) = (field, present(value)) {
             extra.insert(
-                name.to_owned(),
-                serde_json::Value::String(value.to_string()),
+                name.to_string(),
+                serde_json::Value::String(value.to_owned()),
             );
         }
     }

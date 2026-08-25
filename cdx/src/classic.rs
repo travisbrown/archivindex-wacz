@@ -353,17 +353,15 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_the_extended_legacy_legend() -> Result<(), Box<dyn std::error::Error>> {
-        let header =
-            Header::parse(" CDX B C D F G H I J K L P Q R U X Y Z d f h i j l o p t v x y z #")?;
+    fn keeps_unmodeled_fields_under_their_markers() -> Result<(), Box<dyn std::error::Error>> {
+        let header = Header::parse(" CDX N b a e c")?;
+        let record =
+            header.parse_record("com,example)/ 20201007212236 https://example.com/ 10.0.0.1 -")?;
 
-        for index in 0..header.markers().len() {
-            assert!(
-                !matches!(header.field(index), Some(Field::Other(_))),
-                "unrecognized marker {}",
-                header.markers()[index]
-            );
-        }
+        assert_eq!(header.field(3), Some(Field::Other(Cow::Borrowed("e"))));
+        let capture = header.capture(&record)?;
+        assert_eq!(capture.extra["e"], "10.0.0.1");
+        assert!(!capture.extra.contains_key("c"));
         Ok(())
     }
 }
