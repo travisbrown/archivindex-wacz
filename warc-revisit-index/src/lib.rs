@@ -106,7 +106,7 @@ pub enum OpenError {
     },
 }
 
-/// An error querying or ingesting into the crawl-state database.
+/// An error querying or updating the crawl-state database.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A SQLite operation failed.
@@ -166,6 +166,17 @@ pub enum Error {
     /// A persisted optional digest has only one of its required columns populated.
     #[error("malformed persisted resource digest: algorithm and bytes must both be present")]
     IncompleteDigest,
+}
+
+/// An error indexing a WARC record.
+///
+/// Only [`Store::index_record`] reads WARC and HTTP metadata, so only it can report the two
+/// malformed-input cases below; every other operation fails with [`Error`] alone.
+#[derive(Debug, thiserror::Error)]
+pub enum IngestError {
+    /// Reading or updating the index failed.
+    #[error(transparent)]
+    Index(#[from] Error),
     /// An archived HTTP response head is malformed.
     #[error("malformed archived HTTP response: {0}")]
     MalformedHttpResponse(&'static str),

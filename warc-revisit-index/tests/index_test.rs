@@ -8,7 +8,7 @@ use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use archivindex_warc_revisit_index::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
-use archivindex_warc_revisit_index::{Error, OpenError};
+use archivindex_warc_revisit_index::{Error, IngestError, OpenError};
 use fluent_uri::Uri;
 use sha2::Digest as _;
 
@@ -674,7 +674,7 @@ fn revisit_with_a_non_http_block_is_rejected() -> Result<(), Box<dyn StdError>> 
         .index_record(&record)
         .expect_err("a non-HTTP revisit block is malformed");
 
-    assert!(matches!(error, Error::MalformedHttpResponse(_)));
+    assert!(matches!(error, IngestError::MalformedHttpResponse(_)));
     Ok(())
 }
 

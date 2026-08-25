@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use crate::db::{insert_payload, lookup_payload, lookup_resource, update_resource};
 use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceStateUpdate};
-use crate::{Error, IndexRecordOutcome, Store};
+use crate::{IndexRecordOutcome, IngestError, Store};
 
 impl<C> Store<C> {
     /// Index one semantic WARC record.
@@ -22,12 +22,13 @@ impl<C> Store<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error for malformed WARC/HTTP metadata, unsupported or malformed digests,
-    /// malformed persisted state, or a SQLite query failure.
+    /// Returns [`IngestError::MalformedHttpResponse`] or [`IngestError::MalformedWarcPayload`]
+    /// for unreadable record metadata, and [`IngestError::Index`] for an unsupported digest,
+    /// malformed persisted state, or a SQLite failure.
     pub fn index_record<E: Extension>(
         &self,
         record: &Record<E>,
-    ) -> Result<IndexRecordOutcome, Error> {
+    ) -> Result<IndexRecordOutcome, IngestError> {
         index_record(self.connection(), record)
     }
 }
@@ -35,7 +36,7 @@ impl<C> Store<C> {
 fn index_record<E: Extension>(
     connection: &Connection,
     record: &Record<E>,
-) -> Result<IndexRecordOutcome, Error> {
+) -> Result<IndexRecordOutcome, IngestError> {
     match record {
         Record::Response { body, .. } if body.starts_with(b"HTTP/") => {
             index_response(connection, record)
@@ -48,7 +49,7 @@ fn index_record<E: Extension>(
 fn index_response<E: Extension>(
     connection: &Connection,
     record: &Record<E>,
-) -> Result<IndexRecordOutcome, Error> {
+) -> Result<IndexRecordOutcome, IngestError> {
     let Record::Response { header, body } = record else {
         unreachable!("index_response is only called for response records");
     };
@@ -63,7 +64,7 @@ fn index_response<E: Extension>(
     let payload_length = if metadata.transfer_encoded {
         record
             .payload_bytes()
-            .map_err(Error::MalformedWarcPayload)?
+            .map_err(IngestError::MalformedWarcPayload)?
             .map(|payload| payload.len() as u64)
     } else {
         Some((body.len() - metadata.body_offset) as u64)
@@ -113,13 +114,13 @@ fn index_revisit<E: Extension>(
     connection: &Connection,
     header: &RevisitHeader<E>,
     body: &[u8],
-) -> Result<IndexRecordOutcome, Error> {
+) -> Result<IndexRecordOutcome, IngestError> {
     let metadata = if body.is_empty() {
         HttpMetadata::default()
     } else if body.starts_with(b"HTTP/") {
         http_metadata(body)?
     } else {
-        return Err(Error::MalformedHttpResponse(
+        return Err(IngestError::MalformedHttpResponse(
             "revisit block is not an HTTP response head",
         ));
     };
@@ -127,14 +128,11 @@ fn index_revisit<E: Extension>(
 
     let resource_updated = match &header.profile {
         RevisitProfile::IdenticalPayloadDigest(_) => {
-            let digest =
-                header
-                    .payload
-                    .payload_digest
-                    .as_ref()
-                    .ok_or(Error::MalformedHttpResponse(
-                        "identical-payload-digest revisit has no payload digest",
-                    ))?;
+            let digest = header.payload.payload_digest.as_ref().ok_or(
+                IngestError::MalformedHttpResponse(
+                    "identical-payload-digest revisit has no payload digest",
+                ),
+            )?;
             let canonical = lookup_payload(connection, digest)?;
             // A revisit without a canonical payload record cannot itself become the original.
             let (record_id, warc_date) = canonical.as_ref().map_or_else(
@@ -200,9 +198,10 @@ struct HttpMetadata {
     transfer_encoded: bool,
 }
 
-fn http_metadata(message: &[u8]) -> Result<HttpMetadata, Error> {
-    let metadata = ResponseMetadata::parse(message)
-        .ok_or(Error::MalformedHttpResponse("invalid HTTP response head"))?;
+fn http_metadata(message: &[u8]) -> Result<HttpMetadata, IngestError> {
+    let metadata = ResponseMetadata::parse(message).ok_or(IngestError::MalformedHttpResponse(
+        "invalid HTTP response head",
+    ))?;
     Ok(HttpMetadata {
         status: metadata.status,
         etag: metadata
