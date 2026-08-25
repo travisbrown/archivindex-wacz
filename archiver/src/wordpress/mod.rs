@@ -13,6 +13,9 @@ use crate::session::{Capture, CaptureProcessor, Inspection};
 /// The maximum number of comments `WordPress` permits one REST API request to return.
 const COMMENTS_PER_PAGE: usize = 100;
 
+/// Error code returned by `WordPress` when a requested collection page no longer exists.
+const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
+
 /// Inspect batches from the `WordPress` REST API v2 comments endpoint.
 ///
 /// The processor takes a snapshot cutoff when it is constructed. Start a crawl with
@@ -227,10 +230,14 @@ impl CommentCaptureProcessor {
 
 impl CaptureProcessor for CommentCaptureProcessor {
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        // A page can disappear between requests when deletions reduce the page count. WordPress
-        // reports that as a 400 `rest_post_invalid_page_number`; treat it as the end of this sweep
-        // and validate again from page one when the sweep found anything new.
-        if capture.status == 400 && self.sweep.page > 1 {
+        // A page can disappear between requests when deletions reduce the page count. Some
+        // WordPress endpoints report that condition with this posts-controller error code; only
+        // that specific 400 ends the sweep, while unrelated client errors fail the traversal.
+        let invalid_page = capture.status == 400
+            && self.sweep.page > 1
+            && serde_json::from_slice::<WordPressError>(capture.payload)
+                .is_ok_and(|error| error.code == INVALID_PAGE_ERROR_CODE);
+        if invalid_page {
             self.sweep.headers_consistent = false;
             return self.finish_sweep();
         }
@@ -377,6 +384,12 @@ struct Comment {
     date_gmt: String,
 }
 
+/// The discriminator in a `WordPress` REST API error response.
+#[derive(Deserialize)]
+struct WordPressError {
+    code: String,
+}
+
 impl Comment {
     /// Parse the `WordPress` GMT timestamp, which is normally returned without a zone suffix.
     fn date(&self) -> Option<DateTime<Utc>> {
@@ -423,7 +436,12 @@ mod tests {
     const EMPTY_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 0\r\nX-WP-TotalPages: 1\r\n\r\n";
     const ONE_PAGE: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 100\r\nX-WP-TotalPages: 1\r\n\r\n";
     const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 101\r\nX-WP-TotalPages: 2\r\n\r\n";
-    const INVALID_PAGE: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
+    const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
+    const INVALID_PAGE_ERROR: &[u8] = br#"{
+        "code": "rest_post_invalid_page_number",
+        "message": "The page number requested is larger than the number of pages available.",
+        "data": {"status": 400}
+    }"#;
     const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
 
     fn capture<'a>(payload: &'a [u8], status: u16, response: &'a [u8]) -> Capture<'a> {
@@ -547,7 +565,7 @@ mod tests {
         // ID 1 is deleted before page 2 is requested, reducing the collection to one page.
         assert_eq!(
             processor
-                .inspect(&capture(b"{}", 400, INVALID_PAGE))
+                .inspect(&capture(INVALID_PAGE_ERROR, 400, BAD_REQUEST))
                 .recaptures,
             [processor.first_comment_url()]
         );
@@ -558,6 +576,29 @@ mod tests {
         assert!(validation.error.is_some());
 
         Ok(())
+    }
+
+    #[test]
+    fn unrelated_bad_request_on_a_later_page_fails_the_traversal() {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
+                .expect("a processor");
+        let unrelated = br#"{
+            "code": "rest_invalid_param",
+            "message": "Invalid parameter(s): before",
+            "data": {"status": 400}
+        }"#;
+
+        let first = processor.inspect(&capture(b"[]", 200, TWO_PAGES));
+        assert_eq!(first.recaptures.len(), 1);
+
+        let inspection = processor.inspect(&capture(unrelated, 400, BAD_REQUEST));
+
+        assert_eq!(inspection.recaptures, Vec::<String>::new());
+        assert_eq!(
+            inspection.error.as_deref(),
+            Some("unexpected WordPress comments response status 400 on page 2")
+        );
     }
 
     #[test]
