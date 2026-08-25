@@ -427,14 +427,14 @@ impl<R: Read + Seek> WaczReader<R> {
                 }
             }
             if path.starts_with(crate::INDEXES_PREFIX) {
-                if crate::paths::is_plain_index(path)
-                    || ((crate::paths::is_zipnum_data(path)
-                        || crate::paths::is_zipnum_summary(path))
-                        && crate::paths::zipnum_partner(path)
-                            .is_some_and(|partner| paths.contains(partner.as_str())))
-                {
+                if crate::paths::is_cdxj_index(path) {
                     has_index = true;
-                } else {
+                } else if !crate::paths::is_zipnum_summary(path)
+                    || !crate::paths::zipnum_partner(path)
+                        .is_some_and(|partner| paths.contains(partner.as_str()))
+                {
+                    // A `ZipNum` summary holds no CDXJ data itself, so it neither satisfies the
+                    // requirement for an index nor stands on its own without its block file.
                     problems.push(LayoutProblem::InvalidIndexMember((*path).to_owned()));
                 }
             }

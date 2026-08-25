@@ -59,7 +59,8 @@ fn stem() -> impl Strategy<Value = String> {
 /// A file name extension, including the ones the member classifiers recognize.
 fn extension() -> impl Strategy<Value = String> {
     select(vec![
-        "", ".warc", ".warc.gz", ".cdx", ".cdx.gz", ".idx", ".gz", ".jsonl", ".Warc", ".CDX",
+        "", ".warc", ".warc.gz", ".cdx", ".cdxj", ".cdx.gz", ".cdxj.gz", ".idx", ".gz", ".jsonl",
+        ".Warc", ".CDX",
     ])
     .prop_map(str::to_owned)
 }

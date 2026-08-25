@@ -31,15 +31,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !self
             .resources
             .iter()
-            .any(|resource| crate::paths::is_plain_index(&resource.path))
-            && !self.resources.iter().any(|resource| {
-                crate::paths::is_zipnum_data(&resource.path)
-                    && crate::paths::zipnum_partner(&resource.path).is_some_and(|partner| {
-                        self.resources
-                            .iter()
-                            .any(|candidate| candidate.path == partner)
-                    })
-            })
+            .any(|resource| crate::paths::is_cdxj_index(&resource.path))
         {
             missing.push("indexes/*");
         }

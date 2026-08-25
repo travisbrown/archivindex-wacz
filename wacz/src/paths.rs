@@ -30,17 +30,31 @@ pub fn warc_gzip(name: &str) -> Option<bool> {
     }
 }
 
-/// Whether `path` is a plain `.cdx` index directly under the indexes directory.
-pub fn is_plain_index(path: &str) -> bool {
-    direct_name(path, INDEXES_PREFIX).is_some_and(|name| name.strip_suffix(".cdx").is_some())
+/// The index member name suffixes that hold CDXJ data.
+///
+/// The specification requires index members to contain CDXJ data, permits them to be gzip
+/// compressed, and names both `.cdx` and `.cdxj` for the uncompressed form.
+const CDXJ_SUFFIXES: [&str; 4] = [".cdx", ".cdxj", ".cdx.gz", ".cdxj.gz"];
+
+/// Whether `path` is a CDXJ index directly under the indexes directory, compressed or not.
+pub fn is_cdxj_index(path: &str) -> bool {
+    direct_name(path, INDEXES_PREFIX)
+        .is_some_and(|name| CDXJ_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)))
 }
 
-/// Whether `path` is a `ZipNum` `.cdx.gz` block file directly under the indexes directory.
+/// Whether `path` could be the block file of a `ZipNum` pair.
+///
+/// `ZipNum` is not part of the WACZ specification; it is the sharded index form that pywb writes
+/// as a `.cdx.gz` block file beside an `.idx` summary. A `.cdx.gz` member is only that pair's
+/// block file when the summary naming it is present, and is an ordinary gzip CDXJ index
+/// otherwise.
 pub fn is_zipnum_data(path: &str) -> bool {
     direct_name(path, INDEXES_PREFIX).is_some_and(|name| name.ends_with(".cdx.gz"))
 }
 
 /// Whether `path` is a `ZipNum` `.idx` summary directly under the indexes directory.
+///
+/// A summary holds no CDXJ data of its own, so it is only a valid member beside its block file.
 pub fn is_zipnum_summary(path: &str) -> bool {
     direct_name(path, INDEXES_PREFIX).is_some_and(|name| name.strip_suffix(".idx").is_some())
 }
@@ -130,26 +144,29 @@ mod tests {
     }
 
     /// A path is a member of at most one kind, and every recognized kind is a safe path.
+    ///
+    /// A `ZipNum` block file is also a CDXJ index, since only the presence of its summary
+    /// distinguishes the two readings.
     #[test_strategy::proptest]
     fn member_kinds_are_exclusive_and_safe(#[strategy(strategies::member_path())] path: String) {
         let kinds = [
             is_warc(&path),
-            is_plain_index(&path),
-            is_zipnum_data(&path),
+            is_cdxj_index(&path),
             is_zipnum_summary(&path),
         ];
         let recognized = kinds.iter().filter(|kind| **kind).count();
 
         prop_assert!(recognized <= 1);
         prop_assert!(recognized == 0 || is_safe(&path));
+        prop_assert!(!is_zipnum_data(&path) || is_cdxj_index(&path));
     }
 
-    /// The names the index writer accepts are exactly the plain indexes the reader recognizes.
+    /// Every name the index writer accepts is an index the reader recognizes, which reads more
+    /// forms than the writer produces.
     #[test_strategy::proptest]
-    fn index_names_agree_with_index_paths(#[strategy(strategies::member_path())] name: String) {
-        prop_assert_eq!(
-            valid_index_name(&name),
-            is_plain_index(&format!("{INDEXES_PREFIX}{name}"))
-        );
+    fn index_names_are_index_paths(#[strategy(strategies::member_path())] name: String) {
+        let path = format!("{INDEXES_PREFIX}{name}");
+
+        prop_assert!(!valid_index_name(&name) || is_cdxj_index(&path));
     }
 }

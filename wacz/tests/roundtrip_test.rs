@@ -1128,7 +1128,7 @@ fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::
         ("pages/pages.jsonl", b"{}\n"),
         ("archive/not-a-warc.txt", b""),
         ("indexes/not-an-index.txt", b""),
-        ("indexes/orphan.cdx.gz", b""),
+        ("indexes/orphan.idx", b""),
     ])?;
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
     let report = reader.validate(validate::ValidationOptions::default())?;
@@ -1151,7 +1151,7 @@ fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::
         report
             .layout
             .contains(&validate::LayoutProblem::InvalidIndexMember(
-                "indexes/orphan.cdx.gz".to_owned()
+                "indexes/orphan.idx".to_owned()
             ))
     );
     assert!(
@@ -1164,6 +1164,32 @@ fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::
             .layout
             .contains(&validate::LayoutProblem::NoIndexMembers)
     );
+
+    Ok(())
+}
+
+/// The specification requires index members to contain CDXJ data and permits gzip compression,
+/// naming both `.cdx` and `.cdxj`; a lone `.cdx.gz` is its own example layout.
+#[test]
+fn validate_accepts_every_specified_index_form() -> Result<(), Box<dyn std::error::Error>> {
+    for index_path in [
+        "indexes/index.cdx",
+        "indexes/index.cdxj",
+        "indexes/index.cdx.gz",
+        "indexes/index.cdxj.gz",
+    ] {
+        let bytes = stored_zip_of(&[
+            ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+            ("pages/pages.jsonl", b"{\"format\": \"json-pages-1.0\"}\n"),
+            ("archive/data.warc", b""),
+            (index_path, b""),
+        ])?;
+
+        let mut reader = WaczReader::new(Cursor::new(bytes))?;
+        let report = reader.validate(validate::ValidationOptions::default())?;
+
+        assert_eq!(report.layout, Vec::new(), "{index_path} should be an index");
+    }
 
     Ok(())
 }
