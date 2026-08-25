@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::capture::{self, Capture, Location};
+use crate::capture::Capture;
 use crate::properties::{self, ExtraProperties};
 use crate::timestamp::{self, Timestamp};
 
@@ -303,18 +303,9 @@ impl<'a> TryFrom<&Fields<'a>> for ConformingFields<'a> {
     }
 }
 
-impl<'a> TryFrom<Item<'a>> for Capture<'a> {
-    type Error = capture::Error;
-
-    fn try_from(item: Item<'a>) -> Result<Self, Self::Error> {
-        let length = match item.fields.length {
-            Some(value) => Some(i64::try_from(value).map_err(|_| capture::Error::Invalid {
-                field: "length",
-                value: value.to_string(),
-            })?),
-            None => None,
-        };
-        Ok(Self {
+impl<'a> From<Item<'a>> for Capture<'a> {
+    fn from(item: Item<'a>) -> Self {
+        Self {
             key: item.key,
             timestamp: item.timestamp,
             url: item.fields.url,
@@ -323,13 +314,13 @@ impl<'a> TryFrom<Item<'a>> for Capture<'a> {
             digest: item.fields.digest,
             redirect: None,
             robot_flags: None,
-            length,
+            length: item.fields.length,
             offset: item.fields.offset,
             filename: item.fields.filename,
             record_digest: item.fields.record_digest,
-            original: None::<Location<'a>>,
+            original: None,
             extra: item.fields.extra,
-        })
+        }
     }
 }
 

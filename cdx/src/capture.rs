@@ -46,8 +46,10 @@ pub struct Capture<'a> {
     pub redirect: Option<Cow<'a, str>>,
     /// Robots or AIF meta flags.
     pub robot_flags: Option<Cow<'a, str>>,
-    /// Stored record length. This is signed because negative values occur in public CDX results.
-    pub length: Option<i64>,
+    /// Stored record length.
+    ///
+    /// Public CDX Server results occasionally report a negative length; such a value is absent.
+    pub length: Option<u64>,
     /// Stored record offset.
     pub offset: Option<u64>,
     /// Archive filename.
@@ -64,7 +66,7 @@ pub struct Capture<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Location<'a> {
     /// Stored record length.
-    pub length: Option<i64>,
+    pub length: Option<u64>,
     /// Stored record offset.
     pub offset: Option<u64>,
     /// Archive filename.
@@ -175,7 +177,7 @@ pub(crate) fn from_fields<'a>(fields: &[(Field<'_>, Cow<'a, str>)]) -> Result<Ca
         digest: optional_value(fields, &Field::Digest),
         redirect: optional_value(fields, &Field::Redirect),
         robot_flags: optional_value(fields, &Field::RobotFlags),
-        length: parse_optional(fields, &Field::Length, "length")?,
+        length: parse_length(fields, &Field::Length, "length")?,
         offset: parse_optional(fields, &Field::Offset, "offset")?,
         filename: optional_value(fields, &Field::Filename),
         record_digest: optional_value(fields, &Field::RecordDigest),
@@ -216,8 +218,20 @@ fn parse_optional<T: std::str::FromStr>(
         .transpose()
 }
 
+/// Parse a length, treating a negative value as absent.
+fn parse_length(
+    fields: &[(Field<'_>, Cow<'_, str>)],
+    target: &Field<'_>,
+    name: &'static str,
+) -> Result<Option<u64>, Error> {
+    optional_value(fields, target)
+        .filter(|value| !value.starts_with('-'))
+        .map(|value| value.parse().map_err(|_| invalid(name, value.as_ref())))
+        .transpose()
+}
+
 fn location<'a>(fields: &[(Field<'_>, Cow<'a, str>)]) -> Result<Option<Location<'a>>, Error> {
-    let length = parse_optional(fields, &Field::OriginalLength, "orig.length")?;
+    let length = parse_length(fields, &Field::OriginalLength, "orig.length")?;
     let offset = parse_optional(fields, &Field::OriginalOffset, "orig.offset")?;
     let filename = optional_value(fields, &Field::OriginalFilename);
     Ok(

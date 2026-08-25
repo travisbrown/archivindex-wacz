@@ -337,7 +337,7 @@ mod tests {
         );
         assert_eq!(list.values[0].status, Some(530));
         assert_eq!(list.values[0].digest.as_deref(), Some("INVALID-DIGEST"));
-        assert_eq!(list.values[0].length, Some(-1));
+        assert_eq!(list.values[0].length, None);
         Ok(())
     }
 
