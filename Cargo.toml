@@ -26,12 +26,14 @@ fluent-uri = "0.4"
 # The WARC crate's recorder takes its request parts (method, target, headers) as `http` types.
 http = "1"
 indicatif = "0.18"
+proptest = "1"
 redb = "4"
 rusqlite = "0.40"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 tempfile = "3"
+test-strategy = "0.4"
 thiserror = "2"
 url = "2"
 # Only the DEFLATE codec is needed: WARC and CDX members are stored, and gzip payloads are handled

@@ -23,5 +23,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-proptest = "1"
-test-strategy = "0.4"
+proptest.workspace = true
+test-strategy.workspace = true
