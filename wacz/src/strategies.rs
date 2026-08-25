@@ -59,3 +59,31 @@ pub fn zipnum_path() -> impl Strategy<Value = String> {
     (stem(), select(vec![".cdx.gz", ".idx"]))
         .prop_map(|(stem, extension)| format!("{INDEXES_PREFIX}{stem}{extension}"))
 }
+
+/// The text of one line: never a line break, and possibly empty.
+fn line_text() -> impl Strategy<Value = String> {
+    const TOKENS: &[&str] = &[
+        "a",
+        "Z",
+        "0",
+        " ",
+        "\t",
+        "\"",
+        "{",
+        "}",
+        "\u{7f}",
+        "é",
+        "日",
+        "\u{1f600}",
+    ];
+
+    tokens_of(TOKENS, 0..=200)
+}
+
+/// Lines with their line endings, and whether the last line ends with one.
+pub fn lines() -> impl Strategy<Value = (Vec<(String, &'static str)>, bool)> {
+    (
+        proptest::collection::vec((line_text(), select(vec!["\n", "\r\n"])), 0..=8),
+        any::<bool>(),
+    )
+}

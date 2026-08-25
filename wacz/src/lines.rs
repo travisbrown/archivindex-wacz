@@ -147,7 +147,10 @@ fn context(source: &str, line: usize, content: &str) -> LineContext {
 mod tests {
     use std::io::{BufRead, Read};
 
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
 
     struct FailingReader;
 
@@ -215,5 +218,47 @@ mod tests {
         assert_eq!(error.context.source, "broken.cdxj");
         assert_eq!(error.context.line, 1);
         assert!(lines.next_content().expect("fused source").is_none());
+    }
+
+    /// Every non-blank line is returned once, in order, under its own line number, and each
+    /// carries an excerpt bounded by a character count rather than a byte count.
+    #[test_strategy::proptest]
+    fn content_lines_are_returned_with_their_numbers(
+        #[strategy(strategies::lines())] input: (Vec<(String, &'static str)>, bool),
+    ) {
+        let (lines, ends_with_a_line_ending) = input;
+        let mut text = String::new();
+        for (index, (content, ending)) in lines.iter().enumerate() {
+            text.push_str(content);
+            if ends_with_a_line_ending || index + 1 < lines.len() {
+                text.push_str(ending);
+            }
+        }
+
+        let mut source = Lines::with_source(text.as_bytes(), "test.jsonl");
+        let mut read = Vec::new();
+        while let Some((context, content)) = source.next_content().unwrap() {
+            let excerpt = context.excerpt.clone().expect("content has an excerpt");
+            // The generated alphabet has no ellipsis, so only truncation can add one.
+            if let Some(prefix) = excerpt.strip_suffix('\u{2026}') {
+                prop_assert_eq!(prefix.chars().count(), EXCERPT_CHAR_LIMIT);
+                prop_assert!(content.starts_with(prefix));
+                prop_assert!(content.chars().count() > EXCERPT_CHAR_LIMIT);
+            } else {
+                prop_assert_eq!(&excerpt, content);
+                prop_assert!(excerpt.chars().count() <= EXCERPT_CHAR_LIMIT);
+            }
+            prop_assert_eq!(&context.source, "test.jsonl");
+            read.push((context.line, content.to_owned()));
+        }
+
+        let expected = lines
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (content, _))| !content.is_empty())
+            .map(|(index, (content, _))| (index + 1, content))
+            .collect::<Vec<_>>();
+
+        prop_assert_eq!(read, expected);
     }
 }
