@@ -292,7 +292,7 @@ enum Error {
     #[error(transparent)]
     UserAgent(#[from] archivindex_archiver::UserAgentError),
     #[error(transparent)]
-    SessionId(#[from] archivindex_archiver::session::InvalidSessionId),
+    SessionId(#[from] archivindex_archiver::session::SessionIdError),
     #[error("WARC conversion error: {0}")]
     Convert(#[from] archivindex_packager::Error),
     #[error("WordPress comment reading error: {0}")]

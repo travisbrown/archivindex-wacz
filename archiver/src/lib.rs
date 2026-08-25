@@ -153,7 +153,7 @@ pub enum Error {
     InvalidUserAgent(#[from] UserAgentError),
     /// A session identifier is empty or contains a non-URI-unreserved character.
     #[error(transparent)]
-    InvalidSessionId(#[from] crate::session::InvalidSessionId),
+    InvalidSessionId(#[from] crate::session::SessionIdError),
     /// A revisit index could not be opened.
     #[error(transparent)]
     RevisitIndexOpen(#[from] archivindex_warc_revisit_index::error::OpenError),

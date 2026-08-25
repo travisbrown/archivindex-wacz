@@ -15,10 +15,18 @@ use crate::{Archiver, Error};
 
 mod run;
 
-/// A session identifier is empty or contains a non-URI-unreserved character.
+/// The session identifier cannot name the session's WARC file and records.
+///
+/// An identifier names the file the session writes (`{id}.warc`, or `{id}.warc.gz` when the WARC
+/// is compressed) and is recorded as the `isPartOf` field of that file's `warcinfo` record, so it
+/// is restricted to the unreserved set of RFC 3986: ASCII letters and digits, `-`, `.`, `_`, and
+/// `~`. That leaves it usable as a path segment on any platform, and as a URI component with
+/// nothing percent-encoded. An empty identifier names nothing and is rejected as well.
+///
+/// The rejected identifier is reported in the error message.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid session identifier: {0:?}")]
-pub struct InvalidSessionId(String);
+pub struct SessionIdError(String);
 
 /// The operator named in a session's `warcinfo` record.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,7 +219,7 @@ impl<'a> Session<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidSessionId`] if `id` is empty or contains a character outside the URI
+    /// Returns [`SessionIdError`] if `id` is empty or contains a character outside the URI
     /// unreserved set.
     pub fn new<I: IntoIterator<Item = S>, S: AsRef<str>, P: Into<PathBuf>>(
         archiver: Archiver,
@@ -219,13 +227,13 @@ impl<'a> Session<'a> {
         operator: Operator,
         seeds: I,
         output: P,
-    ) -> Result<Self, InvalidSessionId> {
+    ) -> Result<Self, SessionIdError> {
         if id.is_empty()
             || !id.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
             })
         {
-            return Err(InvalidSessionId(id.to_owned()));
+            return Err(SessionIdError(id.to_owned()));
         }
 
         Ok(Self {
