@@ -1,6 +1,7 @@
 //! SQLite connection, schema, and queries.
 
 use std::path::Path;
+use std::time::Duration;
 
 use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use fluent_uri::Uri;
@@ -31,6 +32,13 @@ impl Handle for rusqlite::Transaction<'_> {
         self
     }
 }
+
+/// How long a statement waits for a competing writer before giving up.
+///
+/// SQLite defaults to zero, which turns any overlap between two processes indexing into the same
+/// database into an immediate `SQLITE_BUSY`. Writes here are single-row upserts, so a competing
+/// writer clears quickly and waiting is almost always better than failing.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -84,6 +92,9 @@ impl Store<Connection> {
                  PRAGMA journal_mode = WAL;
                  PRAGMA synchronous = NORMAL;",
             )
+            .map_err(DatabaseError::during("configure database"))?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
             .map_err(DatabaseError::during("configure database"))?;
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))

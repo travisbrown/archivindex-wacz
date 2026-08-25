@@ -14,6 +14,10 @@ path = "src/main.rs"
 # Avoid a rustdoc output-filename collision with the `archivindex-archiver` library crate.
 doc = false
 
+[features]
+# Compile SQLite from source rather than linking the system library.
+bundled = ["archivindex-archiver/bundled"]
+
 [dependencies]
 archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
 archivindex-packager = { version = "0.1.0", path = "../packager/" }

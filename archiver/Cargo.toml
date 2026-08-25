@@ -11,6 +11,10 @@ readme.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+# Passed through to the revisit index, which passes it through to rusqlite.
+bundled = ["archivindex-warc-revisit-index/bundled"]
+
 [dependencies]
 archivindex-warc-revisit-index = { version = "0.1.0", path = "../warc-revisit-index/" }
 archivindex-warc = { workspace = true, features = [

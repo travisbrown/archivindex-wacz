@@ -11,6 +11,11 @@ readme.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+# Compile SQLite from source rather than linking the system library. Off by default: a library
+# should not choose how the final binary gets SQLite.
+bundled = ["rusqlite/bundled"]
+
 [dependencies]
 archivindex-warc = { workspace = true, features = ["http"] }
 fluent-uri.workspace = true
