@@ -154,10 +154,10 @@ pub enum Error {
     InvalidSessionId(#[from] crate::session::SessionIdError),
     /// A revisit index could not be opened.
     #[error(transparent)]
-    RevisitIndexOpen(#[from] archivindex_warc_revisit_index::error::OpenError),
+    RevisitIndexOpen(#[from] archivindex_warc_revisit_index::OpenError),
     /// A revisit index could not be queried or updated.
     #[error(transparent)]
-    RevisitIndex(#[from] archivindex_warc_revisit_index::error::Error),
+    RevisitIndex(#[from] archivindex_warc_revisit_index::Error),
     /// A WARC content block could not be attached to its record.
     #[error(transparent)]
     WarcBlock(#[from] BlockError),
@@ -172,8 +172,8 @@ pub enum Error {
     WarcWrite(#[from] archivindex_warc::io::write::Error),
 }
 
-impl From<archivindex_warc_revisit_index::error::DatabaseError> for Error {
-    fn from(error: archivindex_warc_revisit_index::error::DatabaseError) -> Self {
+impl From<archivindex_warc_revisit_index::DatabaseError> for Error {
+    fn from(error: archivindex_warc_revisit_index::DatabaseError) -> Self {
         Self::RevisitIndex(error.into())
     }
 }

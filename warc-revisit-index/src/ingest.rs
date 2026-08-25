@@ -6,20 +6,10 @@ use archivindex_warc::record::header::{RevisitHeader, RevisitProfile};
 use archivindex_warc::record::http::ResponseMetadata;
 use rusqlite::Connection;
 
-use crate::db::Store;
 use crate::db::{insert_payload, lookup_payload, lookup_resource, update_resource};
-use crate::error::Error;
 use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceStateUpdate};
-
-/// The changes made while indexing one WARC record.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct IndexRecordOutcome {
-    /// A new canonical payload source was inserted.
-    pub payload_inserted: bool,
-    /// Resource state was inserted or updated.
-    pub resource_updated: bool,
-}
+use crate::{Error, IndexRecordOutcome, Store};
 
 impl<C> Store<C> {
     /// Index one semantic WARC record.

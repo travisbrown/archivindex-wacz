@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use archivindex_warc::recorder::Recorder;
-use archivindex_warc_revisit_index::db::Index as RevisitIndex;
+use archivindex_warc_revisit_index::Index as RevisitIndex;
 use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::capture::{ArchiveSummary, CaptureControl, CaptureEvent, CaptureEventSink};

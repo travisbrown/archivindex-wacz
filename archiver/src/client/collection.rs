@@ -5,7 +5,7 @@ use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use archivindex_warc::io::write::WarcWriter;
-use archivindex_warc_revisit_index::db::Index;
+use archivindex_warc_revisit_index::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 use fluent_uri::Uri;

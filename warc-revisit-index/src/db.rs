@@ -6,9 +6,9 @@ use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use fluent_uri::Uri;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::error::{DatabaseError, Error, OpenError};
 use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
+use crate::{DatabaseError, Error, Index, OpenError, Store, Transaction};
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -29,18 +29,6 @@ const UPSERT_RESOURCE: &str = "INSERT INTO resource_state (
      digest = excluded.digest,
      record_id = excluded.record_id,
      warc_date = excluded.warc_date";
-
-/// A database connection view shared by persistent indexes and bulk transactions.
-pub struct Store<C> {
-    connection: C,
-    connection_ref: fn(&C) -> &Connection,
-}
-
-/// A persistent payload and conditional-request state index.
-pub type Index = Store<Connection>;
-
-/// A bulk indexing transaction.
-pub type Transaction<'connection> = Store<rusqlite::Transaction<'connection>>;
 
 impl Store<Connection> {
     /// Open a database at `path`, initialize a new schema, and reject incompatible versions.
@@ -115,7 +103,7 @@ impl Store<Connection> {
 }
 
 impl<C> Store<C> {
-    pub(super) fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &Connection {
         (self.connection_ref)(&self.connection)
     }
 
@@ -204,7 +192,7 @@ impl Transaction<'_> {
     }
 }
 
-pub(crate) fn lookup_payload(
+pub fn lookup_payload(
     connection: &Connection,
     digest: &LabelledDigest,
 ) -> Result<Option<RevisitTarget>, Error> {
@@ -241,10 +229,7 @@ pub(crate) fn lookup_payload(
         .transpose()
 }
 
-pub(crate) fn insert_payload(
-    connection: &Connection,
-    target: &RevisitTarget,
-) -> Result<bool, Error> {
+pub fn insert_payload(connection: &Connection, target: &RevisitTarget) -> Result<bool, Error> {
     let (algorithm, digest) = digest_parts(&target.payload_digest)?;
     let payload_length = target
         .payload_length
@@ -263,7 +248,7 @@ pub(crate) fn insert_payload(
     Ok(changed != 0)
 }
 
-pub(crate) fn lookup_resource(
+pub fn lookup_resource(
     connection: &Connection,
     key: &ResourceKey,
 ) -> Result<Option<ResourceState>, Error> {
@@ -323,7 +308,7 @@ pub(crate) fn lookup_resource(
         .transpose()
 }
 
-pub(crate) fn update_resource(
+pub fn update_resource(
     connection: &Connection,
     key: &ResourceKey,
     update: ResourceStateUpdate,

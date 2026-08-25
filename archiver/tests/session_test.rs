@@ -21,7 +21,7 @@ use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{MediaType, WarcDate};
 use archivindex_warc::version::WarcVersion;
-use archivindex_warc_revisit_index::db::Index;
+use archivindex_warc_revisit_index::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
 use fluent_uri::Uri;
