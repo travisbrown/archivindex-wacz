@@ -8,7 +8,7 @@ use archivindex_cdx::properties::ExtraProperties;
 use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_wacz::digest::Sha256Digest;
-use archivindex_wacz::frictionless::DataPackageBuilder;
+use archivindex_wacz::frictionless::{ConstraintError, DataPackageBuilder};
 use archivindex_wacz::io::read::{self as reader, WaczReader, validate};
 use archivindex_wacz::io::write::{self as writer, IndexFormat, WaczWriter, WriterConfig};
 use archivindex_wacz::pages;
@@ -1234,6 +1234,32 @@ fn index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Er
         writer.add_sorted_index_file("index.cdx", Cursor::new(format!("{item}\n"))),
         Err(writer::Error::NonConformingIndex { line: 1, .. })
     ));
+
+    Ok(())
+}
+
+/// Metadata constraints from the Data Package specification are refused when writing and reported
+/// when validating.
+#[test]
+fn manifest_metadata_constraints_are_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    writer.add_warc("data.warc", &warc_bytes()?[..])?;
+
+    assert!(matches!(
+        writer.finish_unchecked(DataPackageBuilder::new().name("Example Collection")),
+        Err(writer::Error::InvalidMetadata(ConstraintError::Name(name))) if name == "Example Collection"
+    ));
+
+    let manifest = r#"{"profile": "data-package", "wacz_version": "1.1.1", "resources": [],
+        "name": "Example Collection"}"#;
+    let bytes = stored_zip_of(&[("datapackage.json", manifest.as_bytes())])?;
+    let report =
+        WaczReader::new(Cursor::new(bytes))?.validate(validate::ValidationOptions::default())?;
+
+    assert!(report.manifest.iter().any(|problem| matches!(
+        problem,
+        validate::ManifestProblem::Constraint(message) if message.contains("Example Collection")
+    )));
 
     Ok(())
 }

@@ -35,6 +35,72 @@ pub const PROFILE: &str = "data-package";
 /// The WACZ specification version targeted by this crate.
 pub const WACZ_VERSION: &str = "1.1.1";
 
+/// The contributor roles the Data Package specification allows.
+pub const CONTRIBUTOR_ROLES: [&str; 5] = [
+    "author",
+    "publisher",
+    "maintainer",
+    "wrangler",
+    "contributor",
+];
+
+/// A requirement the Data Package specification places on a package's metadata that a package does
+/// not meet.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ConstraintError {
+    /// The package name is empty or uses characters outside lowercase `a-z0-9._-`.
+    #[error("invalid package name: {0}")]
+    Name(String),
+    /// A source has no title.
+    #[error("source has no title")]
+    SourceTitle,
+    /// A license has neither a name nor a path.
+    #[error("license has neither a name nor a path")]
+    LicenseIdentity,
+    /// A contributor has no title.
+    #[error("contributor has no title")]
+    ContributorTitle,
+    /// A contributor's role is outside the specification's vocabulary.
+    #[error("invalid contributor role: {0}")]
+    ContributorRole(String),
+    /// An extension property duplicates a modeled property.
+    #[error(transparent)]
+    Extra(#[from] archivindex_cdx::properties::Error),
+}
+
+/// Collect every violation of the specification's metadata constraints.
+///
+/// The package and its builder hold the same caller-supplied properties, so both check them here.
+fn constraint_errors(
+    name: Option<&str>,
+    sources: &[Source<'_>],
+    licenses: &[License<'_>],
+    contributors: &[Contributor<'_>],
+    extra: &ExtraProperties,
+) -> Vec<ConstraintError> {
+    let mut errors = Vec::new();
+
+    if let Err(error) = extra.validate("DataPackage", DATA_PACKAGE_PROPERTIES) {
+        errors.push(error.into());
+    }
+    if let Some(name) = name
+        && !crate::paths::valid_name(name)
+    {
+        errors.push(ConstraintError::Name(name.to_owned()));
+    }
+    for source in sources {
+        source.push_constraint_errors(&mut errors);
+    }
+    for license in licenses {
+        license.push_constraint_errors(&mut errors);
+    }
+    for contributor in contributors {
+        contributor.push_constraint_errors(&mut errors);
+    }
+
+    errors
+}
+
 /// A WACZ `datapackage.json` manifest.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 pub struct DataPackage<'a> {
@@ -48,8 +114,8 @@ pub struct DataPackage<'a> {
     pub resources: Vec<Resource<'a>>,
     /// A short, URL-usable identifier for the package.
     ///
-    /// The Data Package specification restricts this to lowercase characters from `a-z0-9._-`; this
-    /// crate does not enforce that.
+    /// The Data Package specification restricts this to lowercase characters from `a-z0-9._-`,
+    /// which [`DataPackage::constraint_errors`] checks.
     #[serde(
         default,
         deserialize_with = "crate::attributes::borrowed_option_str",
@@ -155,6 +221,30 @@ pub struct DataPackage<'a> {
     /// Additional properties, preserved verbatim for round-tripping.
     #[serde(flatten)]
     pub extra: ExtraProperties,
+}
+
+impl DataPackage<'_> {
+    /// Every way this package's metadata violates the Data Package specification.
+    ///
+    /// This covers the constraints the manifest can be judged against on its own: the package name
+    /// alphabet, the identity requirements on sources, licenses, and contributors, and the
+    /// contributor role vocabulary. Requirements that involve the rest of the WACZ, such as the
+    /// resource list, are reported by [`crate::io::read::validate`].
+    #[must_use]
+    pub fn constraint_errors(&self) -> Vec<ConstraintError> {
+        let mut errors = constraint_errors(
+            self.name.as_deref(),
+            &self.sources,
+            &self.licenses,
+            &self.contributors,
+            &self.extra,
+        );
+        for resource in &self.resources {
+            resource.push_constraint_errors(&mut errors);
+        }
+
+        errors
+    }
 }
 
 /// Builder for the caller-controlled metadata in a WACZ data package.
@@ -306,19 +396,17 @@ impl DataPackageBuilder {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
-        self.extra
-            .validate("DataPackage", DATA_PACKAGE_PROPERTIES)?;
-        for source in &self.sources {
-            source.validate()?;
-        }
-        for license in &self.licenses {
-            license.validate()?;
-        }
-        for contributor in &self.contributors {
-            contributor.validate()?;
-        }
-        Ok(())
+    pub(crate) fn validate(&self) -> Result<(), ConstraintError> {
+        constraint_errors(
+            self.name.as_deref(),
+            &self.sources,
+            &self.licenses,
+            &self.contributors,
+            &self.extra,
+        )
+        .into_iter()
+        .next()
+        .map_or(Ok(()), Err)
     }
 }
 
@@ -397,15 +485,20 @@ pub struct Source<'a> {
 }
 
 impl Source<'_> {
-    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
-        self.extra.validate("Source", &["title", "path", "email"])
+    pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<ConstraintError>) {
+        if let Err(error) = self.extra.validate("Source", &["title", "path", "email"]) {
+            errors.push(error.into());
+        }
+        if self.title.is_none() {
+            errors.push(ConstraintError::SourceTitle);
+        }
     }
 }
 
 /// A license under which a package or resource is provided.
 ///
-/// The Data Package specification requires at least one of `name` or `path`; this crate does not
-/// enforce that.
+/// The Data Package specification requires at least one of `name` or `path`, which
+/// [`DataPackage::constraint_errors`] checks.
 #[derive(Clone, Debug, Default, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 // Every field is optional, so no `#[serde(borrow)]` field ties the deserializer's input lifetime to
 // `'a`; state the bound explicitly to allow borrowing from the input.
@@ -439,15 +532,20 @@ pub struct License<'a> {
 }
 
 impl License<'_> {
-    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
-        self.extra.validate("License", &["name", "path", "title"])
+    pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<ConstraintError>) {
+        if let Err(error) = self.extra.validate("License", &["name", "path", "title"]) {
+            errors.push(error.into());
+        }
+        if self.name.is_none() && self.path.is_none() {
+            errors.push(ConstraintError::LicenseIdentity);
+        }
     }
 }
 
 /// A person or organization who contributed to a package.
 ///
-/// The Data Package specification requires `title` and restricts `role` to `author`, `publisher`,
-/// `maintainer`, `wrangler`, and `contributor` (the default); this crate does not enforce either.
+/// The Data Package specification requires `title` and restricts `role` to [`CONTRIBUTOR_ROLES`]
+/// (`contributor` by default), both of which [`DataPackage::constraint_errors`] checks.
 #[derive(Clone, Debug, Default, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 // Every field is optional, so no `#[serde(borrow)]` field ties the deserializer's input lifetime to
 // `'a`; state the bound explicitly to allow borrowing from the input.
@@ -494,11 +592,21 @@ pub struct Contributor<'a> {
 }
 
 impl Contributor<'_> {
-    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
-        self.extra.validate(
+    pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<ConstraintError>) {
+        if let Err(error) = self.extra.validate(
             "Contributor",
             &["title", "path", "email", "role", "organization"],
-        )
+        ) {
+            errors.push(error.into());
+        }
+        if self.title.is_none() {
+            errors.push(ConstraintError::ContributorTitle);
+        }
+        if let Some(role) = &self.role
+            && !CONTRIBUTOR_ROLES.contains(&role.as_ref())
+        {
+            errors.push(ConstraintError::ContributorRole(role.to_string()));
+        }
     }
 }
 
@@ -546,33 +654,80 @@ mod tests {
         extra
     }
 
+    /// The constraint errors of a value that is checked as part of a package.
+    fn errors_of(check: impl Fn(&mut Vec<ConstraintError>)) -> Vec<ConstraintError> {
+        let mut errors = Vec::new();
+        check(&mut errors);
+        errors
+    }
+
     #[test]
     fn modeled_extension_properties_are_rejected_at_every_manifest_level() {
         assert!(DataPackageBuilder::new().extra(extra("resources")).is_err());
-        assert!(
-            Source {
-                extra: extra("path"),
-                ..Source::default()
-            }
-            .validate()
-            .is_err()
+        for errors in [
+            errors_of(|errors| {
+                Source {
+                    extra: extra("path"),
+                    ..Source::default()
+                }
+                .push_constraint_errors(errors);
+            }),
+            errors_of(|errors| {
+                License {
+                    extra: extra("name"),
+                    ..License::default()
+                }
+                .push_constraint_errors(errors);
+            }),
+            errors_of(|errors| {
+                Contributor {
+                    extra: extra("role"),
+                    ..Contributor::default()
+                }
+                .push_constraint_errors(errors);
+            }),
+        ] {
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| matches!(error, ConstraintError::Extra(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn required_metadata_properties_are_checked() {
+        let package = serde_json::from_str::<DataPackage<'_>>(
+            r#"{
+                "profile": "data-package",
+                "wacz_version": "1.1.1",
+                "resources": [],
+                "name": "Example Collection",
+                "sources": [{"path": "https://www.example.com/"}],
+                "licenses": [{"title": "Some license"}],
+                "contributors": [{"role": "editor"}]
+            }"#,
+        )
+        .expect("a parseable manifest");
+
+        assert_eq!(
+            package.constraint_errors(),
+            vec![
+                ConstraintError::Name("Example Collection".to_owned()),
+                ConstraintError::SourceTitle,
+                ConstraintError::LicenseIdentity,
+                ConstraintError::ContributorTitle,
+                ConstraintError::ContributorRole("editor".to_owned()),
+            ]
         );
-        assert!(
-            License {
-                extra: extra("name"),
-                ..License::default()
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            Contributor {
-                extra: extra("role"),
-                ..Contributor::default()
-            }
-            .validate()
-            .is_err()
-        );
+    }
+
+    #[test]
+    fn conforming_metadata_has_no_constraint_errors() {
+        let package =
+            serde_json::from_str::<DataPackage<'_>>(EXAMPLE).expect("a parseable manifest");
+
+        assert_eq!(package.constraint_errors(), Vec::new());
     }
 
     /// The example manifest from the WACZ 1.1.1 specification, with contextual properties added.

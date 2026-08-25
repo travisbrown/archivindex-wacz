@@ -144,6 +144,10 @@ pub enum ManifestProblem {
     /// The manifest lists no resources.
     #[error("empty resource list")]
     NoResources,
+    /// The package metadata does not meet a Data Package constraint (see
+    /// [`crate::frictionless::ConstraintError`]).
+    #[error("{0}")]
+    Constraint(String),
     /// A resource name is empty or uses characters outside lowercase `a-z0-9._-`.
     #[error("invalid resource name: {0}")]
     InvalidResourceName(String),
@@ -441,6 +445,12 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// Check the parsed manifest's declarations against the specification and the ZIP contents.
     fn manifest_problems(&self, package: &DataPackage<'_>, problems: &mut Vec<ManifestProblem>) {
+        problems.extend(
+            package
+                .constraint_errors()
+                .iter()
+                .map(|error| ManifestProblem::Constraint(error.to_string())),
+        );
         if package.profile != PROFILE {
             problems.push(ManifestProblem::Profile(package.profile.to_string()));
         }
@@ -457,7 +467,7 @@ impl<R: Read + Seek> WaczReader<R> {
         let mut paths = HashSet::with_capacity(package.resources.len());
 
         for resource in &package.resources {
-            if !crate::paths::valid_resource_name(&resource.name) {
+            if !crate::paths::valid_name(&resource.name) {
                 problems.push(ManifestProblem::InvalidResourceName(
                     resource.name.to_string(),
                 ));

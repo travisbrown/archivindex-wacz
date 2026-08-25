@@ -78,7 +78,7 @@ impl<W: Write + Seek> WaczWriter<W> {
             return Err(Error::DuplicateMemberPath(path.to_owned()));
         }
         let name = resource_name(path);
-        if !crate::paths::valid_resource_name(name)
+        if !crate::paths::valid_name(name)
             || self.resources.iter().any(|resource| resource.name == name)
         {
             return Err(Error::InvalidResourceName(name.to_owned()));

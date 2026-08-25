@@ -114,8 +114,8 @@ impl<'a> Resource<'a> {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
-        self.extra.validate(
+    pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<super::ConstraintError>) {
+        if let Err(error) = self.extra.validate(
             "Resource",
             &[
                 "name",
@@ -131,14 +131,22 @@ impl<'a> Resource<'a> {
                 "sources",
                 "licenses",
             ],
-        )?;
+        ) {
+            errors.push(error.into());
+        }
         for source in &self.sources {
-            source.validate()?;
+            source.push_constraint_errors(errors);
         }
         for license in &self.licenses {
-            license.validate()?;
+            license.push_constraint_errors(errors);
         }
-        Ok(())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), super::ConstraintError> {
+        let mut errors = Vec::new();
+        self.push_constraint_errors(&mut errors);
+
+        errors.into_iter().next().map_or(Ok(()), Err)
     }
 }
 

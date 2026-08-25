@@ -162,6 +162,9 @@ pub enum Error {
         #[source]
         source: archivindex_cdx::cdxj::ConformanceError,
     },
+    /// The manifest metadata violates a Data Package constraint.
+    #[error(transparent)]
+    InvalidMetadata(#[from] crate::frictionless::ConstraintError),
     /// An extension property duplicates a modeled JSON property.
     #[error(transparent)]
     ExtraProperty(#[from] archivindex_cdx::properties::Error),

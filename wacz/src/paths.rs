@@ -50,8 +50,9 @@ pub fn valid_index_name(name: &str) -> bool {
     !name.contains('/') && is_safe(name) && name.strip_suffix(".cdx").is_some()
 }
 
-/// Whether `name` uses the data package resource-name alphabet (`a-z0-9._-`).
-pub fn valid_resource_name(name: &str) -> bool {
+/// Whether `name` uses the data package name alphabet (`a-z0-9._-`), which the Data Package
+/// specification requires of both package and resource names.
+pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
@@ -92,12 +93,12 @@ mod tests {
 
     #[test]
     fn resource_names_use_the_data_package_alphabet() {
-        assert!(valid_resource_name("pages.jsonl"));
-        assert!(valid_resource_name("data-1_2.warc.gz"));
-        assert!(!valid_resource_name(""));
-        assert!(!valid_resource_name("Pages.JSONL"));
-        assert!(!valid_resource_name("archive/data.warc"));
-        assert!(!valid_resource_name("caf\u{e9}.warc"));
+        assert!(valid_name("pages.jsonl"));
+        assert!(valid_name("data-1_2.warc.gz"));
+        assert!(!valid_name(""));
+        assert!(!valid_name("Pages.JSONL"));
+        assert!(!valid_name("archive/data.warc"));
+        assert!(!valid_name("caf\u{e9}.warc"));
     }
 
     /// A `ZipNum` member and its counterpart name each other.
