@@ -503,8 +503,40 @@ impl Contributor<'_> {
 #[cfg(test)]
 mod tests {
     use bounded_static::IntoBoundedStatic;
+    use proptest::prelude::*;
 
     use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn data_packages_round_trip(
+        #[strategy(strategies::data_package())] package: DataPackage<'static>,
+    ) {
+        let text = serde_json::to_string(&package).unwrap();
+        let parsed = serde_json::from_str::<DataPackage<'_>>(&text).unwrap();
+
+        prop_assert_eq!(parsed.into_static(), package);
+    }
+
+    #[test_strategy::proptest]
+    fn the_main_page_url_alias_is_accepted(
+        #[strategy(strategies::data_package())] package: DataPackage<'static>,
+    ) {
+        let mut value = serde_json::to_value(&package).unwrap();
+        let object = value
+            .as_object_mut()
+            .expect("invariant violation: a manifest serializes as an object");
+
+        // Manifests written by some tools spell the property with an uppercase acronym.
+        if let Some(url) = object.remove("mainPageUrl") {
+            object.insert("mainPageURL".to_owned(), url);
+        }
+
+        let text = serde_json::to_string(&value).unwrap();
+        let parsed = serde_json::from_str::<DataPackage<'_>>(&text).unwrap();
+
+        prop_assert_eq!(parsed.into_static(), package);
+    }
 
     fn extra(property: &str) -> ExtraProperties {
         let mut extra = ExtraProperties::default();

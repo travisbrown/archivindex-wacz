@@ -145,8 +145,18 @@ impl<'a> Resource<'a> {
 #[cfg(test)]
 mod tests {
     use bounded_static::IntoBoundedStatic;
+    use proptest::prelude::*;
 
     use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn resources_round_trip(#[strategy(strategies::resource())] resource: Resource<'static>) {
+        let text = serde_json::to_string(&resource).unwrap();
+        let parsed = serde_json::from_str::<Resource<'_>>(&text).unwrap();
+
+        prop_assert_eq!(parsed.into_static(), resource);
+    }
 
     #[test]
     fn modeled_extension_properties_are_rejected() {

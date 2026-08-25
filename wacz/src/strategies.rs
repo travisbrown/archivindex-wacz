@@ -9,6 +9,8 @@ use proptest::prelude::*;
 use proptest::sample::select;
 
 use crate::digest::Sha256Digest;
+use crate::frictionless::resource::Resource;
+use crate::frictionless::{Contributor, DataPackage, License, PROFILE, Source, WACZ_VERSION};
 use crate::pages::{FORMAT, Page, PageListHeader};
 use crate::{ARCHIVE_PREFIX, INDEXES_PREFIX, PAGES_PREFIX};
 
@@ -162,4 +164,155 @@ pub fn page() -> impl Strategy<Value = Page<'static>> {
             size,
             extra,
         })
+}
+
+/// A source of a package's or a resource's data.
+fn source() -> impl Strategy<Value = Source<'static>> {
+    (
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        extra_properties(),
+    )
+        .prop_map(|(title, path, email, extra)| Source {
+            title: title.map(Cow::Owned),
+            path: path.map(Cow::Owned),
+            email: email.map(Cow::Owned),
+            extra,
+        })
+}
+
+/// A license a package or a resource is provided under.
+fn license() -> impl Strategy<Value = License<'static>> {
+    (
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        extra_properties(),
+    )
+        .prop_map(|(name, path, title, extra)| License {
+            name: name.map(Cow::Owned),
+            path: path.map(Cow::Owned),
+            title: title.map(Cow::Owned),
+            extra,
+        })
+}
+
+/// A contributor to a package.
+fn contributor() -> impl Strategy<Value = Contributor<'static>> {
+    (
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        proptest::option::of(text()),
+        extra_properties(),
+    )
+        .prop_map(
+            |(title, path, email, role, organization, extra)| Contributor {
+                title: title.map(Cow::Owned),
+                path: path.map(Cow::Owned),
+                email: email.map(Cow::Owned),
+                role: role.map(Cow::Owned),
+                organization: organization.map(Cow::Owned),
+                extra,
+            },
+        )
+}
+
+/// A manifest entry for a file in the archive, with its optional metadata.
+pub fn resource() -> impl Strategy<Value = Resource<'static>> {
+    (
+        text(),
+        member_path(),
+        digest(),
+        any::<u64>(),
+        proptest::array::uniform6(proptest::option::of(text())),
+        proptest::collection::vec(source(), 0..=2),
+        proptest::collection::vec(license(), 0..=2),
+        extra_properties(),
+    )
+        .prop_map(
+            |(
+                name,
+                path,
+                hash,
+                bytes,
+                [profile, title, description, format, mediatype, encoding],
+                sources,
+                licenses,
+                extra,
+            )| Resource {
+                name: Cow::Owned(name),
+                path: Cow::Owned(path),
+                hash,
+                bytes,
+                profile: profile.map(Cow::Owned),
+                title: title.map(Cow::Owned),
+                description: description.map(Cow::Owned),
+                format: format.map(Cow::Owned),
+                mediatype: mediatype.map(Cow::Owned),
+                encoding: encoding.map(Cow::Owned),
+                sources,
+                licenses,
+                extra,
+            },
+        )
+}
+
+/// A manifest, with its optional metadata.
+pub fn data_package() -> impl Strategy<Value = DataPackage<'static>> {
+    (
+        proptest::collection::vec(resource(), 0..=2),
+        proptest::array::uniform9(proptest::option::of(text())),
+        proptest::collection::vec(text(), 0..=3),
+        proptest::collection::vec(source(), 0..=2),
+        proptest::collection::vec(license(), 0..=2),
+        proptest::collection::vec(contributor(), 0..=2),
+        proptest::array::uniform3(proptest::option::of(datetime())),
+        extra_properties(),
+    )
+        .prop_map(
+            |(
+                resources,
+                [
+                    name,
+                    id,
+                    title,
+                    description,
+                    homepage,
+                    image,
+                    version,
+                    software,
+                    main_page_url,
+                ],
+                keywords,
+                sources,
+                licenses,
+                contributors,
+                [created, modified, main_page_date],
+                extra,
+            )| DataPackage {
+                profile: Cow::Borrowed(PROFILE),
+                wacz_version: Cow::Borrowed(WACZ_VERSION),
+                resources,
+                name: name.map(Cow::Owned),
+                id: id.map(Cow::Owned),
+                title: title.map(Cow::Owned),
+                description: description.map(Cow::Owned),
+                keywords: keywords.into_iter().map(Cow::Owned).collect(),
+                homepage: homepage.map(Cow::Owned),
+                image: image.map(Cow::Owned),
+                version: version.map(Cow::Owned),
+                sources,
+                licenses,
+                contributors,
+                created,
+                modified,
+                software: software.map(Cow::Owned),
+                main_page_url: main_page_url.map(Cow::Owned),
+                main_page_date,
+                extra,
+            },
+        )
 }
