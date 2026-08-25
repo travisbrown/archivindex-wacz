@@ -350,6 +350,21 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
     let mut reader = WaczReader::open(&output)?;
     let validation = reader.validate(ValidationOptions::all())?;
     assert!(validation.is_conformant(), "{validation:#?}");
+    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(pages.len(), 5);
+    // Conversion cannot reconstruct the complete resource set of a page, so it omits WACZ `size`
+    // for both payload-bearing responses and revisits instead of reporting a response-body length.
+    assert!(pages.iter().all(|page| page.size.is_none()));
+    assert!(
+        pages
+            .iter()
+            .any(|page| page.url == "https://example.com/html")
+    );
+    assert!(
+        pages
+            .iter()
+            .any(|page| page.url == "https://example.com/revisit")
+    );
     let items = reader
         .index("indexes/index.cdx")?
         .collect::<Result<Vec<_>, _>>()?;

@@ -35,7 +35,6 @@ pub struct PageDraft {
     record_id: String,
     url: String,
     date: chrono::DateTime<chrono::Utc>,
-    size: Option<u64>,
     title: Option<String>,
 }
 
@@ -45,14 +44,12 @@ impl PageDraft {
         record_id: String,
         url: String,
         date: chrono::DateTime<chrono::Utc>,
-        size: Option<u64>,
         title: Option<String>,
     ) -> Self {
         Self {
             record_id,
             url,
             date,
-            size,
             title,
         }
     }
@@ -227,7 +224,7 @@ impl<'txn> ConversionSpool<'txn> {
                     ts: draft.date,
                     title: annotation.title.or(draft.title).map(Cow::Owned),
                     text: None,
-                    size: draft.size,
+                    size: None,
                     extra: ExtraProperties::default(),
                 };
                 pages_count += 1;

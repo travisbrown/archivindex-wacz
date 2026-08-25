@@ -519,7 +519,6 @@ fn capture_parts(
         record.core().record_id.as_str().to_owned(),
         url.clone(),
         date,
-        (!revisit).then_some(entity.len() as u64),
         generated_title,
     );
     let item = cdxj::Item {

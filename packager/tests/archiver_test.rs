@@ -305,10 +305,7 @@ fn packages_archived_captures_with_a_random_access_index() -> Result<(), Box<dyn
             urls[3].as_str(),
         ]
     );
-    assert_eq!(
-        pages[2].size,
-        Some("<html>about links: /</html>".len() as u64)
-    );
+    assert!(pages.iter().all(|page| page.size.is_none()));
     assert!(
         pages
             .iter()
