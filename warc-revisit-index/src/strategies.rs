@@ -7,7 +7,7 @@ use proptest::prelude::*;
 use proptest::sample::select;
 
 use crate::payload::RevisitTarget;
-use crate::resource::{ResourceKey, ResourceStateUpdate};
+use crate::resource::{ResourceKey, ResourceStateUpdate, Variance};
 
 /// A WARC date at second or sub-second precision, in the WARC 1.1 grammar.
 fn warc_date() -> impl Strategy<Value = WarcDate> {
@@ -100,6 +100,17 @@ pub fn revisit_target() -> impl Strategy<Value = RevisitTarget> {
         )
 }
 
+/// A variance drawn from a small pool, so that generated variances collide often.
+fn variance() -> impl Strategy<Value = Variance> {
+    select(vec![
+        None,
+        Some("Accept-Encoding"),
+        Some("User-Agent"),
+        Some("*"),
+    ])
+    .prop_map(|vary| Variance::declared(vary, |name| (name == "user-agent").then_some("Archivist")))
+}
+
 /// A resource-state transition of either kind.
 pub fn resource_state_update() -> impl Strategy<Value = ResourceStateUpdate> {
     let validator = || proptest::option::of("[\\x20-\\x7e]{0,8}");
@@ -112,9 +123,18 @@ pub fn resource_state_update() -> impl Strategy<Value = ResourceStateUpdate> {
             proptest::option::of(uri()),
             proptest::option::of(warc_date()),
             warc_date(),
+            variance(),
         )
             .prop_map(
-                |(etag, last_modified, payload_digest, record_id, warc_date, observed_at)| {
+                |(
+                    etag,
+                    last_modified,
+                    payload_digest,
+                    record_id,
+                    warc_date,
+                    observed_at,
+                    variance,
+                )| {
                     ResourceStateUpdate::Representation {
                         etag,
                         last_modified,
@@ -122,6 +142,7 @@ pub fn resource_state_update() -> impl Strategy<Value = ResourceStateUpdate> {
                         record_id,
                         warc_date,
                         observed_at,
+                        variance,
                     }
                 }
             ),

@@ -7,12 +7,15 @@ use std::path::{Path, PathBuf};
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc_revisit_index::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
-use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
+use archivindex_warc_revisit_index::resource::{
+    ResourceKey, ResourceState, ResourceStateUpdate, Variance,
+};
 use fluent_uri::Uri;
+use http::header::HeaderMap;
 use tempfile::{NamedTempFile, TempPath};
 
 use super::outcome::Original;
-use super::outcome::{CaptureOutcome, Exchange};
+use super::outcome::{CaptureOutcome, Exchange, request_field};
 use super::warc_fields::{WarcinfoOptions, warcinfo_record};
 use super::warc_mapping::{MetadataOptions, write_exchange, write_record};
 use crate::Error;
@@ -29,34 +32,35 @@ pub struct Collection {
     session_index: Index,
     /// Earlier durable crawl state, published to only after the WARC is durable.
     persistent_index: Option<Index>,
+    /// The header fields every request carries, which decide which stored state applies to them.
+    request_headers: HeaderMap,
+}
+
+/// What a collection writes, and the requests whose revisit state it records.
+pub struct CollectionOptions<'a> {
+    /// The WARC file name recorded in `warcinfo`.
+    pub warc_name: &'a str,
+    /// Whether each record is written as an independent gzip member.
+    pub gzip: bool,
+    /// The `warcinfo` fields describing the capture run.
+    pub warcinfo: WarcinfoOptions<'a>,
+    /// The header fields every request carries.
+    ///
+    /// A response declaring `Vary` is stored with this request's values for the fields it names,
+    /// so that a later run configured differently does not revalidate against another variant.
+    pub request_headers: HeaderMap,
+    /// Earlier durable crawl state, published to only after the WARC is durable.
+    pub persistent_index: Option<Index>,
 }
 
 impl Collection {
     /// Start a collection by writing its initial `warcinfo` record.
-    pub fn new(
-        warc_name: &str,
-        gzip: bool,
-        warcinfo: &WarcinfoOptions<'_>,
-        persistent_index: Option<Index>,
-    ) -> Result<Self, Error> {
-        Self::with_spool(
-            tempfile::tempfile()?,
-            None,
-            warc_name,
-            gzip,
-            warcinfo,
-            persistent_index,
-        )
+    pub fn new(options: CollectionOptions<'_>) -> Result<Self, Error> {
+        Self::with_spool(tempfile::tempfile()?, None, options)
     }
 
     /// Start a collection in `<output>.partial` so its growth is visible while it is written.
-    pub fn new_for_path(
-        output: &Path,
-        warc_name: &str,
-        gzip: bool,
-        warcinfo: &WarcinfoOptions<'_>,
-        persistent_index: Option<Index>,
-    ) -> Result<Self, Error> {
+    pub fn new_for_path(output: &Path, options: CollectionOptions<'_>) -> Result<Self, Error> {
         if output.try_exists()? {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -73,26 +77,23 @@ impl Collection {
             .open(&partial_path)?;
         let spool_path = TempPath::try_from_path(&partial_path)?;
 
-        Self::with_spool(
-            file,
-            Some(spool_path),
-            warc_name,
-            gzip,
-            warcinfo,
-            persistent_index,
-        )
+        Self::with_spool(file, Some(spool_path), options)
     }
 
     fn with_spool(
         file: File,
         spool_path: Option<TempPath>,
-        warc_name: &str,
-        gzip: bool,
-        warcinfo: &WarcinfoOptions<'_>,
-        persistent_index: Option<Index>,
+        options: CollectionOptions<'_>,
     ) -> Result<Self, Error> {
+        let CollectionOptions {
+            warc_name,
+            gzip,
+            warcinfo,
+            request_headers,
+            persistent_index,
+        } = options;
         let mut warc = WarcWriter::new(BufWriter::new(file));
-        let warcinfo = warcinfo_record(warc_name, warcinfo)?;
+        let warcinfo = warcinfo_record(warc_name, &warcinfo)?;
         let warcinfo_id = warcinfo.core().record_id.clone();
         write_record(&mut warc, warcinfo, gzip)?;
         if spool_path.is_some() {
@@ -107,6 +108,7 @@ impl Collection {
             summary: ArchiveSummary::default(),
             session_index: Index::open_in_memory()?,
             persistent_index,
+            request_headers,
         })
     }
 
@@ -135,6 +137,7 @@ impl Collection {
                 record_id: state.record_id.clone(),
                 warc_date: state.warc_date,
                 observed_at: state.observed_at,
+                variance: state.variance.clone(),
             },
         )?;
 
@@ -151,7 +154,11 @@ impl Collection {
             .transpose()?
             .flatten();
 
-        Ok(Original::from_state(state, canonical))
+        Ok(Original::from_state(
+            state,
+            canonical,
+            &self.request_headers,
+        ))
     }
 
     /// Look up a payload created in this collection before consulting earlier durable state.
@@ -229,8 +236,11 @@ impl Collection {
             let key = exchange.revisit_key();
             let resource_key = exchange.resource_key();
             let observed_at = exchange.date;
-            let etag = exchange.validator("etag");
-            let last_modified = exchange.validator("last-modified");
+            let etag = exchange.response_field("etag");
+            let last_modified = exchange.response_field("last-modified");
+            let variance = Variance::declared(exchange.response_field("vary").as_deref(), |name| {
+                request_field(&self.request_headers, name)
+            });
             let status = exchange.status;
             let revalidated = exchange.revalidated.is_some();
             let looked_up = if revalidated {
@@ -281,6 +291,7 @@ impl Collection {
                         record_id: Some(original.record_id.clone()),
                         warc_date: Some(original.warc_date),
                         observed_at,
+                        variance,
                     },
                 )?;
             }
@@ -299,6 +310,7 @@ impl Collection {
             persistent_index: _,
             gzip: _,
             session_index: _,
+            request_headers: _,
         } = self;
         let mut file = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
         file.rewind()?;
@@ -317,6 +329,7 @@ impl Collection {
             mut persistent_index,
             gzip: _,
             session_index,
+            request_headers: _,
         } = self;
         let mut source = warc.finish().map_err(std::io::IntoInnerError::into_error)?;
         source.rewind()?;

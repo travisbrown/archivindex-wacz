@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS resource_state (
     observed_at      TEXT NOT NULL,
     observed_seconds INTEGER NOT NULL,
     observed_nanos   INTEGER NOT NULL CHECK (observed_nanos BETWEEN 0 AND 999999999),
+    -- The request fields that select the stored representation, NULL when the response declared
+    -- no `Vary`. Validators are reusable only for a request matching this.
+    variance         TEXT,
     CHECK ((digest_algorithm IS NULL) = (digest IS NULL)),
     PRIMARY KEY (target_uri)
 ) WITHOUT ROWID;

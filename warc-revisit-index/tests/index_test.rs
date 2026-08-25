@@ -7,7 +7,7 @@ use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::value::{Algorithm, LabelledDigest, WarcDate};
 use archivindex_warc_revisit_index::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
-use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
+use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate, Variance};
 use archivindex_warc_revisit_index::{Error, IngestError, OpenError};
 use fluent_uri::Uri;
 use sha2::Digest as _;
@@ -165,6 +165,7 @@ fn resource_validators_digest_and_warc_identity_round_trip() -> Result<(), Box<d
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-01-01T01:02:03.456789Z")),
             observed_at: date("2025-01-01T01:02:03.456789Z"),
+            variance: Variance::Invariant,
         },
     )?;
 
@@ -195,6 +196,7 @@ fn new_representation_replaces_state_and_clears_omitted_validators() -> Result<(
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-01-01T00:00:00Z")),
             observed_at: date("2025-01-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
     index.update_resource(
@@ -206,6 +208,7 @@ fn new_representation_replaces_state_and_clears_omitted_validators() -> Result<(
             record_id: Some(uri(RECORD_B)),
             warc_date: Some(date("2025-01-02T00:00:00Z")),
             observed_at: date("2025-01-02T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
 
@@ -233,6 +236,7 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(original_date),
             observed_at: original_date,
+            variance: Variance::Invariant,
         },
     )?;
     index.update_resource(
@@ -274,6 +278,7 @@ fn older_resource_updates_are_ignored() -> Result<(), Box<dyn StdError>> {
             record_id: Some(uri(RECORD_B)),
             warc_date: Some(date("2025-03-01T00:00:00Z")),
             observed_at: date("2025-03-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
 
@@ -286,6 +291,7 @@ fn older_resource_updates_are_ignored() -> Result<(), Box<dyn StdError>> {
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-02-01T00:00:00Z")),
             observed_at: date("2025-02-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?);
     assert!(!index.update_resource(
@@ -326,6 +332,7 @@ fn two_resources_share_a_payload_but_keep_independent_state() -> Result<(), Box<
                 record_id: Some(uri(record)),
                 warc_date: Some(date("2025-01-01T00:00:00Z")),
                 observed_at: date("2025-01-01T00:00:00Z"),
+                variance: Variance::Invariant,
             },
         )?;
     }
@@ -359,6 +366,7 @@ fn malformed_persisted_state_returns_an_error() -> Result<(), Box<dyn StdError>>
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-01-01T00:00:00Z")),
             observed_at: date("2025-01-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
     drop(index);
@@ -387,7 +395,7 @@ fn incompatible_schema_version_is_rejected_clearly() -> Result<(), Box<dyn StdEr
     assert!(matches!(
         Index::open(path),
         Err(OpenError::SchemaVersion {
-            expected: 3,
+            expected: 4,
             found: 99
         })
     ));
@@ -641,6 +649,7 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2024-01-01T00:00:00Z")),
             observed_at: date("2024-01-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
     session.insert_payload(&later)?;
@@ -654,6 +663,7 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
             record_id: None,
             warc_date: None,
             observed_at: date("2024-06-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
     session.update_resource(
@@ -665,6 +675,7 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
             record_id: Some(uri(RECORD_B)),
             warc_date: Some(date("2024-06-01T00:00:00Z")),
             observed_at: date("2024-06-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
 
@@ -708,6 +719,7 @@ fn out_of_order_session_merges_keep_the_latest_observed_resource_state()
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-02-01T00:00:00Z")),
             observed_at: date("2025-02-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
     newer_session.update_resource(
@@ -719,6 +731,7 @@ fn out_of_order_session_merges_keep_the_latest_observed_resource_state()
             record_id: Some(uri(RECORD_B)),
             warc_date: Some(date("2025-03-01T00:00:00Z")),
             observed_at: date("2025-03-01T00:00:00Z"),
+            variance: Variance::Invariant,
         },
     )?;
 

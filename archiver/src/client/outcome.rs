@@ -82,8 +82,8 @@ impl Exchange {
         ResourceKey::new(self.captured.target_uri.clone())
     }
 
-    /// Return a readable response validator exactly as received.
-    pub fn validator(&self, name: &str) -> Option<String> {
+    /// Return a readable response field value exactly as received.
+    pub fn response_field(&self, name: &str) -> Option<String> {
         self.captured
             .response_metadata
             .header(name)
@@ -113,9 +113,29 @@ pub struct Original {
     last_modified: Option<HeaderValue>,
 }
 
+/// A request's value for `name`, as the variance model resolves a selecting field.
+///
+/// A field the request does not send, or whose value is not readable as text, is reported absent.
+pub fn request_field<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+}
+
 impl Original {
     /// Build a conditionally usable original from complete persisted representation state.
-    pub fn from_state(state: ResourceState, canonical: Option<RevisitTarget>) -> Option<Self> {
+    ///
+    /// Returns `None` when `request` does not select the representation the state was stored for:
+    /// its validators describe other bytes, and a server answering `304 Not Modified` to them
+    /// would have the archiver record a revisit of a payload this request never received.
+    pub fn from_state(
+        state: ResourceState,
+        canonical: Option<RevisitTarget>,
+        request: &HeaderMap,
+    ) -> Option<Self> {
+        if !state.variance.matches(|name| request_field(request, name)) {
+            return None;
+        }
         let payload_digest = state.payload_digest?;
         let target = match canonical {
             Some(target) => target,

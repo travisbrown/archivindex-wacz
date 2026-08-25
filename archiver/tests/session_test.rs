@@ -23,7 +23,7 @@ use archivindex_warc::value::{MediaType, WarcDate};
 use archivindex_warc::version::WarcVersion;
 use archivindex_warc_revisit_index::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
-use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate};
+use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceStateUpdate, Variance};
 use fluent_uri::Uri;
 
 mod support;
@@ -384,6 +384,7 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
             record_id: Some(uri(EXTERNAL_RECORD_ID)),
             warc_date: Some(original_date),
             observed_at: original_date,
+            variance: Variance::Invariant,
         },
     )?;
     drop(index);
@@ -424,6 +425,98 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
     assert_eq!(state.payload_digest, Some(digest));
     assert_eq!(state.record_id, Some(uri(EXTERNAL_RECORD_ID)));
     assert_eq!(state.warc_date, Some(original_date));
+
+    Ok(())
+}
+
+#[test]
+fn resource_state_for_another_variant_does_not_drive_revalidation()
+-> Result<(), Box<dyn std::error::Error>> {
+    const DESKTOP_AGENT: &str = "DesktopBot/1.0";
+    const MOBILE_AGENT: &str = "MobileBot/1.0";
+    const MOBILE: &str = "<html>mobile</html>";
+
+    let (port, server) = serve_with(1, |head| {
+        let response = plain(
+            "200 OK",
+            &format!(
+                "content-type: text/html\r\netag: \"mobile\"\r\n\
+                 last-modified: {LAST_MODIFIED}\r\nvary: User-Agent"
+            ),
+            MOBILE,
+        );
+        (response, head.to_owned())
+    })?;
+    let url = format!("http://127.0.0.1:{port}/page");
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("resource-state.sqlite3");
+    let output = directory.path().join("variant.warc.gz");
+    let desktop_digest = sha256(b"<html>desktop</html>");
+    let original_date = warc_date("2025-01-01T00:00:00Z");
+
+    // State captured by an earlier crawl that identified itself as a desktop client, for a
+    // response that declared its representation selected by `User-Agent`.
+    let index = Index::open(&database)?;
+    index.insert_payload(&RevisitTarget {
+        payload_digest: desktop_digest.clone(),
+        payload_length: Some(20),
+        record_id: uri(EXTERNAL_RECORD_ID),
+        target_uri: uri(&url),
+        warc_date: original_date,
+    })?;
+    index.update_resource(
+        &ResourceKey::new(uri(&url)),
+        ResourceStateUpdate::Representation {
+            etag: Some("\"desktop\"".to_owned()),
+            last_modified: Some(LAST_MODIFIED.to_owned()),
+            payload_digest: Some(desktop_digest.clone()),
+            record_id: Some(uri(EXTERNAL_RECORD_ID)),
+            warc_date: Some(original_date),
+            observed_at: original_date,
+            variance: Variance::declared(Some("User-Agent"), |name| {
+                (name == "user-agent").then_some(DESKTOP_AGENT)
+            }),
+        },
+    )?;
+    drop(index);
+
+    let config = Config {
+        user_agent: MOBILE_AGENT.to_owned(),
+        ..gzip_config()
+    };
+    let summary = Session::new(archiver(config), "variant", operator(), [&url], &output)?
+        .revisit_index(&database)
+        .run()?;
+
+    let requests = server.join().expect("server thread");
+    assert_eq!(request_header(&requests[0], "if-none-match"), None);
+    assert_eq!(request_header(&requests[0], "if-modified-since"), None);
+    assert_eq!(summary.seed_captures[0].status, 200);
+
+    let records = records(&std::fs::read(&output)?)?;
+    let Record::Response { header, .. } = &records[2] else {
+        panic!("a representation selected by another request should be captured in full");
+    };
+    assert_eq!(
+        header.payload.payload_digest.as_ref(),
+        Some(&sha256(MOBILE.as_bytes()))
+    );
+
+    // The stored state now describes the representation this crawl selected.
+    let state = Index::open(&database)?
+        .lookup_resource(&ResourceKey::new(uri(&url)))?
+        .expect("resource state should remain indexed");
+    assert_eq!(state.etag.as_deref(), Some("\"mobile\""));
+    assert!(
+        state
+            .variance
+            .matches(|name| (name == "user-agent").then_some(MOBILE_AGENT))
+    );
+    assert!(
+        !state
+            .variance
+            .matches(|name| (name == "user-agent").then_some(DESKTOP_AGENT))
+    );
 
     Ok(())
 }

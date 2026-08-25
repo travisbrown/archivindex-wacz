@@ -176,6 +176,12 @@ pub enum Error {
     /// A persisted optional digest has only one of its required columns populated.
     #[error("malformed persisted resource digest: algorithm and bytes must both be present")]
     IncompleteDigest,
+    /// A persisted representation variance is malformed.
+    #[error("malformed persisted representation variance `{value}`")]
+    MalformedVariance {
+        /// The malformed value.
+        value: String,
+    },
 }
 
 /// An error indexing a WARC record.

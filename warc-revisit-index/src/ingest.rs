@@ -8,7 +8,7 @@ use rusqlite::Connection;
 
 use crate::db::{Handle, insert_payload, lookup_payload, lookup_resource, update_resource};
 use crate::payload::RevisitTarget;
-use crate::resource::{ResourceKey, ResourceStateUpdate};
+use crate::resource::{ResourceKey, ResourceStateUpdate, Variance};
 use crate::{IndexRecordOutcome, IngestError, Store};
 
 impl<C: Handle> Store<C> {
@@ -19,6 +19,11 @@ impl<C: Handle> Store<C> {
     /// `identical-payload-digest` revisits resolve their resource state to an existing canonical
     /// source or their explicit `WARC-Refers-To` fields, while `server-not-modified` revisits
     /// preserve prior representation identity and merge only validators.
+    ///
+    /// A record carries no trace of the request that produced it, so a response declaring `Vary`
+    /// yields state that is never reused for revalidation (see
+    /// [`Variance::declared_without_request`](crate::resource::Variance::declared_without_request)).
+    /// Its payload still enters the canonical payload table and remains available for deduplication.
     ///
     /// # Errors
     ///
@@ -99,6 +104,7 @@ fn index_response<E: Extension>(
                 record_id: Some(header.core.record_id.clone()),
                 warc_date: Some(header.core.date),
                 observed_at: header.core.date,
+                variance: Variance::declared_without_request(metadata.vary.as_deref()),
             },
         )?
     } else {
@@ -151,6 +157,7 @@ fn index_revisit<E: Extension>(
                     record_id,
                     warc_date,
                     observed_at: header.core.date,
+                    variance: Variance::declared_without_request(metadata.vary.as_deref()),
                 },
             )?
         }
@@ -176,6 +183,7 @@ fn index_revisit<E: Extension>(
                         record_id: header.refers_to.clone(),
                         warc_date: header.refers_to_date,
                         observed_at: header.core.date,
+                        variance: Variance::declared_without_request(metadata.vary.as_deref()),
                     },
                 )?
             } else {
@@ -196,6 +204,8 @@ struct HttpMetadata {
     status: u16,
     etag: Option<String>,
     last_modified: Option<String>,
+    /// The `Vary` field, naming the request fields that select the representation.
+    vary: Option<String>,
     /// Where the stored body begins.
     body_offset: usize,
     /// Whether the head declares a `Transfer-Encoding`.
@@ -214,6 +224,10 @@ fn http_metadata(message: &[u8]) -> Result<HttpMetadata, IngestError> {
             .map(str::to_owned),
         last_modified: metadata
             .header("last-modified")
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .map(str::to_owned),
+        vary: metadata
+            .header("vary")
             .and_then(|value| std::str::from_utf8(value).ok())
             .map(str::to_owned),
         body_offset: metadata.body_offset,

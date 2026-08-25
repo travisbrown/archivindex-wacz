@@ -305,7 +305,7 @@ impl RetryDelays {
 
     fn for_exchange(&self, exchange: &Exchange) -> Duration {
         exchange
-            .validator("retry-after")
+            .response_field("retry-after")
             .and_then(|value| parse_retry_after(&value, chrono::Utc::now()))
             .unwrap_or(self.backoff)
             .min(self.maximum)

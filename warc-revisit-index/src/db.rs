@@ -8,7 +8,7 @@ use fluent_uri::Uri;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::payload::RevisitTarget;
-use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
+use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate, Variance};
 use crate::{DatabaseError, Error, Index, OpenError, Store, Transaction};
 
 /// A SQLite handle a [`Store`] can run statements through.
@@ -40,7 +40,7 @@ impl Handle for rusqlite::Transaction<'_> {
 /// writer clears quickly and waiting is almost always better than failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -51,8 +51,8 @@ const INSERT_PAYLOAD: &str = "INSERT INTO payloads (
 
 const UPSERT_RESOURCE: &str = "INSERT INTO resource_state (
      target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date,
-     observed_at, observed_seconds, observed_nanos
- ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+     observed_at, observed_seconds, observed_nanos, variance
+ ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
  ON CONFLICT (target_uri) DO UPDATE SET
      etag = excluded.etag,
      last_modified = excluded.last_modified,
@@ -62,7 +62,8 @@ const UPSERT_RESOURCE: &str = "INSERT INTO resource_state (
      warc_date = excluded.warc_date,
      observed_at = excluded.observed_at,
      observed_seconds = excluded.observed_seconds,
-     observed_nanos = excluded.observed_nanos
+     observed_nanos = excluded.observed_nanos,
+     variance = excluded.variance
  WHERE excluded.observed_seconds > resource_state.observed_seconds
     OR (excluded.observed_seconds = resource_state.observed_seconds
         AND excluded.observed_nanos >= resource_state.observed_nanos)";
@@ -221,7 +222,7 @@ impl Transaction<'_> {
         copy_rows(
             source.connection(),
             "SELECT target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date,
-                    observed_at, observed_seconds, observed_nanos
+                    observed_at, observed_seconds, observed_nanos, variance
              FROM resource_state",
             self.connection(),
             UPSERT_RESOURCE,
@@ -309,11 +310,13 @@ pub fn lookup_resource(
         Option<String>,
         Option<String>,
         String,
+        Option<String>,
     );
 
     let stored: Option<Stored> = cached(
         connection,
-        "SELECT etag, last_modified, digest_algorithm, digest, record_id, warc_date, observed_at
+        "SELECT etag, last_modified, digest_algorithm, digest, record_id, warc_date, observed_at,
+                variance
          FROM resource_state WHERE target_uri = ?1",
         "look up resource state",
     )?
@@ -326,6 +329,7 @@ pub fn lookup_resource(
             row.get(4)?,
             row.get(5)?,
             row.get(6)?,
+            row.get(7)?,
         ))
     })
     .optional()
@@ -333,7 +337,16 @@ pub fn lookup_resource(
 
     stored
         .map(
-            |(etag, last_modified, algorithm, digest, record_id, warc_date, observed_at)| {
+            |(
+                etag,
+                last_modified,
+                algorithm,
+                digest,
+                record_id,
+                warc_date,
+                observed_at,
+                variance,
+            )| {
                 let payload_digest = match (algorithm, digest) {
                     (Some(algorithm), Some(digest)) => {
                         Some(digest_from_parts(&algorithm, &digest)?)
@@ -354,6 +367,7 @@ pub fn lookup_resource(
                         .map(|value| parse_date("warc_date", value))
                         .transpose()?,
                     observed_at: parse_date("observed_at", observed_at)?,
+                    variance: Variance::decode(variance)?,
                 })
             },
         )
@@ -373,6 +387,7 @@ pub fn update_resource(
             record_id,
             warc_date,
             observed_at,
+            variance,
         } => {
             let (algorithm, digest) = payload_digest
                 .as_ref()
@@ -398,6 +413,7 @@ pub fn update_resource(
                 observed_at,
                 observed_seconds,
                 observed_nanos,
+                variance.encode(),
             ])
             .map_err(DatabaseError::during("update resource representation"))?
         }
@@ -607,6 +623,7 @@ mod tests {
                     record_id,
                     warc_date,
                     observed_at,
+                    variance,
                 } => {
                     let accepted = expected.get(&uri).is_none_or(|state| {
                         observed_at.date_time() >= state.observed_at.date_time()
@@ -623,6 +640,7 @@ mod tests {
                                 record_id,
                                 warc_date,
                                 observed_at,
+                                variance,
                             },
                         );
                     }

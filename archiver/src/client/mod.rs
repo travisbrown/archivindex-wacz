@@ -16,7 +16,7 @@ mod pool;
 mod warc_fields;
 mod warc_mapping;
 
-use collection::Collection;
+use collection::{Collection, CollectionOptions};
 use outcome::CaptureOutcome;
 use warc_fields::WarcinfoOptions;
 
@@ -132,16 +132,19 @@ impl Archiver {
 
         Collection::new_for_path(
             output,
-            &format!("{id}{suffix}"),
-            gzip,
-            &WarcinfoOptions {
-                user_agent: &self.config.user_agent,
-                software: Some(software),
-                operator: Some(operator),
-                session_id: Some(id),
-                title,
+            CollectionOptions {
+                warc_name: &format!("{id}{suffix}"),
+                gzip,
+                warcinfo: WarcinfoOptions {
+                    user_agent: &self.config.user_agent,
+                    software: Some(software),
+                    operator: Some(operator),
+                    session_id: Some(id),
+                    title,
+                },
+                request_headers: self.headers.clone(),
+                persistent_index,
             },
-            persistent_index,
         )
     }
 
@@ -153,11 +156,17 @@ impl Archiver {
         events: &mut impl CaptureEventSink,
     ) -> Result<(Collection, bool), Error> {
         let gzip = self.config.gzip_warc;
-        let warcinfo = WarcinfoOptions::archiver(&self.config.user_agent);
+        let options = || CollectionOptions {
+            warc_name,
+            gzip,
+            warcinfo: WarcinfoOptions::archiver(&self.config.user_agent),
+            request_headers: self.headers.clone(),
+            persistent_index: None,
+        };
         let mut collection = if let Some(output) = output {
-            Collection::new_for_path(output, warc_name, gzip, &warcinfo, None)?
+            Collection::new_for_path(output, options())?
         } else {
-            Collection::new(warc_name, gzip, &warcinfo, None)?
+            Collection::new(options())?
         };
 
         let concurrency = self.config.concurrency.max(1);
