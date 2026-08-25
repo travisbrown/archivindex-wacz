@@ -89,9 +89,9 @@ impl<'a> Header<'a> {
             (true, delimiter, rest)
         };
 
-        if delimiter == '\r' || delimiter == '\n' {
-            return Err(Error::InvalidHeader(line.to_owned()));
-        }
+        // The delimiter is a character of the line, which has no line break, so `new` can only
+        // reject the legend itself. It reports the legend it was given; the whole header line is
+        // the more useful subject here.
         let markers = rest.split(delimiter).map(Cow::Borrowed).collect::<Vec<_>>();
         Self::new(delimiter, leading_delimiter, markers)
             .map_err(|_| Error::InvalidLegend(line.to_owned()))
