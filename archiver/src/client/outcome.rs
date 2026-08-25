@@ -30,7 +30,7 @@ pub enum CaptureOutcome {
 }
 
 impl CaptureOutcome {
-    pub(crate) fn fail(self, error: Error) -> Self {
+    pub fn fail(self, error: Error) -> Self {
         match self {
             Self::Captured(exchanges) | Self::Failed { exchanges, .. } => {
                 Self::Failed { exchanges, error }
@@ -40,21 +40,21 @@ impl CaptureOutcome {
 }
 
 /// The precision at which `WARC-Date` fields are recorded.
-pub(super) const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
+pub const DATE_PRECISION: WarcDatePrecision = WarcDatePrecision::Fraction(6);
 
 /// A single captured exchange not yet written.
 pub struct Exchange {
     /// The capture date at the recorded precision, shared by the WARC records.
-    pub(super) date: WarcDate,
-    pub(crate) status: u16,
+    pub date: WarcDate,
+    pub status: u16,
     /// The decoded entity body when it differs from the stored body.
     decoded: Option<Vec<u8>>,
     /// The SHA-256 digest of the entity body, absent when transfer decoding fails.
-    pub(super) payload_digest: Option<LabelledDigest>,
+    pub payload_digest: Option<LabelledDigest>,
     /// The earlier capture that this `304 Not Modified` response, answering a conditional request,
     /// confirms unchanged.
-    pub(super) revalidated: Option<RevisitTarget>,
-    pub(crate) captured: CapturedExchange,
+    pub revalidated: Option<RevisitTarget>,
+    pub captured: CapturedExchange,
 }
 
 impl Exchange {
@@ -65,7 +65,7 @@ impl Exchange {
     /// Exchanges without a decodable payload, with an empty payload, or with a truncated response
     /// never revisit by their own payload: the first two save nothing, and a truncated capture's
     /// digest does not describe the complete payload.
-    pub(super) fn revisit_key(&self) -> Option<LabelledDigest> {
+    pub fn revisit_key(&self) -> Option<LabelledDigest> {
         self.revalidated
             .as_ref()
             .map(|target| target.payload_digest.clone())
@@ -78,12 +78,12 @@ impl Exchange {
     }
 
     /// The resource key for the recorded target URI.
-    pub(super) fn resource_key(&self) -> ResourceKey {
+    pub fn resource_key(&self) -> ResourceKey {
         ResourceKey::new(self.captured.target_uri.clone())
     }
 
     /// Return a readable response validator exactly as received.
-    pub(crate) fn validator(&self, name: &str) -> Option<String> {
+    pub fn validator(&self, name: &str) -> Option<String> {
         self.captured
             .response_metadata
             .header(name)
@@ -92,14 +92,14 @@ impl Exchange {
     }
 
     /// The entity body, or the stored body when transfer decoding fails.
-    pub(crate) fn payload(&self) -> &[u8] {
+    pub fn payload(&self) -> &[u8] {
         self.decoded
             .as_deref()
             .unwrap_or_else(|| self.captured.stored_body())
     }
 
     /// The length of [`payload`](Self::payload).
-    pub(super) fn payload_length(&self) -> u64 {
+    pub fn payload_length(&self) -> u64 {
         self.payload().len() as u64
     }
 }
@@ -107,7 +107,7 @@ impl Exchange {
 /// An earlier complete capture of a URL: the digest identifying its stored payload, and the
 /// validators a later request sends to ask the server whether that payload is still current.
 #[derive(Clone, Debug)]
-pub(super) struct Original {
+pub struct Original {
     target: RevisitTarget,
     etag: Option<HeaderValue>,
     last_modified: Option<HeaderValue>,
@@ -115,10 +115,7 @@ pub(super) struct Original {
 
 impl Original {
     /// Build a conditionally usable original from complete persisted representation state.
-    pub(super) fn from_state(
-        state: ResourceState,
-        canonical: Option<RevisitTarget>,
-    ) -> Option<Self> {
+    pub fn from_state(state: ResourceState, canonical: Option<RevisitTarget>) -> Option<Self> {
         let payload_digest = state.payload_digest?;
         let target = match canonical {
             Some(target) => target,

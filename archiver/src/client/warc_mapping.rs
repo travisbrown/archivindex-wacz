@@ -18,13 +18,13 @@ use crate::Error;
 
 /// Optional fields added to the metadata record accompanying an exchange.
 #[derive(Clone, Copy)]
-pub(super) struct MetadataOptions<'a> {
-    pub(super) via: Option<&'a str>,
-    pub(super) title: Option<&'a str>,
+pub struct MetadataOptions<'a> {
+    pub via: Option<&'a str>,
+    pub title: Option<&'a str>,
 }
 
 /// Write a record, optionally as an independent gzip member.
-pub(super) fn write_record<W: Write>(
+pub fn write_record<W: Write>(
     writer: &mut WarcWriter<W>,
     record: Record,
     gzip: bool,
@@ -46,7 +46,7 @@ pub(super) fn write_record<W: Write>(
 ///
 /// Returns the new response as a revisit target, or `None` when writing a revisit or when the
 /// response has no payload digest.
-pub(super) fn write_exchange<W: Write>(
+pub fn write_exchange<W: Write>(
     writer: &mut WarcWriter<W>,
     exchange: Exchange,
     warcinfo_id: &Uri<String>,

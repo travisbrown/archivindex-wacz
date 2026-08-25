@@ -15,17 +15,17 @@ use crate::Error;
 use crate::session::{Operator, Software};
 
 /// Information recorded in the WARC file's initial `warcinfo` record.
-pub(super) struct WarcinfoOptions<'a> {
-    pub(super) user_agent: &'a str,
-    pub(super) software: Option<&'a Software>,
-    pub(super) operator: Option<&'a Operator>,
-    pub(super) session_id: Option<&'a str>,
-    pub(super) title: Option<&'a str>,
+pub struct WarcinfoOptions<'a> {
+    pub user_agent: &'a str,
+    pub software: Option<&'a Software>,
+    pub operator: Option<&'a Operator>,
+    pub session_id: Option<&'a str>,
+    pub title: Option<&'a str>,
 }
 
 impl<'a> WarcinfoOptions<'a> {
     /// Options for a one-shot run: this crate as software, with no operator or session.
-    pub(super) const fn archiver(user_agent: &'a str) -> Self {
+    pub const fn archiver(user_agent: &'a str) -> Self {
         Self {
             user_agent,
             software: None,
@@ -38,19 +38,16 @@ impl<'a> WarcinfoOptions<'a> {
 
 /// Values recorded in the `warc-fields` metadata accompanying one capture.
 #[derive(Clone, Copy)]
-pub(super) struct MetadataValues<'a> {
-    pub(super) fetch_time: Duration,
-    pub(super) via: Option<&'a str>,
-    pub(super) title: Option<&'a str>,
+pub struct MetadataValues<'a> {
+    pub fetch_time: Duration,
+    pub via: Option<&'a str>,
+    pub title: Option<&'a str>,
 }
 
 /// Build the `warcinfo` record at the start of a WARC file.
 ///
 /// `software` and `http-header-user-agent` are always included.
-pub(super) fn warcinfo_record(
-    warc_name: &str,
-    options: &WarcinfoOptions<'_>,
-) -> Result<Record, Error> {
+pub fn warcinfo_record(warc_name: &str, options: &WarcinfoOptions<'_>) -> Result<Record, Error> {
     let software = options.software.cloned().unwrap_or_default();
     let mut builder = Record::warcinfo(WarcDate::new(Utc::now(), DATE_PRECISION))
         .filename(warc_name)
@@ -71,7 +68,7 @@ pub(super) fn warcinfo_record(
 }
 
 /// Build the metadata record linked to one captured response or revisit.
-pub(super) fn metadata_record(
+pub fn metadata_record(
     date: WarcDate,
     target_uri: Uri<String>,
     record_id: Uri<String>,

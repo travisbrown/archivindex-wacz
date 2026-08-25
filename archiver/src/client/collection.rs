@@ -33,7 +33,7 @@ pub struct Collection {
 
 impl Collection {
     /// Start a collection by writing its initial `warcinfo` record.
-    pub(super) fn new(
+    pub fn new(
         warc_name: &str,
         gzip: bool,
         warcinfo: &WarcinfoOptions<'_>,
@@ -50,7 +50,7 @@ impl Collection {
     }
 
     /// Start a collection in `<output>.partial` so its growth is visible while it is written.
-    pub(super) fn new_for_path(
+    pub fn new_for_path(
         output: &Path,
         warc_name: &str,
         gzip: bool,
@@ -111,7 +111,7 @@ impl Collection {
     }
 
     /// The earlier capture of a target URI that a new capture may ask the server to revalidate.
-    pub(super) fn original(&self, target_uri: Uri<String>) -> Result<Option<Original>, Error> {
+    pub fn original(&self, target_uri: Uri<String>) -> Result<Option<Original>, Error> {
         let key = ResourceKey::new(target_uri);
 
         if let Some(state) = self.session_index.lookup_resource(&key)? {
@@ -175,7 +175,7 @@ impl Collection {
     /// A hop whose payload digest matches an earlier capture in this collection, or whose `304 Not
     /// Modified` confirms an earlier capture's payload unchanged, is stored as a `revisit` record
     /// referencing the original, instead of repeating the payload.
-    pub(crate) fn record(
+    pub fn record(
         &mut self,
         url: String,
         outcome: CaptureOutcome,
@@ -286,7 +286,7 @@ impl Collection {
     }
 
     /// Copy the completed WARC to `output`.
-    pub(crate) fn finish<W: Write>(self, mut output: W) -> Result<ArchiveSummary, Error> {
+    pub fn finish<W: Write>(self, mut output: W) -> Result<ArchiveSummary, Error> {
         let Self {
             warc,
             spool_path: _,
@@ -304,7 +304,7 @@ impl Collection {
     }
 
     /// Atomically publish the completed WARC at `path`, then update durable revisit state.
-    pub(crate) fn finish_to_path(self, path: &Path) -> Result<ArchiveSummary, Error> {
+    pub fn finish_to_path(self, path: &Path) -> Result<ArchiveSummary, Error> {
         let Self {
             warc,
             spool_path,
