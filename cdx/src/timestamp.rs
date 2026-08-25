@@ -128,12 +128,6 @@ impl Hash for Timestamp {
     }
 }
 
-impl From<DateTime<Utc>> for Timestamp {
-    fn from(value: DateTime<Utc>) -> Self {
-        Self::new(value)
-    }
-}
-
 impl serde::Serialize for Timestamp {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)

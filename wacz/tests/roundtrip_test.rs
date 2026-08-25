@@ -47,7 +47,7 @@ fn capture_time() -> chrono::DateTime<Utc> {
 fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     Ok(cdxj::Item {
         key: Surt::from_url(url)?.into(),
-        timestamp: capture_time().into(),
+        timestamp: Timestamp::new(capture_time()),
         fields: cdxj::Fields {
             url: Cow::Owned(url.to_owned()),
             digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
@@ -74,7 +74,7 @@ fn item_at(
     timestamp: chrono::DateTime<Utc>,
 ) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
-    item.timestamp = timestamp.into();
+    item.timestamp = Timestamp::new(timestamp);
     Ok(item)
 }
 
@@ -144,7 +144,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 
     let item = cdxj::Item {
         key: Surt::from_url(URL)?.into(),
-        timestamp: capture_time.into(),
+        timestamp: Timestamp::new(capture_time),
         fields: cdxj::Fields {
             url: Cow::Borrowed(URL),
             digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
@@ -344,7 +344,7 @@ fn plain_lookup_and_capture_resolution() -> Result<(), Box<dyn std::error::Error
     let warc = warc_bytes()?;
     let wacz = build_wacz("data.warc", &warc)?;
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let timestamp: Timestamp = capture_time().into();
+    let timestamp = Timestamp::new(capture_time());
 
     assert!(reader.lookup(URL, ..timestamp)?.is_empty());
 

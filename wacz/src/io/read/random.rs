@@ -546,11 +546,9 @@ mod tests {
     fn plain_indexes_are_decoded_once_per_reader() {
         let item = cdxj::Item {
             key: Cow::Borrowed("com,example)/"),
-            timestamp: Utc
-                .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
-                .single()
-                .unwrap()
-                .into(),
+            timestamp: archivindex_cdx::timestamp::Timestamp::new(
+                Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
+            ),
             fields: cdxj::ConformingFields {
                 url: Cow::Borrowed("https://example.com/"),
                 digest: Cow::Borrowed("sha256:00"),
