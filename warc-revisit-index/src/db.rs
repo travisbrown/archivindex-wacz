@@ -179,7 +179,7 @@ impl Transaction<'_> {
     /// # Errors
     ///
     /// Returns an error when either database fails to read or write a row.
-    pub fn merge_from(&self, source: &Index) -> Result<(), Error> {
+    pub fn merge_from(&self, source: &Index) -> Result<(), DatabaseError> {
         copy_rows(
             source.connection(),
             "SELECT digest_algorithm, digest, payload_length, record_id, target_uri, warc_date
@@ -386,7 +386,7 @@ fn copy_rows(
     target: &Connection,
     insert: &str,
     operation: &'static str,
-) -> Result<(), Error> {
+) -> Result<(), DatabaseError> {
     let mut select = source
         .prepare(select)
         .map_err(DatabaseError::during(operation))?;
