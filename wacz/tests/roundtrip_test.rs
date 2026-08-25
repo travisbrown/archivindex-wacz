@@ -23,6 +23,8 @@ use fluent_uri::Uri;
 
 const URL: &str = "https://www.example.com/page";
 const BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>hello</html>";
+const PAYLOAD_DIGEST: &str =
+    "sha256:7e537e903df5bfa9c9de2dc590d2646f8b4aa71dd14877bd3e2eceda829a4618";
 
 /// Build the serialized bytes of a single-record WARC file for the test capture.
 fn warc_bytes() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -47,9 +49,7 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Err
         timestamp: capture_time().into(),
         fields: cdxj::ParsedFields {
             url: Cow::Owned(url.to_owned()),
-            digest: Some(Cow::Borrowed(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            )),
+            digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
             mime: Some(Cow::Borrowed("text/html")),
             status: Some(200),
             offset: Some(0),
@@ -146,9 +146,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
         timestamp: capture_time.into(),
         fields: cdxj::ParsedFields {
             url: Cow::Borrowed(URL),
-            digest: Some(Cow::Borrowed(
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            )),
+            digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
             mime: Some(Cow::Borrowed("text/html")),
             status: Some(200),
             offset: Some(0),
@@ -1617,7 +1615,7 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
     let warc = warc_bytes()?;
     let length = warc.len() as u64;
 
-    let good = resolvable_item("https://www.example.com/page0", "data.warc", length)?;
+    let good = resolvable_item(URL, "data.warc", length)?;
     let mut bad_digest = resolvable_item("https://www.example.com/page1", "data.warc", length)?;
     bad_digest.fields.record_digest = Some(Sha256Digest::compute(b"wrong"));
     let out_of_bounds = resolvable_item("https://www.example.com/page2", "data.warc", length + 10)?;
@@ -1657,6 +1655,95 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+/// The index layer correlates the descriptive CDXJ fields with the located WARC record while
+/// accepting equivalent digest encodings and matching timestamps at their declared precision.
+#[test]
+fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::error::Error>> {
+    let warc = warc_bytes()?;
+    let length = warc.len() as u64;
+    let mut good = resolvable_item(URL, "data.warc", length)?;
+    good.timestamp = cdxj::Timestamp::with_milliseconds(capture_time());
+    good.fields.digest = Some(Cow::Borrowed(
+        "SHA-256:flN+kD31v6nJ3i3FkNJkb4tKpx3RSHe9Pi7O2oKaRhg=",
+    ));
+
+    let mut bad_url = good.clone();
+    bad_url.fields.url = Cow::Borrowed("https://www.example.com/other");
+
+    let mut bad_key = good.clone();
+    bad_key.key = Cow::Borrowed("com,example)/wrong");
+
+    let mut bad_timestamp = good.clone();
+    bad_timestamp.timestamp =
+        cdxj::Timestamp::with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1));
+
+    let mut bad_status = good.clone();
+    bad_status.fields.status = Some(404);
+
+    let mut bad_mime = good.clone();
+    bad_mime.fields.mime = Some(Cow::Borrowed("text/plain"));
+
+    let mut bad_digest = good.clone();
+    bad_digest.fields.digest = Some(Cow::Borrowed(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    ));
+
+    let mut items = [
+        good,
+        bad_url,
+        bad_key,
+        bad_timestamp,
+        bad_status,
+        bad_mime,
+        bad_digest,
+    ];
+    items.sort_by(|left, right| {
+        (left.key.as_ref(), left.timestamp).cmp(&(right.key.as_ref(), right.timestamp))
+    });
+    let index = items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let bytes = stored_zip_of(&[
+        ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+        ("archive/data.warc", &warc),
+        ("indexes/index.cdx", index.as_bytes()),
+    ])?;
+
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let report = reader.validate(validate::ValidationOptions {
+        index: true,
+        ..validate::ValidationOptions::default()
+    })?;
+    let problems = report.index.expect("index layer should run");
+    let messages = problems
+        .iter()
+        .filter_map(|problem| match problem {
+            validate::IndexProblem::Capture { message, .. } => Some(message.as_str()),
+            validate::IndexProblem::Block { .. } => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(messages.len(), 6, "{messages:?}");
+    for expected in [
+        "does not match WARC-Target-URI",
+        "is not a recognized canonical key",
+        "does not match WARC-Date",
+        "does not match HTTP status",
+        "does not match captured payload type",
+        "does not match WARC-Payload-Digest",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing `{expected}` in {messages:?}"
+        );
+    }
+
+    Ok(())
+}
+
 /// A `ZipNum` block whose stored bytes no longer match the summary's digest is reported, while
 /// entries in intact blocks still resolve.
 #[test]
@@ -1664,12 +1751,12 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
     let warc = warc_bytes()?;
     let length = warc.len() as u64;
     let items = (0..4)
-        .map(|i| {
-            resolvable_item(
-                &format!("https://www.example.com/page{i}"),
-                "data.warc",
-                length,
-            )
+        .map(|index| {
+            let mut item = resolvable_item(URL, "data.warc", length)?;
+            item.fields
+                .extra
+                .insert("testIndex".to_owned(), index.into());
+            Ok(item)
         })
         .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 

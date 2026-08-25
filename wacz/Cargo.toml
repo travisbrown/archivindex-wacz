@@ -13,7 +13,7 @@ version.workspace = true
 
 [dependencies]
 archivindex-surt = { version = "0.1.0", path = "../surt/" }
-archivindex-warc = { workspace = true, features = ["gzip"] }
+archivindex-warc = { workspace = true, features = ["gzip", "http"] }
 bounded-static = { version = "0.8.0", features = ["derive", "chrono"] }
 chrono = { workspace = true, features = ["serde"] }
 data-encoding.workspace = true

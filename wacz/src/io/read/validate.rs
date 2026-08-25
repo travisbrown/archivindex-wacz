@@ -12,6 +12,12 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 
+use archivindex_surt::url::Canonicalizer;
+use archivindex_warc::record::Record;
+use archivindex_warc::record::extension::NoExtension;
+use archivindex_warc::record::http::ResponseMetadata;
+use archivindex_warc::value::LabelledDigest;
+
 use crate::cdxj::{Item, Timestamp};
 use crate::digest::Sha256Digest;
 use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
@@ -30,7 +36,7 @@ pub struct ValidationOptions {
     pub fixity: bool,
     /// Parse every page list, index, and WARC member, reporting the first problem in each.
     pub content: bool,
-    /// Resolve every index entry to its WARC record and verify every `ZipNum` block digest.
+    /// Check every index entry against its WARC record and verify every `ZipNum` block digest.
     ///
     /// Selecting this layer also runs the content layer, since an index entry that does not
     /// resolve is only meaningful for an index that parses.
@@ -62,7 +68,7 @@ pub struct ValidationReport {
     pub manifest: Vec<ManifestProblem>,
     /// Members whose content does not parse, if the content layer ran.
     pub content: Option<Vec<ContentProblem>>,
-    /// Index entries and `ZipNum` blocks that do not resolve, if the index layer ran.
+    /// Index entries and `ZipNum` blocks that do not match their data, if the index layer ran.
     pub index: Option<Vec<IndexProblem>>,
     /// The outcome of checking declared digests and sizes, if the fixity layer ran and the
     /// manifest was present and parseable.
@@ -265,7 +271,7 @@ impl ContentProblem {
 /// An index entry or `ZipNum` block that does not resolve to the data it describes.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, thiserror::Error)]
 pub enum IndexProblem {
-    /// An index entry does not locate exactly one WARC record matching its declared digest.
+    /// An index entry does not locate or describe exactly one WARC record.
     #[error("{index_path}: capture {key} {timestamp}: {message}")]
     Capture {
         /// The index or summary member the entry came from.
@@ -614,7 +620,7 @@ impl<R: Read + Seek> WaczReader<R> {
         message.map(|message| ContentProblem::new(path, ContentKind::Warc, message))
     }
 
-    /// Resolve every index entry to its WARC record and verify every `ZipNum` block digest.
+    /// Check every index entry against its WARC record and verify every `ZipNum` block digest.
     ///
     /// Members and lines that do not parse are skipped here; the content layer, which the index
     /// layer implies, reports them.
@@ -648,8 +654,7 @@ impl<R: Read + Seek> WaczReader<R> {
         problems
     }
 
-    /// Resolve the capture on each parseable CDXJ line, checking `recordDigest` values and that
-    /// each located range holds exactly one WARC record.
+    /// Check each parseable CDXJ line against the WARC record it locates.
     fn resolve_captures(
         &mut self,
         index_path: &str,
@@ -665,16 +670,177 @@ impl<R: Read + Seek> WaczReader<R> {
                 continue;
             };
 
-            if let Err(error) = self.read_capture_raw(&item.fields) {
+            let result = self
+                .read_capture(&item.fields)
+                .map_err(|error| error.to_string())
+                .and_then(|record| capture_matches(&item, &record));
+
+            if let Err(message) = result {
                 problems.push(IndexProblem::Capture {
                     index_path: index_path.to_owned(),
                     key: item.key.into_owned(),
                     timestamp: item.timestamp.to_string(),
-                    message: error.to_string(),
+                    message,
                 });
             }
         }
     }
+}
+
+/// Check the searchable and descriptive fields of a CDXJ item against its record.
+fn capture_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Result<(), String> {
+    capture_identity_matches(item, record)?;
+    capture_http_metadata_matches(item, record)?;
+    capture_digest_matches(item, record)
+}
+
+/// Check the URL, search key, and capture time.
+fn capture_identity_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Result<(), String> {
+    let target_uri = record.target_uri().ok_or_else(|| {
+        format!(
+            "located WARC {} record has no target URI",
+            record.type_name()
+        )
+    })?;
+    if item.fields.url != target_uri.as_str() {
+        return Err(format!(
+            "url `{}` does not match WARC-Target-URI `{target_uri}`",
+            item.fields.url
+        ));
+    }
+
+    let wayback = Canonicalizer::WAYBACK
+        .surt(&item.fields.url)
+        .map_err(|error| format!("url cannot be canonicalized: {error}"))?;
+    let warcio = Canonicalizer::WARCIO
+        .surt(&item.fields.url)
+        .map_err(|error| format!("url cannot be canonicalized: {error}"))?;
+    if item.key != wayback.as_str() && item.key != warcio.as_str() {
+        return Err(format!(
+            "key `{}` is not a recognized canonical key for `{}`",
+            item.key, item.fields.url
+        ));
+    }
+
+    let date = record.core().date.date_time();
+    let timestamp = if item.timestamp.has_milliseconds() {
+        Timestamp::with_milliseconds(date)
+    } else {
+        Timestamp::new(date)
+    };
+    if item.timestamp != timestamp {
+        return Err(format!(
+            "timestamp {} does not match WARC-Date at the same precision ({timestamp})",
+            item.timestamp
+        ));
+    }
+
+    Ok(())
+}
+
+/// Check the status and payload type against the captured HTTP response.
+fn capture_http_metadata_matches(
+    item: &Item<'_>,
+    record: &Record<NoExtension>,
+) -> Result<(), String> {
+    let (message, revisit) = match record {
+        Record::Response { body, .. } => (body.as_slice(), false),
+        Record::Revisit { body, .. } => (body.as_slice(), true),
+        _ => {
+            return Err(format!(
+                "located WARC record has type `{}`, not `response` or `revisit`",
+                record.type_name()
+            ));
+        }
+    };
+    let response = ResponseMetadata::parse(message).ok_or_else(|| {
+        "located WARC record does not contain a parseable HTTP response".to_owned()
+    })?;
+
+    if let Some(status) = item.fields.status
+        && status != response.status
+    {
+        return Err(format!(
+            "status {status} does not match HTTP status {}",
+            response.status
+        ));
+    }
+
+    if let Some(mime) = item.fields.mime.as_deref() {
+        let actual = if revisit {
+            "warc/revisit".to_owned()
+        } else {
+            response
+                .header("content-type")
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.split(';').next())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    record
+                        .payload()
+                        .and_then(|payload| payload.identified_payload_type.as_ref())
+                        .map(|media_type| {
+                            format!("{}/{}", media_type.type_name(), media_type.subtype())
+                        })
+                })
+                .unwrap_or_else(|| "unk".to_owned())
+        };
+        if !mime.eq_ignore_ascii_case(&actual) {
+            return Err(format!(
+                "mime `{mime}` does not match captured payload type `{actual}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Check the payload digest, computing it when the WARC header omits it.
+fn capture_digest_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Result<(), String> {
+    if let Some(digest) = item.fields.digest.as_deref() {
+        let expected = LabelledDigest::parse(digest.as_bytes())
+            .map_err(|error| format!("digest `{digest}` is invalid: {error}"))?;
+        let declared = record
+            .payload()
+            .and_then(|payload| payload.payload_digest.as_ref());
+        if let Some(actual) = declared {
+            if !expected.matches(actual) {
+                return Err(format!(
+                    "digest `{expected}` does not match WARC-Payload-Digest `{actual}`"
+                ));
+            }
+        } else {
+            let algorithm = expected.algorithm().ok_or_else(|| {
+                format!(
+                    "digest `{expected}` cannot be checked because the WARC record has no \
+                     WARC-Payload-Digest and its algorithm is unsupported"
+                )
+            })?;
+            let payload = record
+                .payload_bytes()
+                .map_err(|error| format!("cannot extract WARC payload: {error}"))?
+                .ok_or_else(|| {
+                    "digest cannot be checked because the WARC record has no local payload or \
+                     WARC-Payload-Digest"
+                        .to_owned()
+                })?;
+            let actual = LabelledDigest::compute(algorithm, &payload).ok_or_else(|| {
+                format!(
+                    "digest algorithm `{}` is unsupported",
+                    expected.algorithm_as_read()
+                )
+            })?;
+            if !expected.matches(&actual) {
+                return Err(format!(
+                    "digest `{expected}` does not match computed payload digest `{actual}`"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
