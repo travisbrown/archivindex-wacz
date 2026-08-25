@@ -1,10 +1,10 @@
 [package]
 name = "archivindex-warc-revisit-index"
-description = "Persistent crawl state derived from WARC records"
+description = "A revisit index over WARC records: payload sources and conditional-request state"
 authors.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/crate/archivindex-warc-revisit-index/"
-keywords = ["warc", "web", "archive", "http", "sqlite"]
+keywords = ["warc", "web", "archive", "revisit", "sqlite"]
 edition.workspace = true
 rust-version.workspace = true
 readme.workspace = true

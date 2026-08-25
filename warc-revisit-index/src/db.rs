@@ -57,8 +57,9 @@ impl Store<Connection> {
     ///
     /// # Errors
     ///
-    /// Returns an error when SQLite cannot open or configure the database, schema initialization
-    /// fails, or the database declares an unsupported schema version.
+    /// Returns [`OpenError::Database`] when SQLite cannot open, configure, or initialize the
+    /// database, and [`OpenError::SchemaVersion`] when the database was written by an
+    /// incompatible version of this crate.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, OpenError> {
         let connection = Connection::open(path).map_err(DatabaseError::during("open database"))?;
         Self::initialize(connection)
@@ -68,7 +69,8 @@ impl Store<Connection> {
     ///
     /// # Errors
     ///
-    /// Returns an error when SQLite cannot create, configure, or initialize the database.
+    /// Returns [`OpenError::Database`] when SQLite cannot create, configure, or initialize the
+    /// database. A fresh database never reports [`OpenError::SchemaVersion`].
     pub fn open_in_memory() -> Result<Self, OpenError> {
         let connection = Connection::open_in_memory()
             .map_err(DatabaseError::during("open in-memory database"))?;
@@ -129,8 +131,9 @@ impl<C: Handle> Store<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error for unsupported or malformed digests, query failures, or malformed
-    /// persisted values.
+    /// Returns [`Error::UnsupportedDigestAlgorithm`], [`Error::UndecodableDigest`], or
+    /// [`Error::InvalidDigestLength`] for a digest this index cannot store, [`Error::Database`]
+    /// for a query failure, and a `Malformed*` variant for a row this crate did not write.
     pub fn lookup_payload(&self, digest: &LabelledDigest) -> Result<Option<RevisitTarget>, Error> {
         lookup_payload(self.connection(), digest)
     }
@@ -139,21 +142,26 @@ impl<C: Handle> Store<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid input or when SQLite cannot write the row.
+    /// Returns [`Error::UnsupportedDigestAlgorithm`], [`Error::UndecodableDigest`], or
+    /// [`Error::InvalidDigestLength`] for a digest this index cannot store,
+    /// [`Error::IntegerOutOfRange`] for a payload length SQLite cannot hold, and
+    /// [`Error::Database`] for a write failure.
     pub fn insert_payload(&self, target: &RevisitTarget) -> Result<bool, Error> {
         insert_payload(self.connection(), target)
     }
 
-    /// Find resource state within the transaction.
+    /// Find the stored conditional-request state for `key`.
     ///
     /// # Errors
     ///
-    /// Returns an error when the query fails or persisted state is malformed.
+    /// Returns [`Error::Database`] for a query failure, [`Error::IncompleteDigest`] when only one
+    /// of the two digest columns is populated, and a digest or `Malformed*` variant for a row
+    /// this crate did not write.
     pub fn lookup_resource(&self, key: &ResourceKey) -> Result<Option<ResourceState>, Error> {
         lookup_resource(self.connection(), key)
     }
 
-    /// Apply a resource-state update within the transaction.
+    /// Apply a resource-state update.
     ///
     /// # Returns
     ///
@@ -161,7 +169,9 @@ impl<C: Handle> Store<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid digest data or a SQLite query failure.
+    /// Returns [`Error::UnsupportedDigestAlgorithm`], [`Error::UndecodableDigest`], or
+    /// [`Error::InvalidDigestLength`] for a digest this index cannot store, and
+    /// [`Error::Database`] for a write failure.
     pub fn update_resource(
         &self,
         key: &ResourceKey,
@@ -178,7 +188,7 @@ impl Transaction<'_> {
     ///
     /// # Errors
     ///
-    /// Returns an error when either database fails to read or write a row.
+    /// Returns an error when SQLite cannot read a row from `source` or write it here.
     pub fn merge_from(&self, source: &Index) -> Result<(), DatabaseError> {
         copy_rows(
             source.connection(),

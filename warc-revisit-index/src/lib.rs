@@ -1,6 +1,8 @@
-//! Persistent crawl state derived from WARC records.
+//! A revisit index derived from WARC records.
 //!
-//! This crate maintains two deliberately separate indexes in one SQLite database:
+//! Everything here exists to support revisit records: to decide whether a capture may be written
+//! as one, and to name the record it refers back to. The index keeps two deliberately separate
+//! tables in one SQLite database:
 //!
 //! - The payload index maps a digest to the canonical payload-bearing WARC record: the
 //!   `WARC-Refers-To` target of any revisit, whether an `identical-payload-digest` revisit found
@@ -9,7 +11,9 @@
 //!   digest of its prior representation. The validators drive conditional requests; the digest
 //!   leads, through the payload index, to the record a `server-not-modified` revisit refers to.
 //!
-//! The database is derived, rebuildable state; WARC files remain the source of truth. This crate
+//! The index is derived, rebuildable state; WARC files remain the source of truth. A database
+//! written by an incompatible schema version is not migrated: delete it and index the records
+//! again. This crate
 //! is intentionally unaware of WACZ. A caller may ingest records from standalone WARC files,
 //! WARC streams extracted from WACZ packages, or any other source.
 //!
@@ -61,7 +65,7 @@ pub struct Store<C> {
     connection: C,
 }
 
-/// A persistent payload and conditional-request state index.
+/// A revisit index held in a SQLite database.
 pub type Index = Store<Connection>;
 
 /// A bulk indexing transaction.
@@ -92,14 +96,16 @@ impl DatabaseError {
     }
 }
 
-/// An error opening the crawl-state database.
+/// An error opening the revisit index.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     /// SQLite could not open, configure, or initialize the database.
     #[error(transparent)]
     Database(#[from] DatabaseError),
     /// The database was created by an incompatible schema version.
-    #[error("unsupported crawl-state schema version {found}; expected {expected}")]
+    ///
+    /// The index is derived state and is never migrated; delete the database and rebuild it.
+    #[error("unsupported revisit index schema version {found}; expected {expected}")]
     SchemaVersion {
         /// The version understood by this crate.
         expected: u32,
@@ -108,7 +114,7 @@ pub enum OpenError {
     },
 }
 
-/// An error querying or updating the crawl-state database.
+/// An error querying or updating the revisit index.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A SQLite operation failed.
