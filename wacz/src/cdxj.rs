@@ -1,11 +1,11 @@
 //! CDXJ models and WACZ-specific stream reading.
 //!
-//! The data model is provided by [`archivindex_cdx::cdxj`]. This module retains the stream reader
+//! The data model is provided by [`archivindex_cdx::format::cdxj`]. This module retains the stream reader
 //! because line-oriented I/O and source diagnostics are WACZ processing concerns.
 
 use std::io::BufRead;
 
-use archivindex_cdx::cdxj::Item;
+use archivindex_cdx::format::cdxj::{Error as ParseError, ParsedItem};
 
 use crate::LineContext;
 use crate::lines::Lines;
@@ -24,7 +24,7 @@ pub enum Error {
     },
     /// A standalone CDXJ item is invalid.
     #[error(transparent)]
-    Item(#[from] archivindex_cdx::cdxj::Error),
+    Item(#[from] ParseError),
 }
 
 /// The underlying failure for a line read by [`IndexReader`].
@@ -32,7 +32,7 @@ pub enum Error {
 pub enum InvalidLineSource {
     /// The line was read successfully but was not a valid CDXJ item.
     #[error(transparent)]
-    Item(#[from] archivindex_cdx::cdxj::Error),
+    Item(#[from] ParseError),
     /// The line-oriented input could not be read.
     #[error("failed to read CDXJ input")]
     Io(#[source] std::io::Error),
@@ -60,16 +60,18 @@ impl<R: BufRead> IndexReader<R> {
 }
 
 impl<R: BufRead> Iterator for IndexReader<R> {
-    type Item = Result<Item<'static>, Error>;
+    type Item = Result<ParsedItem<'static>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.lines.next_content() {
-            Ok(Some((context, line))) => Some(Item::parse(line).map(Item::into_owned).map_err(
-                |source| Error::InvalidLine {
-                    context,
-                    source: InvalidLineSource::Item(source),
-                },
-            )),
+            Ok(Some((context, line))) => Some(
+                ParsedItem::parse(line)
+                    .map(ParsedItem::into_owned)
+                    .map_err(|source| Error::InvalidLine {
+                        context,
+                        source: InvalidLineSource::Item(source),
+                    }),
+            ),
             Ok(None) => None,
             Err(error) => Some(Err(Error::InvalidLine {
                 context: error.context,

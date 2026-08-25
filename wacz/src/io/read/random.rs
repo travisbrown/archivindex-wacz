@@ -3,8 +3,8 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::{Range, RangeBounds};
 
-use archivindex_cdx::cdxj::{self, Item, ParsedFields};
-use archivindex_cdx::timestamp::Timestamp;
+use archivindex_cdx::format::cdxj::{self, ParsedFields, ParsedItem};
+use archivindex_cdx::model::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_warc::io::read::WarcReader;
@@ -27,7 +27,7 @@ pub struct Capture {
     /// The plain CDXJ index or `ZipNum` summary that produced this result.
     pub index_path: String,
     /// The matching CDXJ item.
-    pub item: Item<'static>,
+    pub item: ParsedItem<'static>,
 }
 
 /// One independently compressed block described by a `ZipNum` summary.
@@ -275,7 +275,7 @@ impl<R: Read + Seek> WaczReader<R> {
                     break;
                 }
 
-                let item = Item::parse(line)
+                let item = ParsedItem::parse(line)
                     .map_err(cdxj_io::Error::from)?
                     .into_owned();
                 if time_range.contains(&item.timestamp) {
@@ -340,7 +340,7 @@ impl<R: Read + Seek> WaczReader<R> {
             for line in text.lines().filter(|line| !line.is_empty()) {
                 if line_key(line).is_some_and(|found| keys.iter().any(|key| key.as_str() == found))
                 {
-                    let item = Item::parse(line)
+                    let item = ParsedItem::parse(line)
                         .map_err(cdxj_io::Error::from)?
                         .into_owned();
                     if time_range.contains(&item.timestamp) {
@@ -557,7 +557,7 @@ mod tests {
                 .single()
                 .unwrap()
                 .into(),
-            fields: cdxj::ConformingFields {
+            fields: cdxj::Fields {
                 url: Cow::Borrowed("https://example.com/"),
                 digest: Cow::Borrowed("sha256:00"),
                 mime: Cow::Borrowed("text/html"),
@@ -566,7 +566,7 @@ mod tests {
                 length: 10,
                 filename: Cow::Borrowed("data.warc"),
                 record_digest: None,
-                extra: archivindex_cdx::properties::ExtraProperties::default(),
+                extra: archivindex_cdx::model::properties::ExtraProperties::default(),
             },
         };
         let mut writer = crate::io::write::WaczWriter::new(Cursor::new(Vec::new()));

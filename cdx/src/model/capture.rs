@@ -2,13 +2,13 @@
 
 use std::borrow::Cow;
 
-use crate::field::Field;
-use crate::properties::ExtraProperties;
-use crate::timestamp::Timestamp;
+use crate::model::field::Field;
+use crate::model::properties::ExtraProperties;
+use crate::model::timestamp::Timestamp;
 
 /// A standard field in a CDX record is absent or malformed.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum CaptureError {
+pub enum Error {
     /// A field required for a capture model is absent.
     #[error("missing CDX field `{0}`")]
     Missing(&'static str),
@@ -145,9 +145,7 @@ pub(crate) fn present(value: &str) -> Option<&str> {
     (value != "-").then_some(value)
 }
 
-pub(crate) fn from_fields<'a>(
-    fields: &[(Field<'_>, Cow<'a, str>)],
-) -> Result<Capture<'a>, CaptureError> {
+pub(crate) fn from_fields<'a>(fields: &[(Field<'_>, Cow<'a, str>)]) -> Result<Capture<'a>, Error> {
     let key = required_value(fields, &Field::UrlKey, "urlkey")?;
     let timestamp = required_value(fields, &Field::Timestamp, "timestamp")?;
     let url = required_value(fields, &Field::Url, "url")?;
@@ -197,12 +195,12 @@ fn required_value<'a>(
     fields: &[(Field<'_>, Cow<'a, str>)],
     target: &Field<'_>,
     name: &'static str,
-) -> Result<Cow<'a, str>, CaptureError> {
+) -> Result<Cow<'a, str>, Error> {
     fields
         .iter()
         .find(|(field, _)| field == target)
         .and_then(|(_, value)| present(value).map(|_| value.clone()))
-        .ok_or(CaptureError::Missing(name))
+        .ok_or(Error::Missing(name))
 }
 
 fn optional_value<'a>(
@@ -219,15 +217,13 @@ fn parse_optional<T: std::str::FromStr>(
     fields: &[(Field<'_>, Cow<'_, str>)],
     target: &Field<'_>,
     name: &'static str,
-) -> Result<Option<T>, CaptureError> {
+) -> Result<Option<T>, Error> {
     optional_value(fields, target)
         .map(|value| value.parse().map_err(|_| invalid(name, value.as_ref())))
         .transpose()
 }
 
-fn location<'a>(
-    fields: &[(Field<'_>, Cow<'a, str>)],
-) -> Result<Option<Location<'a>>, CaptureError> {
+fn location<'a>(fields: &[(Field<'_>, Cow<'a, str>)]) -> Result<Option<Location<'a>>, Error> {
     let length = parse_optional(fields, &Field::OriginalLength, "orig.length")?;
     let offset = parse_optional(fields, &Field::OriginalOffset, "orig.offset")?;
     let filename = optional_value(fields, &Field::OriginalFilename);
@@ -240,8 +236,8 @@ fn location<'a>(
     )
 }
 
-fn invalid(field: &'static str, value: &str) -> CaptureError {
-    CaptureError::Invalid {
+fn invalid(field: &'static str, value: &str) -> Error {
+    Error::Invalid {
         field,
         value: value.to_owned(),
     }

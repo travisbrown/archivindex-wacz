@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::capture::{Capture, CaptureError};
-use crate::field::Field;
+use crate::model::capture::{self, Capture};
+use crate::model::field::Field;
 
 /// A classic CDX header or record is malformed.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -26,7 +26,7 @@ pub enum Error {
     },
     /// A record cannot be converted to the common capture model.
     #[error(transparent)]
-    Capture(#[from] CaptureError),
+    Capture(#[from] capture::Error),
 }
 
 /// A classic CDX legend and its delimiter.
@@ -185,7 +185,7 @@ impl<'a> Header<'a> {
                 (field, value.clone())
             })
             .collect::<Vec<_>>();
-        Ok(crate::capture::from_fields(&fields)?)
+        Ok(crate::model::capture::from_fields(&fields)?)
     }
 
     /// Format a record with this header's delimiter.

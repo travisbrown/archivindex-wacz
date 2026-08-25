@@ -11,8 +11,8 @@ use std::marker::PhantomData;
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 
-use crate::capture::{Capture, CaptureError};
-use crate::field::Field;
+use crate::model::capture::{self, Capture};
+use crate::model::field::Field;
 
 /// A CDX Server JSON document is structurally or semantically invalid.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -40,7 +40,7 @@ pub enum Error {
         record: usize,
         /// The invalid field.
         #[source]
-        source: CaptureError,
+        source: capture::Error,
     },
 }
 
@@ -106,7 +106,7 @@ impl<'a> Document<'a> {
                     .cloned()
                     .zip(values)
                     .collect::<Vec<_>>();
-                crate::capture::from_fields(&fields)
+                crate::model::capture::from_fields(&fields)
                     .map_err(|source| Error::Capture { record, source })
             })
             .collect::<Result<_, _>>()?;

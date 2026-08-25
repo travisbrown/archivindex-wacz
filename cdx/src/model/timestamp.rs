@@ -13,7 +13,7 @@ const MILLISECONDS_LENGTH: usize = 17;
 /// A CDX timestamp is malformed or names an invalid UTC instant.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid CDX timestamp: {0}")]
-pub struct TimestampError(pub String);
+pub struct Error(pub String);
 
 /// A 14- or 17-digit CDX timestamp (`YYYYmmddHHMMSS[sss]`, always UTC).
 ///
@@ -69,27 +69,27 @@ impl fmt::Display for Timestamp {
 }
 
 impl FromStr for Timestamp {
-    type Err = TimestampError;
+    type Err = Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         if !matches!(value.len(), SECONDS_LENGTH | MILLISECONDS_LENGTH)
             || !value.bytes().all(|byte| byte.is_ascii_digit())
         {
-            return Err(TimestampError(value.to_owned()));
+            return Err(Error(value.to_owned()));
         }
 
         let seconds = NaiveDateTime::parse_from_str(&value[..SECONDS_LENGTH], SECONDS_FORMAT)
-            .map_err(|_| TimestampError(value.to_owned()))?
+            .map_err(|_| Error(value.to_owned()))?
             .and_utc();
         // Chrono represents a leap second as second 59 plus at least one billion nanoseconds.
         if seconds.timestamp_subsec_nanos() >= 1_000_000_000 {
-            return Err(TimestampError(value.to_owned()));
+            return Err(Error(value.to_owned()));
         }
 
         if value.len() == MILLISECONDS_LENGTH {
             let milliseconds = value[SECONDS_LENGTH..]
                 .parse::<i64>()
-                .map_err(|_| TimestampError(value.to_owned()))?;
+                .map_err(|_| Error(value.to_owned()))?;
             Ok(Self::with_milliseconds(
                 seconds + chrono::TimeDelta::milliseconds(milliseconds),
             ))
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_precision_and_text_order() -> Result<(), TimestampError> {
+    fn preserves_precision_and_text_order() -> Result<(), Error> {
         let forms = [
             "20201007212235999",
             "20201007212236",

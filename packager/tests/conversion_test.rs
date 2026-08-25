@@ -369,7 +369,7 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
         .index("indexes/index.cdx")?
         .collect::<Result<Vec<_>, _>>()?;
     for item in &items {
-        assert!(archivindex_cdx::cdxj::ConformingItem::try_from(item).is_ok());
+        assert!(archivindex_cdx::format::cdxj::Item::try_from(item).is_ok());
     }
     let fields = |path: &str| {
         let url = format!("https://example.com/{path}");

@@ -150,12 +150,12 @@ pub enum Error {
     /// The package is missing one or more member classes required by WACZ.
     #[error("missing required WACZ members: {}", .0.join(", "))]
     MissingRequiredMembers(Vec<&'static str>),
-    /// An index entry omits normative CDXJ fields.
+    /// An index entry omits required CDXJ fields.
     #[error(transparent)]
-    NonconformingIndex(#[from] archivindex_cdx::cdxj::ConformanceError),
+    InvalidIndexFields(#[from] archivindex_cdx::format::cdxj::FieldsError),
     /// A CDXJ extension property duplicates a modeled field.
     #[error(transparent)]
-    CdxExtraProperty(#[from] archivindex_cdx::properties::ExtraPropertyError),
+    CdxExtraProperty(#[from] archivindex_cdx::model::properties::Error),
     /// An extension property duplicates a modeled JSON property.
     #[error(transparent)]
     ExtraProperty(#[from] crate::ExtraPropertyError),

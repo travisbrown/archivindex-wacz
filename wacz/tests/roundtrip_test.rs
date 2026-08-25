@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
 
-use archivindex_cdx::cdxj;
-use archivindex_cdx::properties::ExtraProperties as CdxExtraProperties;
-use archivindex_cdx::timestamp::Timestamp;
+use archivindex_cdx::format::cdxj;
+use archivindex_cdx::model::properties::ExtraProperties as CdxExtraProperties;
+use archivindex_cdx::model::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::digest::Sha256Digest;
@@ -45,8 +45,8 @@ fn capture_time() -> chrono::DateTime<Utc> {
 }
 
 /// Build a minimal CDXJ item for a URL captured at [`capture_time`].
-fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
-    Ok(cdxj::Item {
+fn item_for(url: &str) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::url::Error> {
+    Ok(cdxj::ParsedItem {
         key: Surt::from_url(url)?.into(),
         timestamp: capture_time().into(),
         fields: cdxj::ParsedFields {
@@ -63,17 +63,17 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Err
     })
 }
 
-fn conforming_items(
-    items: &[cdxj::Item<'static>],
-) -> Result<Vec<cdxj::ConformingItem<'static>>, cdxj::ConformanceError> {
-    items.iter().map(cdxj::ConformingItem::try_from).collect()
+fn required_items(
+    items: &[cdxj::ParsedItem<'static>],
+) -> Result<Vec<cdxj::Item<'static>>, cdxj::FieldsError> {
+    items.iter().map(cdxj::Item::try_from).collect()
 }
 
 /// Build a searchable item at a particular time without requiring a corresponding WARC record.
 fn item_at(
     url: &str,
     timestamp: chrono::DateTime<Utc>,
-) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
+) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.timestamp = timestamp.into();
     Ok(item)
@@ -84,7 +84,7 @@ fn resolvable_item(
     url: &str,
     filename: &'static str,
     length: u64,
-) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
+) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.fields.filename = Some(Cow::Borrowed(filename));
     item.fields.length = Some(length);
@@ -143,7 +143,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 
     let capture_time = capture_time();
 
-    let item = cdxj::Item {
+    let item = cdxj::ParsedItem {
         key: Surt::from_url(URL)?.into(),
         timestamp: capture_time.into(),
         fields: cdxj::ParsedFields {
@@ -159,7 +159,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
         },
     };
 
-    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
+    writer.add_index("index.cdx", [&cdxj::Item::try_from(&item)?])?;
 
     let page = Page {
         url: Cow::Borrowed(URL),
@@ -512,8 +512,8 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
-    let conforming = conforming_items(&items)?;
-    let mut lines = conforming
+    let required = required_items(&items)?;
+    let mut lines = required
         .iter()
         .map(|item| format!("{item}\n"))
         .collect::<Vec<_>>();
@@ -627,8 +627,8 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
     items[2].timestamp = Timestamp::with_milliseconds(second);
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-    let conforming = conforming_items(&items)?;
-    writer.add_index("index.cdx", &conforming)?;
+    let required = required_items(&items)?;
+    writer.add_index("index.cdx", &required)?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
@@ -789,8 +789,8 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
         .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-    let conforming = conforming_items(&items)?;
-    writer.add_index("index.cdx", &conforming)?;
+    let required = required_items(&items)?;
+    writer.add_index("index.cdx", &required)?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
@@ -826,8 +826,8 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
         item_at("https://www.example.com/page0", earlier)?,
         item_at("https://www.example.com/page1", earlier)?,
     ];
-    let conforming = conforming_items(&items)?;
-    let lines = conforming
+    let required = required_items(&items)?;
+    let lines = required
         .iter()
         .map(|item| format!("{item}\n"))
         .collect::<Vec<_>>();
@@ -857,7 +857,7 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
 /// `ZipNum` blocks are gzip members encoded at the configured gzip compression level.
 #[test]
 fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    let item = cdxj::Item::try_from(&item_for(URL)?)?;
     for (level, expected_xfl) in [(1, 4), (9, 2)] {
         let config = WriterConfig {
             index_format: IndexFormat::zipnum(),
@@ -884,7 +884,7 @@ fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error
 /// only its `!meta` line.
 #[test]
 fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let no_items = std::iter::empty::<&cdxj::ConformingItem<'static>>();
+    let no_items = std::iter::empty::<&cdxj::Item<'static>>();
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_index("index.cdx", no_items.clone())?;
@@ -944,7 +944,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
-    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
+    writer.add_index("index.cdx", [&cdxj::Item::try_from(&item)?])?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
@@ -1213,23 +1213,23 @@ fn writer_validates_warc_names_not_content() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn normal_index_writing_requires_normative_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn normal_index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Error>> {
     let mut item = item_for(URL)?;
-    let mut conforming = cdxj::ConformingItem::try_from(&item)?;
-    conforming
+    let mut required = cdxj::Item::try_from(&item)?;
+    required
         .fields
         .extra
         .insert("offset".to_owned(), serde_json::Value::from(1));
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.add_index("index.cdx", [&conforming]),
+        writer.add_index("index.cdx", [&required]),
         Err(writer::Error::CdxExtraProperty(_))
     ));
 
     item.fields.digest = None;
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
 
-    assert!(cdxj::ConformingItem::try_from(&item).is_err());
+    assert!(cdxj::Item::try_from(&item).is_err());
     writer.add_index_lenient("index.cdx", [&item])?;
     Ok(())
 }
@@ -1764,8 +1764,8 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
-    let conforming = conforming_items(&items)?;
-    writer.add_index("index.cdx", &conforming)?;
+    let required = required_items(&items)?;
+    writer.add_index("index.cdx", &required)?;
     writer.add_warc("data.warc", warc.as_slice())?;
     let mut wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
@@ -1816,8 +1816,8 @@ fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(items[0].key, "com,example)/dir");
     assert_eq!(items[1].key, "com,example)/dir/");
 
-    let conforming = conforming_items(&items)?;
-    let mut lines = conforming
+    let required = required_items(&items)?;
+    let mut lines = required
         .iter()
         .map(|item| format!("{item}\n"))
         .collect::<Vec<_>>();

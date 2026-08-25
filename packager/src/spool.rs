@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::io::Seek;
 
-use archivindex_cdx::cdxj;
+use archivindex_cdx::format::cdxj;
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::io::write::index::IndexSpool;
 use archivindex_wacz::pages::{Page, PageListHeader, PageListWriter};
@@ -143,11 +143,7 @@ impl<'txn> ConversionSpool<'txn> {
     }
 
     /// Record an indexed capture and the page it may become.
-    pub fn add_capture(
-        &mut self,
-        item: &cdxj::ConformingItem<'_>,
-        page: &PageDraft,
-    ) -> Result<(), Error> {
+    pub fn add_capture(&mut self, item: &cdxj::Item<'_>, page: &PageDraft) -> Result<(), Error> {
         self.index.push(item)?;
         let bytes = serde_json::to_vec(page)?;
         self.pages.insert(self.captures, bytes.as_slice()).spool()?;

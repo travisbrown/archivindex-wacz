@@ -11,7 +11,7 @@ use support::{plain, request_header, request_path, serve_with};
 use archivindex_archiver::client::Archiver;
 use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Operator, Session};
-use archivindex_cdx::cdxj::ParsedFields;
+use archivindex_cdx::format::cdxj::ParsedFields;
 use archivindex_packager::WarcToWacz;
 use archivindex_surt::Surt;
 use archivindex_wacz::digest::Sha256Digest;

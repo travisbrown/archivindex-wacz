@@ -10,9 +10,9 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use archivindex_cdx::cdxj;
-use archivindex_cdx::properties::ExtraProperties;
-use archivindex_cdx::timestamp::Timestamp;
+use archivindex_cdx::format::cdxj;
+use archivindex_cdx::model::properties::ExtraProperties;
+use archivindex_cdx::model::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
@@ -457,7 +457,7 @@ fn capture_parts(
     generator: Option<&mut (dyn PageTitleGenerator + '_)>,
     warc_name: &str,
     written: &Written,
-) -> Result<Option<(cdxj::ConformingItem<'static>, PageDraft)>, SkipReason> {
+) -> Result<Option<(cdxj::Item<'static>, PageDraft)>, SkipReason> {
     let (message, revisit) = match record {
         Record::Response { body, .. } => (body.as_slice(), false),
         Record::Revisit { body, .. } => (body.as_slice(), true),
@@ -525,7 +525,7 @@ fn capture_parts(
     let item = cdxj::Item {
         key: Cow::Owned(Cow::from(canonical.surt()).into_owned()),
         timestamp: Timestamp::with_milliseconds(date),
-        fields: cdxj::ConformingFields {
+        fields: cdxj::Fields {
             url: Cow::Owned(url),
             digest: Cow::Owned(digest),
             mime: Cow::Owned(mime),

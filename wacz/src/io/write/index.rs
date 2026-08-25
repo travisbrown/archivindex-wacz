@@ -7,8 +7,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 use std::path::PathBuf;
 
-use archivindex_cdx::cdxj;
-use archivindex_cdx::timestamp::Timestamp;
+use archivindex_cdx::format::cdxj;
+use archivindex_cdx::model::timestamp::Timestamp;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
@@ -21,7 +21,7 @@ use crate::{GZIP_EXTENSION, INDEXES_PREFIX};
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write a sorted CDXJ index in the configured plain or `ZipNum` format.
-    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
+    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
         &mut self,
         name: &str,
         items: I,
@@ -29,8 +29,8 @@ impl<W: Write + Seek> WaczWriter<W> {
         self.write_index(name, items, |item| Ok(item.fields.validate()?))
     }
 
-    /// Write an index while explicitly allowing entries that omit normative CDXJ fields.
-    pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
+    /// Write an index while allowing entries that omit required CDXJ fields.
+    pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::ParsedItem<'a>>>(
         &mut self,
         name: &str,
         items: I,

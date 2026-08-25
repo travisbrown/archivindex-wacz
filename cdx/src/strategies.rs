@@ -3,11 +3,11 @@ use std::borrow::Cow;
 use chrono::{TimeZone as _, Utc};
 use proptest::prelude::*;
 
-use crate::cdxj::{Item, ParsedFields};
-use crate::classic::{Header, Record};
-use crate::json::Document;
-use crate::properties::ExtraProperties;
-use crate::timestamp::Timestamp;
+use crate::format::cdxj::{ParsedFields, ParsedItem};
+use crate::format::classic::{Header, Record};
+use crate::format::json::Document;
+use crate::model::properties::ExtraProperties;
+use crate::model::timestamp::Timestamp;
 
 fn text() -> impl Strategy<Value = String> {
     "[A-Za-z0-9._~:/(),-]{1,32}"
@@ -46,7 +46,7 @@ fn cdxj_text_round_trips(
     #[strategy(proptest::option::of(any::<u64>()))] offset: Option<u64>,
     #[strategy(proptest::option::of(any::<u64>()))] length: Option<u64>,
 ) {
-    let item = Item {
+    let item = ParsedItem {
         key: Cow::Owned(key),
         timestamp: captured_at,
         fields: ParsedFields {
@@ -62,7 +62,7 @@ fn cdxj_text_round_trips(
         },
     };
     let line = item.to_string();
-    let parsed = Item::parse(&line).unwrap().into_owned();
+    let parsed = ParsedItem::parse(&line).unwrap().into_owned();
     prop_assert_eq!(parsed, item);
 }
 

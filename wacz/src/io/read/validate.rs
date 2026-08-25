@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 
-use archivindex_cdx::cdxj::Item;
-use archivindex_cdx::timestamp::Timestamp;
+use archivindex_cdx::format::cdxj::ParsedItem;
+use archivindex_cdx::model::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
@@ -667,7 +667,7 @@ impl<R: Read + Seek> WaczReader<R> {
         };
 
         for line in text.lines().filter(|line| !line.is_empty()) {
-            let Ok(item) = Item::parse(line) else {
+            let Ok(item) = ParsedItem::parse(line) else {
                 continue;
             };
 
@@ -689,14 +689,17 @@ impl<R: Read + Seek> WaczReader<R> {
 }
 
 /// Check the searchable and descriptive fields of a CDXJ item against its record.
-fn capture_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Result<(), String> {
+fn capture_matches(item: &ParsedItem<'_>, record: &Record<NoExtension>) -> Result<(), String> {
     capture_identity_matches(item, record)?;
     capture_http_metadata_matches(item, record)?;
     capture_digest_matches(item, record)
 }
 
 /// Check the URL, search key, and capture time.
-fn capture_identity_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Result<(), String> {
+fn capture_identity_matches(
+    item: &ParsedItem<'_>,
+    record: &Record<NoExtension>,
+) -> Result<(), String> {
     let target_uri = record.target_uri().ok_or_else(|| {
         format!(
             "located WARC {} record has no target URI",
@@ -741,7 +744,7 @@ fn capture_identity_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Re
 
 /// Check the status and payload type against the captured HTTP response.
 fn capture_http_metadata_matches(
-    item: &Item<'_>,
+    item: &ParsedItem<'_>,
     record: &Record<NoExtension>,
 ) -> Result<(), String> {
     let (message, revisit) = match record {
@@ -799,7 +802,10 @@ fn capture_http_metadata_matches(
 }
 
 /// Check the payload digest, computing it when the WARC header omits it.
-fn capture_digest_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Result<(), String> {
+fn capture_digest_matches(
+    item: &ParsedItem<'_>,
+    record: &Record<NoExtension>,
+) -> Result<(), String> {
     if let Some(digest) = item.fields.digest.as_deref() {
         let expected = LabelledDigest::parse(digest.as_bytes())
             .map_err(|error| format!("digest `{digest}` is invalid: {error}"))?;

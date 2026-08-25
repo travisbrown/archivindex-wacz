@@ -4,9 +4,9 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::capture::{Capture, CaptureError, Location};
-use crate::properties::{ExtraProperties, ExtraPropertyError};
-use crate::timestamp::{Timestamp, TimestampError};
+use crate::model::capture::{self, Capture, Location};
+use crate::model::properties::{self, ExtraProperties};
+use crate::model::timestamp::{self, Timestamp};
 
 /// A CDXJ line cannot be parsed.
 #[derive(Debug, thiserror::Error)]
@@ -16,7 +16,7 @@ pub enum Error {
     Truncated(String),
     /// The timestamp is invalid.
     #[error(transparent)]
-    InvalidTimestamp(#[from] TimestampError),
+    InvalidTimestamp(#[from] timestamp::Error),
     /// The JSON field object is invalid.
     #[error("invalid CDXJ field block")]
     InvalidFields(#[source] serde_json::Error),
@@ -24,7 +24,7 @@ pub enum Error {
 
 /// A single CDXJ line.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Item<'a, F = ParsedFields<'a>> {
+pub struct Item<'a, F = Fields<'a>> {
     /// The searchable URL key.
     pub key: Cow<'a, str>,
     /// The capture timestamp.
@@ -55,7 +55,7 @@ impl<'a> Item<'a, ParsedFields<'a>> {
 
     /// Detach this item from its input.
     #[must_use]
-    pub fn into_owned(self) -> Item<'static, ParsedFields<'static>> {
+    pub fn into_owned(self) -> ParsedItem<'static> {
         Item {
             key: Cow::Owned(self.key.into_owned()),
             timestamp: self.timestamp,
@@ -64,11 +64,14 @@ impl<'a> Item<'a, ParsedFields<'a>> {
     }
 }
 
-impl FromStr for Item<'static> {
+/// A CDXJ item parsed without requiring every standard field.
+pub type ParsedItem<'a> = Item<'a, ParsedFields<'a>>;
+
+impl FromStr for ParsedItem<'static> {
     type Err = Error;
 
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        let item: Item<'_> = Item::parse(line)?;
+        let item: ParsedItem<'_> = ParsedItem::parse(line)?;
         Ok(item.into_owned())
     }
 }
@@ -80,17 +83,14 @@ impl<F: serde::Serialize> fmt::Display for Item<'_, F> {
     }
 }
 
-/// A CDXJ item whose required fields are present by construction.
-pub type ConformingItem<'a> = Item<'a, ConformingFields<'a>>;
+impl<'a> TryFrom<&ParsedItem<'a>> for Item<'a> {
+    type Error = FieldsError;
 
-impl<'a> TryFrom<&Item<'a>> for ConformingItem<'a> {
-    type Error = ConformanceError;
-
-    fn try_from(item: &Item<'a>) -> Result<Self, Self::Error> {
+    fn try_from(item: &ParsedItem<'a>) -> Result<Self, Self::Error> {
         Ok(Self {
             key: item.key.clone(),
             timestamp: item.timestamp,
-            fields: ConformingFields::try_from(&item.fields)?,
+            fields: Fields::try_from(&item.fields)?,
         })
     }
 }
@@ -182,7 +182,7 @@ impl ParsedFields<'_> {
 
 /// A CDXJ field object with all fields required by CDXJ 0.1.0.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub struct ConformingFields<'a> {
+pub struct Fields<'a> {
     /// The original URL.
     pub url: Cow<'a, str>,
     /// The response payload digest.
@@ -208,11 +208,11 @@ pub struct ConformingFields<'a> {
     pub extra: ExtraProperties,
 }
 
-impl ConformingFields<'_> {
+impl Fields<'_> {
     /// Detach this field object from its input.
     #[must_use]
-    pub fn into_owned(self) -> ConformingFields<'static> {
-        ConformingFields {
+    pub fn into_owned(self) -> Fields<'static> {
+        Fields {
             url: owned(self.url),
             digest: owned(self.digest),
             mime: owned(self.mime),
@@ -226,13 +226,13 @@ impl ConformingFields<'_> {
     }
 
     /// Check that extension properties do not duplicate modeled properties.
-    pub fn validate(&self) -> Result<(), ExtraPropertyError> {
+    pub fn validate(&self) -> Result<(), properties::Error> {
         validate_extra(&self.extra)
     }
 }
 
-impl<'a> From<ConformingFields<'a>> for ParsedFields<'a> {
-    fn from(fields: ConformingFields<'a>) -> Self {
+impl<'a> From<Fields<'a>> for ParsedFields<'a> {
+    fn from(fields: Fields<'a>) -> Self {
         Self {
             url: fields.url,
             digest: Some(fields.digest),
@@ -247,24 +247,19 @@ impl<'a> From<ConformingFields<'a>> for ParsedFields<'a> {
     }
 }
 
-/// Required fields absent from a lenient CDXJ field object.
+/// A lenient CDXJ field object cannot become a required-field object.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("missing required CDXJ fields: {}", .0.join(", "))]
-pub struct MissingFields(pub Vec<&'static str>);
-
-/// A lenient CDXJ field object cannot be emitted as conforming CDXJ.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum ConformanceError {
+pub enum FieldsError {
     /// Required properties are absent.
-    #[error(transparent)]
-    Missing(#[from] MissingFields),
+    #[error("missing required CDXJ fields: {}", .0.join(", "))]
+    Missing(Vec<&'static str>),
     /// An extension property duplicates a modeled property.
     #[error(transparent)]
-    Extra(#[from] ExtraPropertyError),
+    Extra(#[from] properties::Error),
 }
 
-impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
-    type Error = ConformanceError;
+impl<'a> TryFrom<&ParsedFields<'a>> for Fields<'a> {
+    type Error = FieldsError;
 
     fn try_from(fields: &ParsedFields<'a>) -> Result<Self, Self::Error> {
         let mut missing = Vec::new();
@@ -287,7 +282,7 @@ impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
             missing.push("filename");
         }
         if !missing.is_empty() {
-            return Err(MissingFields(missing).into());
+            return Err(FieldsError::Missing(missing));
         }
         validate_extra(&fields.extra)?;
 
@@ -305,12 +300,12 @@ impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
     }
 }
 
-impl<'a> TryFrom<Item<'a>> for Capture<'a> {
-    type Error = CaptureError;
+impl<'a> TryFrom<ParsedItem<'a>> for Capture<'a> {
+    type Error = capture::Error;
 
-    fn try_from(item: Item<'a>) -> Result<Self, Self::Error> {
+    fn try_from(item: ParsedItem<'a>) -> Result<Self, Self::Error> {
         let length = match item.fields.length {
-            Some(value) => Some(i64::try_from(value).map_err(|_| CaptureError::Invalid {
+            Some(value) => Some(i64::try_from(value).map_err(|_| capture::Error::Invalid {
                 field: "length",
                 value: value.to_string(),
             })?),
@@ -342,7 +337,7 @@ pub fn split_prefix(line: &str) -> Option<(&str, &str)> {
     Some((&line[..json], &line[json + 1..]))
 }
 
-fn validate_extra(extra: &ExtraProperties) -> Result<(), ExtraPropertyError> {
+fn validate_extra(extra: &ExtraProperties) -> Result<(), properties::Error> {
     extra.validate(
         "CDXJ fields",
         &[
@@ -381,8 +376,8 @@ impl bounded_static::IntoBoundedStatic for ParsedFields<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
-impl bounded_static::ToBoundedStatic for ConformingFields<'_> {
-    type Static = ConformingFields<'static>;
+impl bounded_static::ToBoundedStatic for Fields<'_> {
+    type Static = Fields<'static>;
 
     fn to_static(&self) -> Self::Static {
         self.clone().into_owned()
@@ -390,8 +385,8 @@ impl bounded_static::ToBoundedStatic for ConformingFields<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
-impl bounded_static::IntoBoundedStatic for ConformingFields<'_> {
-    type Static = ConformingFields<'static>;
+impl bounded_static::IntoBoundedStatic for Fields<'_> {
+    type Static = Fields<'static>;
 
     fn into_static(self) -> Self::Static {
         self.into_owned()
@@ -417,8 +412,8 @@ impl bounded_static::IntoBoundedStatic for Item<'_, ParsedFields<'_>> {
 }
 
 #[cfg(feature = "bounded-static")]
-impl bounded_static::ToBoundedStatic for Item<'_, ConformingFields<'_>> {
-    type Static = Item<'static, ConformingFields<'static>>;
+impl bounded_static::ToBoundedStatic for Item<'_, Fields<'_>> {
+    type Static = Item<'static, Fields<'static>>;
 
     fn to_static(&self) -> Self::Static {
         Item {
@@ -430,8 +425,8 @@ impl bounded_static::ToBoundedStatic for Item<'_, ConformingFields<'_>> {
 }
 
 #[cfg(feature = "bounded-static")]
-impl bounded_static::IntoBoundedStatic for Item<'_, ConformingFields<'_>> {
-    type Static = Item<'static, ConformingFields<'static>>;
+impl bounded_static::IntoBoundedStatic for Item<'_, Fields<'_>> {
+    type Static = Item<'static, Fields<'static>>;
 
     fn into_static(self) -> Self::Static {
         Item {
@@ -454,7 +449,7 @@ mod tests {
 
     #[test]
     fn parses_spec_shape() -> Result<(), Box<dyn std::error::Error>> {
-        let item = Item::parse(EXAMPLE)?;
+        let item = ParsedItem::parse(EXAMPLE)?;
         assert_eq!(item.key, "com,example)/");
         assert_eq!(item.fields.status, Some(200));
         assert_eq!(item.fields.offset, Some(784));
@@ -464,7 +459,7 @@ mod tests {
 
     #[test]
     fn accepts_numeric_fields_and_extensions() -> Result<(), Box<dyn std::error::Error>> {
-        let item = Item::parse(
+        let item = ParsedItem::parse(
             "com,example)/ 20201007212236 {\"url\":\"https://example.com/\",\"offset\":784,\"custom\":true}",
         )?;
         assert_eq!(item.fields.offset, Some(784));
@@ -475,25 +470,26 @@ mod tests {
 
     #[test]
     fn display_round_trips() -> Result<(), Box<dyn std::error::Error>> {
-        let item = Item::parse(EXAMPLE)?;
-        assert_eq!(Item::parse(&item.to_string())?, item);
+        let item = ParsedItem::parse(EXAMPLE)?;
+        assert_eq!(ParsedItem::parse(&item.to_string())?, item);
         Ok(())
     }
 
     #[test]
-    fn conforming_fields_report_all_missing_properties() -> Result<(), Error> {
-        let item = Item::parse("com,example)/ 20201007212236 {\"url\":\"https://example.com/\"}")?;
+    fn required_fields_report_all_missing_properties() -> Result<(), Error> {
+        let item =
+            ParsedItem::parse("com,example)/ 20201007212236 {\"url\":\"https://example.com/\"}")?;
         assert_eq!(
-            ConformingFields::try_from(&item.fields),
-            Err(ConformanceError::Missing(MissingFields(vec![
+            Fields::try_from(&item.fields),
+            Err(FieldsError::Missing(vec![
                 "digest", "mime", "status", "offset", "length", "filename"
-            ])))
+            ]))
         );
         Ok(())
     }
 
     #[test]
-    fn conforming_fields_reject_extension_collisions() {
+    fn required_fields_reject_extension_collisions() {
         let mut fields = ParsedFields {
             url: "https://example.com/".into(),
             digest: Some("sha1:test".into()),
@@ -508,8 +504,8 @@ mod tests {
         fields.extra.insert("offset".to_owned(), 1.into());
 
         assert!(matches!(
-            ConformingFields::try_from(&fields),
-            Err(ConformanceError::Extra(ExtraPropertyError { property, .. }))
+            Fields::try_from(&fields),
+            Err(FieldsError::Extra(properties::Error { property, .. }))
                 if property == "offset"
         ));
     }

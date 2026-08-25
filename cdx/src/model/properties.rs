@@ -8,7 +8,7 @@ pub struct ExtraProperties(serde_json::Map<String, serde_json::Value>);
 /// An extension property duplicates a modeled property.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("extension property `{property}` duplicates a modeled property of {model}")]
-pub struct ExtraPropertyError {
+pub struct Error {
     /// The model containing the extension map.
     pub model: &'static str,
     /// The duplicated property name.
@@ -17,16 +17,12 @@ pub struct ExtraPropertyError {
 
 impl ExtraProperties {
     /// Check that none of the extension keys duplicate a modeled property.
-    pub fn validate(
-        &self,
-        model: &'static str,
-        reserved: &[&str],
-    ) -> Result<(), ExtraPropertyError> {
+    pub fn validate(&self, model: &'static str, reserved: &[&str]) -> Result<(), Error> {
         reserved
             .iter()
             .find(|property| self.contains_key(**property))
             .map_or(Ok(()), |property| {
-                Err(ExtraPropertyError {
+                Err(Error {
                     model,
                     property: (*property).to_owned(),
                 })
