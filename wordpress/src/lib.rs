@@ -83,6 +83,8 @@ pub struct CommentCaptureProcessor {
     first_date: Option<NaiveDate>,
     last_date: Option<NaiveDate>,
     sweep: Sweep,
+    /// Page after which this processor resumed, when [`resume_after`](Self::resume_after) was used.
+    resumed_after_page: Option<usize>,
     force_second_sweep: bool,
     complete: bool,
 }
@@ -98,9 +100,14 @@ struct Sweep {
 
 impl Sweep {
     const fn first() -> Self {
+        Self::starting_at(1)
+    }
+
+    /// Begin a first sweep partway through the snapshot, resuming an earlier run.
+    const fn starting_at(page: usize) -> Self {
         Self {
             number: 1,
-            page: 1,
+            page,
             total: None,
             previous_total: None,
             headers_consistent: true,
@@ -108,10 +115,11 @@ impl Sweep {
         }
     }
 
-    fn next(&self) -> Self {
+    /// Begin a validation sweep, which re-traverses the same pages this sweep covered.
+    fn next(&self, page: usize) -> Self {
         Self {
             number: self.number + 1,
-            page: 1,
+            page,
             total: None,
             previous_total: self.total.or(self.previous_total),
             headers_consistent: true,
@@ -136,10 +144,47 @@ impl CommentCaptureProcessor {
 
     /// Produce the first comments URL for this processor's saved snapshot cutoff.
     ///
-    /// The request asks for the first page in ascending comment-ID order.
+    /// Normally the request asks for page one in ascending comment-ID order. After
+    /// [`resume_after`](Self::resume_after), it asks for the page following the supplied URI.
     #[must_use]
     pub fn first_comment_url(&self) -> String {
-        self.comment_url(1)
+        self.comment_url(self.sweep.page)
+    }
+
+    /// Resume after the last successfully captured comments URI from an earlier session.
+    ///
+    /// The URI must target this processor's comments endpoint and carry the standard ascending-ID
+    /// pagination parameters. Its `before` value restores the earlier session's fixed snapshot
+    /// cutoff, so the resumed run continues through the same snapshot, and the following page
+    /// becomes this processor's first request.
+    pub fn resume_after(
+        mut self,
+        last_successful_uri: impl AsRef<str>,
+    ) -> Result<Self, CommentResumeError> {
+        let mut uri = Url::parse(last_successful_uri.as_ref())?;
+        if uri.fragment().is_some() {
+            return Err(CommentResumeError::InvalidParameter("fragment"));
+        }
+
+        let parameters = ResumeParameters::parse(&uri)?;
+        uri.set_query(None);
+        if uri != self.endpoint {
+            return Err(CommentResumeError::Endpoint {
+                expected: self.endpoint.to_string(),
+                actual: uri.to_string(),
+            });
+        }
+
+        self.before = parameters.before;
+        self.resumed_after_page = Some(parameters.page);
+        self.sweep = Sweep::starting_at(
+            parameters
+                .page
+                .checked_add(1)
+                .ok_or(CommentResumeError::PageOverflow)?,
+        );
+
+        Ok(self)
     }
 
     /// Construct a processor with an explicit snapshot cutoff.
@@ -162,6 +207,7 @@ impl CommentCaptureProcessor {
             first_date: None,
             last_date: None,
             sweep: Sweep::first(),
+            resumed_after_page: None,
             force_second_sweep: false,
             complete: false,
         })
@@ -183,7 +229,16 @@ impl CommentCaptureProcessor {
             first_date: self.first_date,
             last_date: self.last_date,
             complete: self.complete,
+            resumed_after_page: self.resumed_after_page,
         })
+    }
+
+    /// The first page of a sweep: page one, or the page following a resume point.
+    const fn start_page(&self) -> usize {
+        match self.resumed_after_page {
+            Some(page) => page + 1,
+            None => 1,
+        }
     }
 
     /// Build one page URL, retaining the snapshot cutoff on every request.
@@ -205,8 +260,10 @@ impl CommentCaptureProcessor {
         let count_is_plausible = total.is_some_and(|total| self.seen_ids.len() <= total);
         let snapshot_is_consistent = self.sweep.headers_consistent && count_is_plausible;
         if self.sweep.number == 1 && (self.force_second_sweep || !snapshot_is_consistent) {
-            self.sweep = self.sweep.next();
-            return Inspection::recapture(self.comment_url(1));
+            // A resumed run validates the pages it actually covered, not the whole snapshot.
+            let start = self.start_page();
+            self.sweep = self.sweep.next(start);
+            return Inspection::recapture(self.comment_url(start));
         }
 
         if !snapshot_is_consistent {
@@ -241,8 +298,104 @@ impl CommentCaptureProcessor {
     }
 }
 
+/// An invalid URI supplied to [`CommentCaptureProcessor::resume_after`].
+#[derive(Debug, thiserror::Error)]
+pub enum CommentResumeError {
+    /// The supplied value is not a URL.
+    #[error("invalid resume URI: {0}")]
+    Url(#[from] url::ParseError),
+    /// The URI does not target the configured site's comments endpoint.
+    #[error("resume URI targets {actual}, but the configured comments endpoint is {expected}")]
+    Endpoint {
+        /// Expected comments endpoint.
+        expected: String,
+        /// Endpoint found in the resume URI.
+        actual: String,
+    },
+    /// A required query parameter is missing or invalid, or an unsupported parameter is present.
+    #[error("resume URI has a missing, invalid, duplicate, or unsupported {0}")]
+    InvalidParameter(&'static str),
+    /// The page number cannot be incremented.
+    #[error("resume URI page number is too large")]
+    PageOverflow,
+}
+
+/// The pagination state recovered from a resume URI.
+struct ResumeParameters {
+    before: DateTime<Utc>,
+    page: usize,
+}
+
+impl ResumeParameters {
+    /// Read the query, requiring exactly the parameters [`CommentCaptureProcessor`] itself sends.
+    ///
+    /// Anything else would describe a different traversal, whose page numbers this processor cannot
+    /// continue from.
+    fn parse(uri: &Url) -> Result<Self, CommentResumeError> {
+        let mut before = None;
+        let mut page = None;
+        let mut orderby = None;
+        let mut order = None;
+        let mut per_page = None;
+
+        for (name, value) in uri.query_pairs() {
+            let slot = match name.as_ref() {
+                "before" => &mut before,
+                "page" => &mut page,
+                "orderby" => &mut orderby,
+                "order" => &mut order,
+                "per_page" => &mut per_page,
+                _ => return Err(CommentResumeError::InvalidParameter("query parameter")),
+            };
+            // A repeated parameter leaves which value the server used ambiguous.
+            if slot.replace(value).is_some() {
+                return Err(CommentResumeError::InvalidParameter("query parameter"));
+            }
+        }
+
+        let before = before
+            .as_deref()
+            .ok_or(CommentResumeError::InvalidParameter("before parameter"))?;
+        let before = DateTime::parse_from_rfc3339(before)
+            .map_err(|_| CommentResumeError::InvalidParameter("before parameter"))?
+            .with_timezone(&Utc);
+        let page = page
+            .as_deref()
+            .ok_or(CommentResumeError::InvalidParameter("page parameter"))?
+            .parse::<usize>()
+            .ok()
+            .filter(|page| *page > 0)
+            .ok_or(CommentResumeError::InvalidParameter("page parameter"))?;
+
+        if orderby.as_deref() != Some("id") {
+            return Err(CommentResumeError::InvalidParameter("orderby parameter"));
+        }
+        if order.as_deref() != Some("asc") {
+            return Err(CommentResumeError::InvalidParameter("order parameter"));
+        }
+        if per_page
+            .as_deref()
+            .and_then(|value| value.parse::<usize>().ok())
+            != Some(COMMENTS_PER_PAGE)
+        {
+            return Err(CommentResumeError::InvalidParameter("per_page parameter"));
+        }
+
+        Ok(Self { before, page })
+    }
+}
+
 impl CaptureProcessor for CommentCaptureProcessor {
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        // Cloudflare's managed challenge cannot be answered without a browser, and every further
+        // request would meet it too, so the traversal ends rather than failing page by page.
+        if capture.status == 403 && capture.header("cf-mitigated") == Some("challenge") {
+            return Inspection::error(
+                "Cloudflare requires an interactive browser challenge; browser-derived clearance \
+                 cookies are required",
+            );
+        }
+
         // A page can disappear between requests when deletions reduce the page count. Some
         // WordPress endpoints report that condition with this posts-controller error code; only
         // that specific 400 ends the sweep, while unrelated client errors fail the traversal.
@@ -346,6 +499,8 @@ pub struct CommentProgress {
     pub last_date: Option<NaiveDate>,
     /// Whether the processor completed a stable traversal of the snapshot.
     pub complete: bool,
+    /// Page after which this run resumed, when it did not begin at page one.
+    pub resumed_after_page: Option<usize>,
 }
 
 impl CommentProgress {
@@ -355,7 +510,9 @@ impl CommentProgress {
     /// difference ordinarily represents comments attached to posts the requester cannot read.
     #[must_use]
     pub const fn visibility_shortfall(self) -> Option<usize> {
-        if self.complete && self.downloaded < self.total {
+        // A resumed run downloads only the snapshot's tail, so the difference from the reported
+        // total says nothing about visibility.
+        if self.resumed_after_page.is_none() && self.complete && self.downloaded < self.total {
             Some(self.total - self.downloaded)
         } else {
             None
@@ -365,7 +522,17 @@ impl CommentProgress {
 
 impl std::fmt::Display for CommentProgress {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.visibility_shortfall().is_some() {
+        if let Some(page) = self.resumed_after_page {
+            write!(
+                formatter,
+                "Downloaded {} comments after page {page} (WordPress reported {} total",
+                self.downloaded, self.total
+            )?;
+            if let (Some(first), Some(last)) = (self.first_date, self.last_date) {
+                write!(formatter, "; {first} to {last}")?;
+            }
+            formatter.write_str(")")?;
+        } else if self.visibility_shortfall().is_some() {
             write!(formatter, "Downloaded {} visible comments", self.downloaded)?;
             write!(
                 formatter,
@@ -522,6 +689,107 @@ mod tests {
     }
 
     #[test]
+    fn resume_uri_restores_the_cutoff_and_starts_with_the_following_page() {
+        let mut processor = CommentCaptureProcessor::new("https://example.com/")
+            .expect("a processor")
+            .resume_after(
+                "https://example.com/wp-json/wp/v2/comments?\
+                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=8903&per_page=100",
+            )
+            .expect("a valid resume URI");
+
+        assert_eq!(
+            processor.first_comment_url(),
+            "https://example.com/wp-json/wp/v2/comments?\
+             before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=8904&per_page=100"
+        );
+
+        let payload = br#"[
+            {"id": 1, "date_gmt": "2026-08-19T13:00:00"},
+            {"id": 2, "date_gmt": "2026-08-19T13:01:00"}
+        ]"#;
+        let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 890302\r\nX-WP-TotalPages: 8904\r\n\r\n";
+        let inspection = processor.inspect(&capture(payload, response));
+        let progress = processor.progress().expect("reported progress");
+
+        assert_eq!(inspection.recaptures, [] as [String; 0]);
+        // The tail this run downloaded says nothing about the visibility of earlier pages.
+        assert_eq!(progress.visibility_shortfall(), None);
+        assert_eq!(
+            progress.to_string(),
+            "Downloaded 2 comments after page 8903 (WordPress reported 890302 total; \
+             2026-08-19 to 2026-08-19)"
+        );
+    }
+
+    #[test]
+    fn a_resumed_validation_sweep_restarts_at_the_resume_point() {
+        let mut processor = CommentCaptureProcessor::new("https://example.com/")
+            .expect("a processor")
+            .resume_after(
+                "https://example.com/wp-json/wp/v2/comments?\
+                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=4&per_page=100",
+            )
+            .expect("a valid resume URI")
+            .second_sweep(true);
+
+        let inspection = processor.inspect(&capture(b"[]", ONE_PAGE));
+
+        assert_eq!(
+            inspection.recaptures,
+            ["https://example.com/wp-json/wp/v2/comments?\
+                before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=5&per_page=100"]
+        );
+    }
+
+    #[test]
+    fn resume_uri_must_match_the_endpoint_and_standard_pagination() {
+        let query = "before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100";
+        let rejected = [
+            format!("https://other.example/wp-json/wp/v2/comments?{query}"),
+            query.replace("order=asc", "order=desc"),
+            query.replace("orderby=id", "orderby=date"),
+            query.replace("per_page=100", "per_page=50"),
+            query.replace("page=2", "page=0"),
+            query.replace("&page=2", ""),
+            query.replace("before=2026-08-20T00:00:00Z", "before=yesterday"),
+            format!("{query}&search=cats"),
+            format!("{query}&page=3"),
+        ]
+        .map(|query| {
+            if query.starts_with("https://") {
+                query
+            } else {
+                format!("https://example.com/wp-json/wp/v2/comments?{query}")
+            }
+        });
+
+        for uri in rejected {
+            let result = CommentCaptureProcessor::new("https://example.com/")
+                .expect("a processor")
+                .resume_after(&uri);
+            assert!(result.is_err(), "{uri} should be rejected");
+        }
+    }
+
+    #[test]
+    fn a_cloudflare_challenge_ends_the_traversal_with_an_explanation() {
+        let mut processor =
+            CommentCaptureProcessor::with_before("https://example.com/", timestamp(BEFORE))
+                .expect("a processor");
+        let response = b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\n\r\n";
+
+        let inspection = processor.inspect(&capture(b"", response));
+
+        assert!(
+            inspection
+                .error
+                .expect("a challenge should end the traversal")
+                .contains("interactive browser challenge")
+        );
+    }
+
+    #[test]
     fn inspection_titles_a_batch_and_advances_by_page() {
         let mut processor =
             CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
@@ -548,6 +816,7 @@ mod tests {
             first_date: Some(timestamp("2020-11-28T00:00:00Z").date_naive()),
             last_date: Some(timestamp("2020-11-30T00:00:00Z").date_naive()),
             complete: false,
+            resumed_after_page: None,
         };
         assert_eq!(processor.progress(), Some(progress));
         assert_eq!(

@@ -44,8 +44,11 @@ fn run() -> Result<(), Error> {
 /// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
 fn archive_comments(options: ArchiveCommentsOptions) -> Result<(), Error> {
     let titles = options.titles;
-    let processor =
-        CommentCaptureProcessor::new(&options.base_url)?.second_sweep(options.second_sweep);
+    let mut processor = CommentCaptureProcessor::new(&options.base_url)?;
+    if let Some(resume_after) = &options.resume_after {
+        processor = processor.resume_after(resume_after)?;
+    }
+    let processor = processor.second_sweep(options.second_sweep);
     let first_url = processor.first_comment_url();
     let comment_progress = Rc::new(RefCell::new(None));
     let processor = ProgressingCommentProcessor {
@@ -63,7 +66,10 @@ fn archive_comments(options: ArchiveCommentsOptions) -> Result<(), Error> {
             .map_or(retry_defaults.max_backoff, Duration::from_secs),
     };
     let config = options.config.into_config();
-    let archiver = Archiver::new(config)?;
+    let archiver = match &options.cookie {
+        Some(cookie) => Archiver::new(config)?.cookie_for(&options.base_url, cookie)?,
+        None => Archiver::new(config)?,
+    };
     let progress = message_spinner("Downloading comments");
     let event_progress = progress.clone();
     let event_comment_progress = Rc::clone(&comment_progress);
@@ -186,6 +192,10 @@ enum Error {
     Args(#[from] cli_helpers::Error),
     #[error("invalid WordPress base URL: {0}")]
     Url(#[from] url::ParseError),
+    #[error("invalid WordPress resume URI: {0}")]
+    Resume(#[from] archivindex_wordpress::CommentResumeError),
+    #[error("invalid cookie: {0}")]
+    Cookie(#[from] archivindex_archiver::CookieError),
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::Error),
     #[error(transparent)]
@@ -257,6 +267,15 @@ struct ArchiveCommentsOptions {
     /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
     #[clap(long)]
     second_sweep: bool,
+    /// Last successfully archived comments URI; resume with its snapshot cutoff at the next page.
+    #[clap(long)]
+    resume_after: Option<String>,
+    /// Cookie header obtained from a browser, scoped to the base URL's host.
+    ///
+    /// The value is sent with every request to that host and recorded in the WARC request records.
+    /// Quote values containing semicolons.
+    #[clap(long)]
+    cookie: Option<String>,
     /// Record titles in the session's `warcinfo` and per-capture metadata records.
     #[clap(long)]
     titles: bool,
@@ -359,6 +378,11 @@ mod tests {
             "--limit",
             "12",
             "--second-sweep",
+            "--resume-after",
+            "https://example.com/wp-json/wp/v2/comments?\
+             before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=8&per_page=100",
+            "--cookie",
+            "cf_clearance=test-clearance; __cf_bm=test-bot-cookie",
             "--request-delay",
             "7",
             "--gzip",
@@ -379,6 +403,17 @@ mod tests {
         );
         assert_eq!(options.limit, Some(12));
         assert!(options.second_sweep);
+        assert_eq!(
+            options.resume_after.as_deref(),
+            Some(
+                "https://example.com/wp-json/wp/v2/comments?\
+                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=8&per_page=100"
+            )
+        );
+        assert_eq!(
+            options.cookie.as_deref(),
+            Some("cf_clearance=test-clearance; __cf_bm=test-bot-cookie")
+        );
         assert!(!options.titles);
         assert_eq!(options.request_delay, 7);
         assert!(options.config.gzip);
