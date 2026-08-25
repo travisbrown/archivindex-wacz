@@ -276,11 +276,13 @@ const fn is_redirect(status: u16) -> bool {
 
 /// Render an RFC 3986 request target without a fragment.
 ///
-/// Percent-encode characters that WHATWG URLs allow but RFC 3986 does not.
+/// Percent-encode the characters the WHATWG serializer leaves bare but RFC 3986 forbids:
+/// `|`, `^`, `[`, `]`, `{`, `}`, and `` ` ``.
 fn request_target(url: &Url) -> Cow<'_, str> {
     let text = &url[..Position::AfterQuery];
     let path_start = url[..Position::BeforePath].len();
-    let needs_encoding = |character: char| matches!(character, '|' | '^' | '[' | ']');
+    let needs_encoding =
+        |character: char| matches!(character, '|' | '^' | '[' | ']' | '{' | '}' | '`');
 
     if !text[path_start..].contains(needs_encoding) {
         return Cow::Borrowed(text);
@@ -320,4 +322,26 @@ fn redact_credentials(url: &Url) -> String {
     let _ = redacted.set_username("");
     let _ = redacted.set_password(None);
     redacted.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_targets_are_valid_uris() {
+        let url = Url::parse("http://example.com/a|b^c[d]?x={y}`z#frag").expect("valid URL");
+        let target = request_target(&url);
+        assert_eq!(target, "http://example.com/a%7Cb%5Ec%5Bd%5D?x=%7By%7D%60z");
+        assert!(Uri::parse(target.as_ref()).is_ok());
+    }
+
+    #[test]
+    fn plain_request_targets_are_borrowed() {
+        let url = Url::parse("http://example.com/a?b=c#frag").expect("valid URL");
+        assert!(matches!(
+            request_target(&url),
+            Cow::Borrowed("http://example.com/a?b=c")
+        ));
+    }
 }
