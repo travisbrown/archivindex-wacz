@@ -386,7 +386,45 @@ fn write_line<W: Write, T: serde::ser::Serialize>(writer: &mut W, value: &T) -> 
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn page_lists_round_trip(
+        #[strategy(strategies::page_list_header())] header: PageListHeader<'static>,
+        #[strategy(proptest::collection::vec(strategies::page(), 0..=4))] pages: Vec<Page<'static>>,
+    ) {
+        let mut output = Vec::new();
+        write_page_list(&mut output, &header, &pages).unwrap();
+
+        let mut reader = PageListReader::new(output.as_slice()).unwrap();
+
+        prop_assert_eq!(reader.header(), &header);
+
+        let read = reader
+            .by_ref()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("invariant violation: written entries parse");
+
+        prop_assert_eq!(read, pages);
+    }
+
+    #[test_strategy::proptest]
+    fn synthetic_identifiers_are_hexadecimal_of_the_requested_length(
+        #[strategy(strategies::datetime())] ts: DateTime<Utc>,
+        #[strategy(".*")] url: String,
+        #[strategy(0..=80_usize)] length: usize,
+    ) {
+        let id = synthetic_id(&ts, &url, length);
+
+        prop_assert_eq!(id.len(), length.min(64));
+        prop_assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
 
     #[test]
     fn line_io_errors_retain_context() {

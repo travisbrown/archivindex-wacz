@@ -197,7 +197,49 @@ pub fn optional_lenient_datetime<'de, D: Deserializer<'de>>(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn rfc_3339_dates_round_trip(#[strategy(strategies::datetime())] datetime: DateTime<Utc>) {
+        prop_assert_eq!(parse_datetime(&datetime.to_rfc3339()), Some(datetime));
+    }
+
+    #[test_strategy::proptest]
+    fn zone_offsets_name_the_same_instant(
+        #[strategy(strategies::datetime())] datetime: DateTime<Utc>,
+        #[strategy(strategies::time_zone_offset())] offset: chrono::FixedOffset,
+    ) {
+        let elsewhere = datetime.with_timezone(&offset).to_rfc3339();
+
+        prop_assert_eq!(parse_datetime(&elsewhere), Some(datetime));
+    }
+
+    #[test_strategy::proptest]
+    fn zoneless_date_times_are_read_as_utc(
+        #[strategy(strategies::datetime())] datetime: DateTime<Utc>,
+    ) {
+        // `%.f` prints nothing at all for a whole second, so both layouts are exercised.
+        let written = datetime.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
+
+        prop_assert_eq!(parse_datetime(&written), Some(datetime));
+    }
+
+    #[test_strategy::proptest]
+    fn bare_dates_are_read_as_midnight_utc(
+        #[strategy(strategies::datetime())] datetime: DateTime<Utc>,
+    ) {
+        let written = datetime.format("%Y-%m-%d").to_string();
+        let parsed = parse_datetime(&written);
+
+        prop_assert_eq!(
+            parsed.map(|parsed| parsed.date_naive()),
+            Some(datetime.date_naive())
+        );
+        prop_assert_eq!(parsed.map(|parsed| parsed.time()), Some(NaiveTime::MIN));
+    }
 
     #[test]
     fn dates_parse_in_every_accepted_form() {
