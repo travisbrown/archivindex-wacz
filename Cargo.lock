@@ -89,9 +89,11 @@ dependencies = [
  "flate2",
  "fluent-uri",
  "http",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",
+ "test-strategy",
  "thiserror 2.0.20",
  "url",
 ]
@@ -134,10 +136,12 @@ dependencies = [
  "archivindex-warc",
  "chrono",
  "flate2",
+ "proptest",
  "redb",
  "serde",
  "serde_json",
  "tempfile",
+ "test-strategy",
  "thiserror 2.0.20",
 ]
 
@@ -212,9 +216,11 @@ dependencies = [
  "archivindex-warc",
  "fluent-uri",
  "http",
+ "proptest",
  "rusqlite",
  "sha2",
  "tempfile",
+ "test-strategy",
  "thiserror 2.0.20",
 ]
 
