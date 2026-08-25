@@ -23,8 +23,12 @@ archivindex-warc = { workspace = true, features = [
   "recorder",
 ] }
 chrono.workspace = true
+data-encoding.workspace = true
 fluent-uri.workspace = true
 http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true

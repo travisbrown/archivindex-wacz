@@ -10,9 +10,10 @@ use archivindex_warc_revisit_index::payload::RevisitTarget;
 use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState};
 use fluent_uri::Uri;
 use http::StatusCode;
-use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
+use http::header::{COOKIE, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use url::{Position, Url};
 
+use super::challenge::{self, Challenge};
 use super::collection::Collection;
 use crate::{Archiver, Error};
 
@@ -58,6 +59,31 @@ pub struct Exchange {
 }
 
 impl Exchange {
+    /// Record a captured exchange, decoding and digesting its entity body once.
+    pub fn new(captured: CapturedExchange, revalidated: Option<RevisitTarget>) -> Self {
+        let (decoded, payload_digest) = captured.entity_body().map_or((None, None), |payload| {
+            let mut hasher = Sha256::hasher();
+            hasher.update(&payload);
+            let decoded = match payload {
+                Cow::Owned(decoded) => Some(decoded),
+                // Keep a borrowed body only when it differs from the stored body.
+                Cow::Borrowed(body) => {
+                    (body.len() != captured.stored_body().len()).then(|| body.to_vec())
+                }
+            };
+            (decoded, Some(hasher.finalize_labelled()))
+        });
+
+        Self {
+            date: WarcDate::new(captured.date, DATE_PRECISION),
+            status: captured.response_metadata.status,
+            decoded,
+            payload_digest,
+            revalidated,
+            captured,
+        }
+    }
+
     /// The digest of the stored payload this exchange revisits, making its response a `revisit`
     /// record when that payload was captured earlier: the payload a `304 Not Modified` confirmed
     /// unchanged, or this exchange's own payload, which may duplicate an earlier capture's.
@@ -194,28 +220,38 @@ impl Archiver {
         };
 
         loop {
-            match self.fetch(&current, revalidate) {
-                Ok((exchange, location)) => {
-                    exchanges.push(exchange);
+            let (exchange, follow_up) = match self.fetch(&current, revalidate) {
+                Ok(fetched) => fetched,
+                Err(error) => return CaptureOutcome::Failed { exchanges, error },
+            };
+            exchanges.push(exchange);
 
-                    match location {
-                        Some(next) if exchanges.len() <= self.config.max_redirects => {
-                            current = next;
-                        }
-                        _ => return CaptureOutcome::Captured(exchanges),
+            let next = match follow_up {
+                Some(FollowUp::Request(next)) => Some(next),
+                Some(FollowUp::Challenge(challenge)) => {
+                    // A challenge is answered by repeating the request that met it.
+                    match self.answer(&current, challenge, &mut exchanges) {
+                        Ok(true) => Some(current.clone()),
+                        Ok(false) => None,
+                        Err(error) => return CaptureOutcome::Failed { exchanges, error },
                     }
                 }
-                Err(error) => return CaptureOutcome::Failed { exchanges, error },
+                None => None,
+            };
+
+            match next {
+                Some(next) if exchanges.len() <= self.config.max_redirects => current = next,
+                _ => return CaptureOutcome::Captured(exchanges),
             }
         }
     }
 
-    /// Perform one `GET` request and return its recorded exchange and followable redirect target.
+    /// Perform one `GET` request and return its recorded exchange and what to request next.
     fn fetch(
         &self,
         url: &Url,
         revalidate: Option<&Collection>,
-    ) -> Result<(Exchange, Option<Url>), Error> {
+    ) -> Result<(Exchange, Option<FollowUp>), Error> {
         if !url.username().is_empty() || url.password().is_some() {
             return Err(Error::CredentialedUrl(redact_credentials(url)));
         }
@@ -241,11 +277,15 @@ impl Archiver {
             })
             .transpose()?
             .flatten();
-        let headers = original
+        let mut headers = original
             .as_ref()
             .map_or(Cow::Borrowed(&self.headers), |original| {
                 Cow::Owned(original.conditional_headers(&self.headers))
             });
+        let cookie = self.cookie_jar().get(url);
+        if let Some(cookie) = cookie {
+            headers.to_mut().insert(COOKIE, cookie);
+        }
         let captured = self
             .recorder
             .fetch(&http::Method::GET, &target, &headers, None)?;
@@ -254,36 +294,26 @@ impl Archiver {
             .response_metadata
             .header("location")
             .and_then(|value| std::str::from_utf8(value).ok());
-        let location = next_location(url, status, location);
+        // A redirect is followed as it stands; only a response that is going nowhere is examined
+        // for a challenge, which a host serves in place of the representation asked for.
+        let follow_up = next_location(url, status, location).map_or_else(
+            || challenge::recognize(&captured, url).map(FollowUp::Challenge),
+            |next| Some(FollowUp::Request(next)),
+        );
         let revalidated = original
             .filter(|_| status == StatusCode::NOT_MODIFIED.as_u16())
             .map(|original| original.target);
-        // Decode and digest the entity body once for revisit detection and processing.
-        let (decoded, payload_digest) = captured.entity_body().map_or((None, None), |payload| {
-            let mut hasher = Sha256::hasher();
-            hasher.update(&payload);
-            let decoded = match payload {
-                Cow::Owned(decoded) => Some(decoded),
-                // Keep a borrowed body only when it differs from the stored body.
-                Cow::Borrowed(body) => {
-                    (body.len() != captured.stored_body().len()).then(|| body.to_vec())
-                }
-            };
-            (decoded, Some(hasher.finalize_labelled()))
-        });
 
-        Ok((
-            Exchange {
-                date: WarcDate::new(captured.date, DATE_PRECISION),
-                status,
-                decoded,
-                payload_digest,
-                revalidated,
-                captured,
-            },
-            location,
-        ))
+        Ok((Exchange::new(captured, revalidated), follow_up))
     }
+}
+
+/// What a captured exchange leaves to be requested next.
+enum FollowUp {
+    /// A redirect target.
+    Request(Url),
+    /// A challenge to answer before repeating the request that met it.
+    Challenge(Challenge),
 }
 
 /// Whether a status redirects to the response's `Location`.
@@ -334,7 +364,7 @@ fn next_location(current: &Url, status: u16, location: Option<&str>) -> Option<U
 }
 
 /// Render a URL with credentials removed so errors are safe to log.
-fn redact_credentials(url: &Url) -> String {
+pub fn redact_credentials(url: &Url) -> String {
     let mut redacted = url.clone();
     let _ = redacted.set_username("");
     let _ = redacted.set_password(None);

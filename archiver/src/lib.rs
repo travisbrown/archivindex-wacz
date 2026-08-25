@@ -48,6 +48,7 @@ pub mod session;
 #[cfg(test)]
 mod strategies;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use archivindex_warc::record::BlockError;
@@ -63,6 +64,11 @@ use http::header::HeaderMap;
 pub struct Archiver {
     recorder: Recorder,
     headers: HeaderMap,
+    /// Cookies supplied for a host, or learned from a challenge it served.
+    ///
+    /// Clones of an archiver share one jar, so clearance obtained by one capture thread is used by
+    /// the others.
+    cookies: Arc<Mutex<client::cookies::CookieJar>>,
     config: Config,
 }
 
@@ -176,6 +182,25 @@ impl From<archivindex_warc_revisit_index::DatabaseError> for Error {
     fn from(error: archivindex_warc_revisit_index::DatabaseError) -> Self {
         Self::RevisitIndex(error.into())
     }
+}
+
+/// A cookie could not be scoped to a host, or sent as an HTTP field value.
+///
+/// See [`Archiver::cookie_for`].
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CookieError {
+    /// The URL scoping the cookie could not be parsed.
+    #[error(transparent)]
+    InvalidUrl(#[from] url::ParseError),
+    /// The URL scoping the cookie carries credentials. The displayed URL has them removed.
+    #[error("URL contains credentials: {0}")]
+    CredentialedUrl(String),
+    /// The URL scoping the cookie has no host, so the cookie could not be restricted to one.
+    #[error("URL has no host: {0}")]
+    MissingHost(String),
+    /// The cookie cannot be sent as an HTTP field value. The error message includes the value.
+    #[error("invalid Cookie header value: {0:?}")]
+    InvalidCookie(String),
 }
 
 /// The configured `User-Agent` is not a valid HTTP field value.

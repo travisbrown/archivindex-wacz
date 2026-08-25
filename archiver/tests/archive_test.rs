@@ -2,21 +2,23 @@
 
 use std::io::{BufReader, Cursor};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 mod support;
 
-use support::{plain, records, request_path, serve_with, sha256};
+use support::{plain, records, request_header, request_path, serve_with, sha256};
 
 use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
-use archivindex_archiver::{Archiver, Config, Error};
+use archivindex_archiver::{Archiver, Config, CookieError, Error};
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::Algorithm;
 use archivindex_warc::value::WarcDatePrecision;
 use archivindex_warc::version::WarcVersion;
+use data_encoding::BASE64;
 use flate2::bufread::MultiGzDecoder;
 use fluent_uri::Uri;
 
@@ -312,6 +314,233 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
                 .is_none_or(|target| !target.starts_with(b"<"))
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn archive_solves_and_retains_sucuri_cookie_challenges() -> Result<(), Box<dyn std::error::Error>> {
+    let script = "v='cookie-value';\
+        document.cookie='sucuri_cloudproxy_uuid_test=' + v + \
+        ';path=/;max-age=86400;SameSite=Lax'; location.reload();";
+    let encoded = BASE64.encode(script.as_bytes());
+    let challenge =
+        format!("<html><script>var sucuri_cloudproxy_js='',S='{encoded}';</script></html>");
+    let attempt = AtomicUsize::new(0);
+    let (port, server) = serve_with(3, move |head| {
+        let response = if attempt.fetch_add(1, Ordering::Relaxed) == 0 {
+            plain(
+                "307 Temporary Redirect",
+                "content-type: text/html\r\nx-sucuri-id: 12005",
+                &challenge,
+            )
+        } else {
+            plain("200 OK", "content-type: text/plain", "accepted")
+        };
+        (
+            response,
+            (
+                request_path(head).to_owned(),
+                request_header(head, "cookie"),
+            ),
+        )
+    })?;
+    let urls = [
+        format!("http://127.0.0.1:{port}/first"),
+        format!("http://127.0.0.1:{port}/second"),
+    ];
+    let mut output = Vec::new();
+
+    let summary = Archiver::new(gzip_config())?.archive(&urls, Cursor::new(&mut output))?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert_eq!(summary.captures.len(), 2);
+    // The challenge page and the response it guarded are both captured.
+    assert_eq!(summary.captures[0].redirects, 1);
+    assert_eq!(summary.captures[1].redirects, 0);
+    assert_eq!(
+        requests,
+        [
+            ("/first".to_owned(), None),
+            (
+                "/first".to_owned(),
+                Some("sucuri_cloudproxy_uuid_test=cookie-value".to_owned())
+            ),
+            (
+                "/second".to_owned(),
+                Some("sucuri_cloudproxy_uuid_test=cookie-value".to_owned())
+            )
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn archive_solves_simply_clearance_challenges_behind_a_proxy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let token = "021c7f24e8c1ed8c4472a22aa9b441b223a08cb15fa889293574500e190960dc";
+    let challenge = format!(
+        "<html><script>var T=\"{token}\",TS=\"1787470051\",D=4;\
+         x.open(\"POST\",\"/.sc-verify/\");</script></html>"
+    );
+    let attempt = AtomicUsize::new(0);
+    let (port, server) = serve_with(4, move |head| {
+        let response = match attempt.fetch_add(1, Ordering::Relaxed) {
+            0 => plain(
+                "454 Request blocked",
+                "content-type: text/html\r\nserver: cloudflare",
+                &challenge,
+            ),
+            1 => plain(
+                "200 OK",
+                "content-type: application/json",
+                r#"{"ok":true,"cookie":"clearance-value"}"#,
+            ),
+            _ => plain("200 OK", "content-type: text/plain", "accepted"),
+        };
+        (
+            response,
+            (
+                head.lines().next().unwrap_or_default().to_owned(),
+                request_header(head, "cookie"),
+            ),
+        )
+    })?;
+    let urls = [
+        format!("http://127.0.0.1:{port}/first"),
+        format!("http://127.0.0.1:{port}/second"),
+    ];
+    let mut output = Vec::new();
+
+    let summary = Archiver::new(gzip_config())?.archive(&urls, Cursor::new(&mut output))?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert_eq!(summary.captures.len(), 2);
+    // The challenge page, the proof of work, and the response it guarded are all captured.
+    assert_eq!(summary.captures[0].redirects, 2);
+    assert_eq!(summary.captures[1].redirects, 0);
+    assert!(requests[0].0.starts_with("GET /first HTTP/1.1"));
+    assert!(requests[1].0.starts_with("POST /.sc-verify/ HTTP/1.1"));
+    assert_eq!(
+        requests[2].1.as_deref(),
+        Some("sc_clearance=clearance-value")
+    );
+    assert_eq!(
+        requests[3].1.as_deref(),
+        Some("sc_clearance=clearance-value")
+    );
+
+    // The submitted proof of work is recorded as sent, nonce included.
+    let records = records(&output)?;
+    let proof = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Request { body, .. } => {
+                let body = String::from_utf8_lossy(body);
+                body.contains("POST /.sc-verify/")
+                    .then(|| body.into_owned())
+            }
+            _ => None,
+        })
+        .expect("the proof of work should be recorded");
+    assert!(proof.contains("ts=1787470051&nonce="));
+    assert!(proof.contains(&format!("&token={token}")));
+
+    Ok(())
+}
+
+#[test]
+fn archive_solves_and_retains_varnish_proof_of_work_challenges()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = "83462578e314e3b20855f1cb32d30a09";
+    let trace_nonce = "e71e658fa0f38f0361551e676842c933";
+    let issued_at = "1787485140";
+    let challenge = format!(
+        "<script>window.POW_CHALLENGE_DATA={{\
+         challenge_nonce:'{nonce}',challenge_hmac:'22d6f9feb179b6b7e9616ede',\
+         difficulty:'1',difficulty_char:'b',issued_at:'{issued_at}',\
+         cookie_duration:'3600',cookie_domain:'127.0.0.1'}};</script>"
+    );
+    let attempt = AtomicUsize::new(0);
+    let (port, server) = serve_with(3, move |head| {
+        let response = if attempt.fetch_add(1, Ordering::Relaxed) == 0 {
+            plain(
+                "202 Verifying",
+                &format!(
+                    "content-type: text/html\r\nserver: Varnish\r\n\
+                     set-cookie: pow_trace={trace_nonce}|{issued_at}; path=/; Secure"
+                ),
+                &challenge,
+            )
+        } else {
+            plain("200 OK", "content-type: text/plain", "accepted")
+        };
+        (
+            response,
+            (
+                request_path(head).to_owned(),
+                request_header(head, "cookie"),
+            ),
+        )
+    })?;
+    let urls = [
+        format!("http://127.0.0.1:{port}/first"),
+        format!("http://127.0.0.1:{port}/second"),
+    ];
+    let mut output = Vec::new();
+
+    let summary = Archiver::new(gzip_config())?.archive(&urls, Cursor::new(&mut output))?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert_eq!(summary.captures.len(), 2);
+    assert_eq!(summary.captures[0].redirects, 1);
+    assert_eq!(summary.captures[1].redirects, 0);
+    assert_eq!(requests[0], ("/first".to_owned(), None));
+    for (path, cookie) in &requests[1..] {
+        let cookie = cookie.as_deref().expect("the proof-of-work cookies");
+        assert!(matches!(path.as_str(), "/first" | "/second"));
+        assert!(cookie.starts_with(&format!(
+            "pow_trace={trace_nonce}|{issued_at}; pow_bypass={nonce}|{issued_at}|"
+        )));
+        assert!(cookie.ends_with("|22d6f9feb179b6b7e9616ede"));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn archive_captures_an_unrecognized_challenge_as_the_response_it_is()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A Sucuri challenge whose script sets a cookie under an unexpected name is not answered.
+    let script = "document.cookie='other=value;path=/'; location.reload();";
+    let encoded = BASE64.encode(script.as_bytes());
+    let challenge = format!("<html><script>var sucuri_cloudproxy_js='{encoded}';</script></html>");
+    let (port, server) = serve_with(1, move |head| {
+        (
+            plain(
+                "307 Temporary Redirect",
+                "content-type: text/html\r\nx-sucuri-id: 12005",
+                &challenge,
+            ),
+            request_header(head, "cookie"),
+        )
+    })?;
+    let mut output = Vec::new();
+
+    let summary = Archiver::new(gzip_config())?.archive(
+        [format!("http://127.0.0.1:{port}/first")],
+        Cursor::new(&mut output),
+    )?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert_eq!(summary.captures[0].status, 307);
+    assert_eq!(summary.captures[0].redirects, 0);
+    assert_eq!(requests, [None]);
 
     Ok(())
 }
@@ -888,6 +1117,65 @@ fn archive_records_urls_without_a_host_as_failures() -> Result<(), Box<dyn std::
 
     assert!(!summary.is_complete());
     assert!(matches!(summary.failures[0].error, Error::MissingHost(_)));
+
+    Ok(())
+}
+
+#[test]
+fn supplied_cookie_is_scoped_to_its_host_and_recorded() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve_with(1, |head| {
+        (
+            plain("200 OK", "content-type: text/plain", "accepted"),
+            request_header(head, "cookie"),
+        )
+    })?;
+    let url = format!("http://127.0.0.1:{port}/");
+    let archiver = Archiver::new(Config {
+        gzip_warc: false,
+        ..gzip_config()
+    })?
+    .cookie_for(&url, "session=clearance")?;
+    let mut output = Vec::new();
+
+    let summary = archiver.archive([&url], Cursor::new(&mut output))?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert!(summary.is_complete());
+    assert_eq!(requests, [Some("session=clearance".to_owned())]);
+    assert!(String::from_utf8_lossy(&output).contains("cookie: session=clearance"));
+
+    Ok(())
+}
+
+#[test]
+fn supplied_cookie_is_withheld_from_other_hosts() -> Result<(), Box<dyn std::error::Error>> {
+    let (port, server) = serve_with(1, |head| {
+        (
+            plain("200 OK", "content-type: text/plain", "accepted"),
+            request_header(head, "cookie"),
+        )
+    })?;
+    let archiver = Archiver::new(gzip_config())?
+        .cookie_for("http://elsewhere.example/", "session=clearance")?;
+    let mut output = Vec::new();
+
+    archiver.archive(
+        [format!("http://127.0.0.1:{port}/")],
+        Cursor::new(&mut output),
+    )?;
+    let requests = server.join().expect("server thread should not panic");
+
+    assert_eq!(requests, [None]);
+
+    Ok(())
+}
+
+#[test]
+fn supplied_cookie_rejects_header_injection() -> Result<(), Box<dyn std::error::Error>> {
+    let result = Archiver::new(gzip_config())?
+        .cookie_for("https://example.com/", "safe=yes\r\nx-injected: true");
+
+    assert!(matches!(result, Err(CookieError::InvalidCookie(_))));
 
     Ok(())
 }

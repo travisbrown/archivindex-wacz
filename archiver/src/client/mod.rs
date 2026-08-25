@@ -8,9 +8,11 @@ use archivindex_warc_revisit_index::Index as RevisitIndex;
 use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::capture::{ArchiveSummary, CaptureControl, CaptureEvent, CaptureEventSink};
-use crate::{Archiver, Config, Error, UserAgentError};
+use crate::{Archiver, Config, CookieError, Error, UserAgentError};
 
+mod challenge;
 pub mod collection;
+pub mod cookies;
 pub mod outcome;
 mod pool;
 mod warc_fields;
@@ -54,8 +56,43 @@ impl Archiver {
         Ok(Self {
             recorder,
             headers,
+            cookies: std::sync::Arc::default(),
             config,
         })
+    }
+
+    /// Send a `Cookie` header to one host, such as clearance obtained from a browser.
+    ///
+    /// The cookie is sent only to the host of `url`, and only over HTTPS when `url` is itself an
+    /// HTTPS URL. Like every other request field, it is recorded in the WARC request records,
+    /// which is worth weighing before supplying a cookie that identifies a person.
+    ///
+    /// A host that later answers a recognized challenge replaces what is held for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CookieError::InvalidUrl`], [`CookieError::CredentialedUrl`], or
+    /// [`CookieError::MissingHost`] if the cookie cannot be scoped to a host, and
+    /// [`CookieError::InvalidCookie`] if it cannot be sent as an HTTP field value.
+    pub fn cookie_for(
+        self,
+        url: impl AsRef<str>,
+        cookie: impl AsRef<str>,
+    ) -> Result<Self, CookieError> {
+        let url = url::Url::parse(url.as_ref())?;
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(CookieError::CredentialedUrl(outcome::redact_credentials(
+                &url,
+            )));
+        }
+        if url.host_str().is_none() {
+            return Err(CookieError::MissingHost(url.to_string()));
+        }
+        let cookie = cookie.as_ref();
+        let value = HeaderValue::from_str(cookie)
+            .map_err(|_| CookieError::InvalidCookie(cookie.to_owned()))?;
+        self.cookie_jar().insert_header(&url, value);
+        Ok(self)
     }
 
     /// Download URLs and atomically publish a new WARC at `path`, refusing to overwrite it.
