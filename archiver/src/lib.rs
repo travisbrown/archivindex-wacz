@@ -43,6 +43,7 @@
 
 pub mod client;
 pub mod config;
+mod http_date;
 pub mod session;
 
 #[cfg(test)]

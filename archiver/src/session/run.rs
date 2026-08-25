@@ -314,15 +314,17 @@ const fn is_retryable_status(status: u16) -> bool {
     status == 429 || matches!(status, 500 | 502 | 503 | 504)
 }
 
+/// Interpret a `Retry-After` value as a delay.
+///
+/// RFC 9110 defines the value as a number of seconds or an HTTP-date, and a date that has already
+/// passed asks for no delay at all.
 fn parse_retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
-    if let Ok(seconds) = value.trim().parse() {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse() {
         return Some(Duration::from_secs(seconds));
     }
 
-    let retry_at = chrono::DateTime::parse_from_rfc2822(value.trim())
-        .ok()?
-        .to_utc();
-    (retry_at - now).to_std().ok()
+    (crate::http_date::parse(value, now)? - now).to_std().ok()
 }
 
 const fn is_transient(error: &Error) -> bool {
@@ -371,11 +373,23 @@ mod tests {
             Some(Duration::from_secs(42))
         );
         assert_eq!(
+            parse_retry_after("Fri, 21 Aug 2026 12:01:00 GMT", now),
+            Some(Duration::from_mins(1))
+        );
+        assert_eq!(
+            parse_retry_after("Friday, 21-Aug-26 12:01:00 GMT", now),
+            Some(Duration::from_mins(1))
+        );
+        assert_eq!(
+            parse_retry_after("Fri Aug 21 12:01:00 2026", now),
+            Some(Duration::from_mins(1))
+        );
+        assert_eq!(
             parse_retry_after("Fri, 21 Aug 2026 12:01:00 +0000", now),
             Some(Duration::from_mins(1))
         );
         assert_eq!(
-            parse_retry_after("Fri, 21 Aug 2026 11:59:00 +0000", now),
+            parse_retry_after("Fri, 21 Aug 2026 11:59:00 GMT", now),
             None
         );
         assert_eq!(parse_retry_after("not a delay", now), None);
