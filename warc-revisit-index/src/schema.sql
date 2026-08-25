@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS resource_state (
     digest           BLOB,
     record_id        TEXT,
     warc_date        TEXT,
+    observed_at      TEXT NOT NULL,
+    observed_seconds INTEGER NOT NULL,
+    observed_nanos   INTEGER NOT NULL CHECK (observed_nanos BETWEEN 0 AND 999999999),
     CHECK ((digest_algorithm IS NULL) = (digest IS NULL)),
     PRIMARY KEY (target_uri)
 ) WITHOUT ROWID;

@@ -98,6 +98,7 @@ fn index_response<E: Extension>(
                 payload_digest,
                 record_id: Some(header.core.record_id.clone()),
                 warc_date: Some(header.core.date),
+                observed_at: header.core.date,
             },
         )?
     } else {
@@ -149,6 +150,7 @@ fn index_revisit<E: Extension>(
                     payload_digest: Some(digest.clone()),
                     record_id,
                     warc_date,
+                    observed_at: header.core.date,
                 },
             )?
         }
@@ -160,6 +162,7 @@ fn index_revisit<E: Extension>(
                     ResourceStateUpdate::NotModified {
                         etag: metadata.etag,
                         last_modified: metadata.last_modified,
+                        observed_at: header.core.date,
                     },
                 )?
             } else if header.refers_to.is_some() && header.refers_to_date.is_some() {
@@ -172,6 +175,7 @@ fn index_revisit<E: Extension>(
                         payload_digest: header.payload.payload_digest.clone(),
                         record_id: header.refers_to.clone(),
                         warc_date: header.refers_to_date,
+                        observed_at: header.core.date,
                     },
                 )?
             } else {

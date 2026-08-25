@@ -47,9 +47,17 @@ pub struct ResourceState {
     pub record_id: Option<Uri<String>>,
     /// The prior representation's WARC capture date, when known.
     pub warc_date: Option<WarcDate>,
+    /// When this state was most recently observed.
+    ///
+    /// This is the date of the response or revisit that established or confirmed the state, not
+    /// necessarily the date of the canonical payload-bearing record.
+    pub observed_at: WarcDate,
 }
 
 /// A resource-state transition.
+///
+/// Transitions older than the stored observation are ignored. At equal observation times, the
+/// incoming transition is applied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResourceStateUpdate {
     /// A successful response carried a representation.
@@ -67,6 +75,8 @@ pub enum ResourceStateUpdate {
         record_id: Option<Uri<String>>,
         /// The WARC capture date, if known.
         warc_date: Option<WarcDate>,
+        /// When this representation was observed.
+        observed_at: WarcDate,
     },
     /// A `304 Not Modified` or `server-not-modified` revisit confirmed the prior representation.
     ///
@@ -77,5 +87,7 @@ pub enum ResourceStateUpdate {
         etag: Option<String>,
         /// A replacement `Last-Modified`, if the 304 supplies one.
         last_modified: Option<String>,
+        /// When the unchanged representation was confirmed.
+        observed_at: WarcDate,
     },
 }

@@ -111,22 +111,25 @@ pub fn resource_state_update() -> impl Strategy<Value = ResourceStateUpdate> {
             proptest::option::of(labelled_digest(any::<u8>())),
             proptest::option::of(uri()),
             proptest::option::of(warc_date()),
+            warc_date(),
         )
             .prop_map(
-                |(etag, last_modified, payload_digest, record_id, warc_date)| {
+                |(etag, last_modified, payload_digest, record_id, warc_date, observed_at)| {
                     ResourceStateUpdate::Representation {
                         etag,
                         last_modified,
                         payload_digest,
                         record_id,
                         warc_date,
+                        observed_at,
                     }
                 }
             ),
-        (validator(), validator()).prop_map(|(etag, last_modified)| {
+        (validator(), validator(), warc_date()).prop_map(|(etag, last_modified, observed_at)| {
             ResourceStateUpdate::NotModified {
                 etag,
                 last_modified,
+                observed_at,
             }
         }),
     ]

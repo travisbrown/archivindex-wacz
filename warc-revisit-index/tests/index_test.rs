@@ -164,6 +164,7 @@ fn resource_validators_digest_and_warc_identity_round_trip() -> Result<(), Box<d
             payload_digest: Some(digest.clone()),
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-01-01T01:02:03.456789Z")),
+            observed_at: date("2025-01-01T01:02:03.456789Z"),
         },
     )?;
 
@@ -176,6 +177,7 @@ fn resource_validators_digest_and_warc_identity_round_trip() -> Result<(), Box<d
     assert_eq!(state.payload_digest, Some(digest));
     assert_eq!(state.record_id, Some(uri(RECORD_A)));
     assert_eq!(state.warc_date, Some(date("2025-01-01T01:02:03.456789Z")));
+    assert_eq!(state.observed_at, date("2025-01-01T01:02:03.456789Z"));
     Ok(())
 }
 
@@ -192,6 +194,7 @@ fn new_representation_replaces_state_and_clears_omitted_validators() -> Result<(
             payload_digest: Some(sha256(b"old")),
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-01-01T00:00:00Z")),
+            observed_at: date("2025-01-01T00:00:00Z"),
         },
     )?;
     index.update_resource(
@@ -202,6 +205,7 @@ fn new_representation_replaces_state_and_clears_omitted_validators() -> Result<(
             payload_digest: Some(sha256(b"new")),
             record_id: Some(uri(RECORD_B)),
             warc_date: Some(date("2025-01-02T00:00:00Z")),
+            observed_at: date("2025-01-02T00:00:00Z"),
         },
     )?;
 
@@ -228,6 +232,7 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
             payload_digest: Some(digest.clone()),
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(original_date),
+            observed_at: original_date,
         },
     )?;
     index.update_resource(
@@ -235,6 +240,7 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
         ResourceStateUpdate::NotModified {
             etag: Some("\"new\"".to_owned()),
             last_modified: None,
+            observed_at: date("2025-01-02T00:00:00Z"),
         },
     )?;
 
@@ -249,8 +255,53 @@ fn not_modified_merges_validators_and_preserves_representation_identity()
         ResourceStateUpdate::NotModified {
             etag: None,
             last_modified: None,
+            observed_at: date("2025-01-02T00:00:00Z"),
         },
     )?);
+    Ok(())
+}
+
+#[test]
+fn older_resource_updates_are_ignored() -> Result<(), Box<dyn StdError>> {
+    let index = Index::open_in_memory()?;
+    let resource_key = key(URI_A);
+    index.update_resource(
+        &resource_key,
+        ResourceStateUpdate::Representation {
+            etag: Some("\"new\"".to_owned()),
+            last_modified: None,
+            payload_digest: Some(sha256(b"new")),
+            record_id: Some(uri(RECORD_B)),
+            warc_date: Some(date("2025-03-01T00:00:00Z")),
+            observed_at: date("2025-03-01T00:00:00Z"),
+        },
+    )?;
+
+    assert!(!index.update_resource(
+        &resource_key,
+        ResourceStateUpdate::Representation {
+            etag: Some("\"old\"".to_owned()),
+            last_modified: None,
+            payload_digest: Some(sha256(b"old")),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(date("2025-02-01T00:00:00Z")),
+            observed_at: date("2025-02-01T00:00:00Z"),
+        },
+    )?);
+    assert!(!index.update_resource(
+        &resource_key,
+        ResourceStateUpdate::NotModified {
+            etag: Some("\"stale\"".to_owned()),
+            last_modified: None,
+            observed_at: date("2025-02-15T00:00:00Z"),
+        },
+    )?);
+
+    let state = index.lookup_resource(&resource_key)?.expect("new state");
+    assert_eq!(state.etag.as_deref(), Some("\"new\""));
+    assert_eq!(state.payload_digest, Some(sha256(b"new")));
+    assert_eq!(state.record_id, Some(uri(RECORD_B)));
+    assert_eq!(state.observed_at, date("2025-03-01T00:00:00Z"));
     Ok(())
 }
 
@@ -274,6 +325,7 @@ fn two_resources_share_a_payload_but_keep_independent_state() -> Result<(), Box<
                 payload_digest: Some(digest.clone()),
                 record_id: Some(uri(record)),
                 warc_date: Some(date("2025-01-01T00:00:00Z")),
+                observed_at: date("2025-01-01T00:00:00Z"),
             },
         )?;
     }
@@ -306,6 +358,7 @@ fn malformed_persisted_state_returns_an_error() -> Result<(), Box<dyn StdError>>
             payload_digest: Some(sha256(b"body")),
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2025-01-01T00:00:00Z")),
+            observed_at: date("2025-01-01T00:00:00Z"),
         },
     )?;
     drop(index);
@@ -334,7 +387,7 @@ fn incompatible_schema_version_is_rejected_clearly() -> Result<(), Box<dyn StdEr
     assert!(matches!(
         Index::open(path),
         Err(OpenError::SchemaVersion {
-            expected: 2,
+            expected: 3,
             found: 99
         })
     ));
@@ -451,6 +504,7 @@ fn conditional_304_flow_preserves_enough_state_for_server_not_modified_revisit()
     assert_eq!(after.payload_digest, before.payload_digest);
     assert_eq!(after.record_id, Some(uri(RECORD_A)));
     assert_eq!(after.warc_date, Some(date("2025-01-01T00:00:00Z")));
+    assert_eq!(after.observed_at, date("2025-01-02T00:00:00Z"));
     Ok(())
 }
 
@@ -586,6 +640,7 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
             payload_digest: Some(shared.clone()),
             record_id: Some(uri(RECORD_A)),
             warc_date: Some(date("2024-01-01T00:00:00Z")),
+            observed_at: date("2024-01-01T00:00:00Z"),
         },
     )?;
     session.insert_payload(&later)?;
@@ -598,6 +653,7 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
             payload_digest: None,
             record_id: None,
             warc_date: None,
+            observed_at: date("2024-06-01T00:00:00Z"),
         },
     )?;
     session.update_resource(
@@ -608,6 +664,7 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
             payload_digest: Some(fresh.clone()),
             record_id: Some(uri(RECORD_B)),
             warc_date: Some(date("2024-06-01T00:00:00Z")),
+            observed_at: date("2024-06-01T00:00:00Z"),
         },
     )?;
 
@@ -628,6 +685,58 @@ fn merge_keeps_known_payloads_and_takes_incoming_resource_state() -> Result<(), 
     let state_b = durable.lookup_resource(&key(URI_B))?.expect("merged state");
     assert_eq!(state_b.payload_digest, Some(fresh));
     assert_eq!(state_b.record_id, Some(uri(RECORD_B)));
+    Ok(())
+}
+
+#[test]
+fn out_of_order_session_merges_keep_the_latest_observed_resource_state()
+-> Result<(), Box<dyn StdError>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("concurrent.sqlite3");
+    let mut first_connection = Index::open(&path)?;
+    let mut second_connection = Index::open(&path)?;
+    let older_session = Index::open_in_memory()?;
+    let newer_session = Index::open_in_memory()?;
+    let resource_key = key(URI_A);
+
+    older_session.update_resource(
+        &resource_key,
+        ResourceStateUpdate::Representation {
+            etag: Some("\"older\"".to_owned()),
+            last_modified: None,
+            payload_digest: Some(sha256(b"older")),
+            record_id: Some(uri(RECORD_A)),
+            warc_date: Some(date("2025-02-01T00:00:00Z")),
+            observed_at: date("2025-02-01T00:00:00Z"),
+        },
+    )?;
+    newer_session.update_resource(
+        &resource_key,
+        ResourceStateUpdate::Representation {
+            etag: Some("\"newer\"".to_owned()),
+            last_modified: Some("Sat, 01 Mar 2025 00:00:00 GMT".to_owned()),
+            payload_digest: Some(sha256(b"newer")),
+            record_id: Some(uri(RECORD_B)),
+            warc_date: Some(date("2025-03-01T00:00:00Z")),
+            observed_at: date("2025-03-01T00:00:00Z"),
+        },
+    )?;
+
+    let transaction = first_connection.begin()?;
+    transaction.merge_from(&newer_session)?;
+    transaction.commit()?;
+    let transaction = second_connection.begin()?;
+    transaction.merge_from(&older_session)?;
+    transaction.commit()?;
+
+    let state = Index::open(&path)?
+        .lookup_resource(&resource_key)?
+        .expect("newer session state");
+    assert_eq!(state.etag.as_deref(), Some("\"newer\""));
+    assert_eq!(state.payload_digest, Some(sha256(b"newer")));
+    assert_eq!(state.record_id, Some(uri(RECORD_B)));
+    assert_eq!(state.warc_date, Some(date("2025-03-01T00:00:00Z")));
+    assert_eq!(state.observed_at, date("2025-03-01T00:00:00Z"));
     Ok(())
 }
 

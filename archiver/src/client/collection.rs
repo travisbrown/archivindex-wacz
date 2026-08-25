@@ -134,6 +134,7 @@ impl Collection {
                 payload_digest: state.payload_digest.clone(),
                 record_id: state.record_id.clone(),
                 warc_date: state.warc_date,
+                observed_at: state.observed_at,
             },
         )?;
 
@@ -227,6 +228,7 @@ impl Collection {
             ));
             let key = exchange.revisit_key();
             let resource_key = exchange.resource_key();
+            let observed_at = exchange.date;
             let etag = exchange.validator("etag");
             let last_modified = exchange.validator("last-modified");
             let status = exchange.status;
@@ -263,6 +265,7 @@ impl Collection {
                     ResourceStateUpdate::NotModified {
                         etag,
                         last_modified,
+                        observed_at,
                     },
                 )?;
             } else if status == 200
@@ -277,6 +280,7 @@ impl Collection {
                         payload_digest: Some(original.payload_digest.clone()),
                         record_id: Some(original.record_id.clone()),
                         warc_date: Some(original.warc_date),
+                        observed_at,
                     },
                 )?;
             }

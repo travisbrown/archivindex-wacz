@@ -40,7 +40,7 @@ impl Handle for rusqlite::Transaction<'_> {
 /// writer clears quickly and waiting is almost always better than failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -50,15 +50,22 @@ const INSERT_PAYLOAD: &str = "INSERT INTO payloads (
  ON CONFLICT (digest_algorithm, digest) DO NOTHING";
 
 const UPSERT_RESOURCE: &str = "INSERT INTO resource_state (
-     target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date
- ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+     target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date,
+     observed_at, observed_seconds, observed_nanos
+ ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
  ON CONFLICT (target_uri) DO UPDATE SET
      etag = excluded.etag,
      last_modified = excluded.last_modified,
      digest_algorithm = excluded.digest_algorithm,
      digest = excluded.digest,
      record_id = excluded.record_id,
-     warc_date = excluded.warc_date";
+     warc_date = excluded.warc_date,
+     observed_at = excluded.observed_at,
+     observed_seconds = excluded.observed_seconds,
+     observed_nanos = excluded.observed_nanos
+ WHERE excluded.observed_seconds > resource_state.observed_seconds
+    OR (excluded.observed_seconds = resource_state.observed_seconds
+        AND excluded.observed_nanos >= resource_state.observed_nanos)";
 
 impl Store<Connection> {
     /// Open a database at `path`, initialize a new schema, and reject incompatible versions.
@@ -176,7 +183,8 @@ impl<C: Handle> Store<C> {
     ///
     /// # Returns
     ///
-    /// Whether a row was inserted or updated.
+    /// Whether a row was inserted or updated. An update older than the stored observation is
+    /// ignored and returns `false`; an equal observation replaces the stored state.
     ///
     /// # Errors
     ///
@@ -195,7 +203,8 @@ impl<C: Handle> Store<C> {
 impl Transaction<'_> {
     /// Copy every row of `source` into this transaction.
     ///
-    /// Existing canonical payload records are preserved; resource-state rows are replaced.
+    /// Existing canonical payload records are preserved. A resource-state row is replaced only
+    /// when the incoming state was observed at least as recently as the stored state.
     ///
     /// # Errors
     ///
@@ -211,7 +220,8 @@ impl Transaction<'_> {
         )?;
         copy_rows(
             source.connection(),
-            "SELECT target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date
+            "SELECT target_uri, etag, last_modified, digest_algorithm, digest, record_id, warc_date,
+                    observed_at, observed_seconds, observed_nanos
              FROM resource_state",
             self.connection(),
             UPSERT_RESOURCE,
@@ -298,11 +308,12 @@ pub fn lookup_resource(
         Option<Vec<u8>>,
         Option<String>,
         Option<String>,
+        String,
     );
 
     let stored: Option<Stored> = cached(
         connection,
-        "SELECT etag, last_modified, digest_algorithm, digest, record_id, warc_date
+        "SELECT etag, last_modified, digest_algorithm, digest, record_id, warc_date, observed_at
          FROM resource_state WHERE target_uri = ?1",
         "look up resource state",
     )?
@@ -314,6 +325,7 @@ pub fn lookup_resource(
             row.get(3)?,
             row.get(4)?,
             row.get(5)?,
+            row.get(6)?,
         ))
     })
     .optional()
@@ -321,7 +333,7 @@ pub fn lookup_resource(
 
     stored
         .map(
-            |(etag, last_modified, algorithm, digest, record_id, warc_date)| {
+            |(etag, last_modified, algorithm, digest, record_id, warc_date, observed_at)| {
                 let payload_digest = match (algorithm, digest) {
                     (Some(algorithm), Some(digest)) => {
                         Some(digest_from_parts(&algorithm, &digest)?)
@@ -341,6 +353,7 @@ pub fn lookup_resource(
                     warc_date: warc_date
                         .map(|value| parse_date("warc_date", value))
                         .transpose()?,
+                    observed_at: parse_date("observed_at", observed_at)?,
                 })
             },
         )
@@ -359,6 +372,7 @@ pub fn update_resource(
             payload_digest,
             record_id,
             warc_date,
+            observed_at,
         } => {
             let (algorithm, digest) = payload_digest
                 .as_ref()
@@ -367,6 +381,7 @@ pub fn update_resource(
                 .map_or((None, None), |(algorithm, digest)| {
                     (Some(algorithm.label()), Some(digest))
                 });
+            let (observed_at, observed_seconds, observed_nanos) = observation_parts(observed_at);
             cached(
                 connection,
                 UPSERT_RESOURCE,
@@ -380,24 +395,51 @@ pub fn update_resource(
                 digest.as_deref(),
                 record_id.as_ref().map(Uri::as_str),
                 warc_date.map(|date| date.to_string()),
+                observed_at,
+                observed_seconds,
+                observed_nanos,
             ])
             .map_err(DatabaseError::during("update resource representation"))?
         }
         ResourceStateUpdate::NotModified {
             etag,
             last_modified,
-        } => cached(
-            connection,
-            "UPDATE resource_state SET
+            observed_at,
+        } => {
+            let (observed_at, observed_seconds, observed_nanos) = observation_parts(observed_at);
+            cached(
+                connection,
+                "UPDATE resource_state SET
                  etag = COALESCE(?2, etag),
-                 last_modified = COALESCE(?3, last_modified)
-             WHERE target_uri = ?1",
-            "update not-modified resource state",
-        )?
-        .execute(params![key.target_uri().as_str(), etag, last_modified])
-        .map_err(DatabaseError::during("update not-modified resource state"))?,
+                 last_modified = COALESCE(?3, last_modified),
+                 observed_at = ?4,
+                 observed_seconds = ?5,
+                 observed_nanos = ?6
+             WHERE target_uri = ?1
+               AND (?5 > observed_seconds OR (?5 = observed_seconds AND ?6 >= observed_nanos))",
+                "update not-modified resource state",
+            )?
+            .execute(params![
+                key.target_uri().as_str(),
+                etag,
+                last_modified,
+                observed_at,
+                observed_seconds,
+                observed_nanos,
+            ])
+            .map_err(DatabaseError::during("update not-modified resource state"))?
+        }
     };
     Ok(changed > 0)
+}
+
+fn observation_parts(date: WarcDate) -> (String, i64, i64) {
+    let date_time = date.date_time();
+    (
+        date.to_string(),
+        date_time.timestamp(),
+        i64::from(date_time.timestamp_subsec_nanos()),
+    )
 }
 
 /// Copy rows selected from one connection into another.
@@ -564,30 +606,41 @@ mod tests {
                     payload_digest,
                     record_id,
                     warc_date,
+                    observed_at,
                 } => {
-                    prop_assert!(changed);
-                    expected.insert(
-                        uri,
-                        ResourceState {
-                            key,
-                            etag,
-                            last_modified,
-                            payload_digest,
-                            record_id,
-                            warc_date,
-                        },
-                    );
+                    let accepted = expected.get(&uri).is_none_or(|state| {
+                        observed_at.date_time() >= state.observed_at.date_time()
+                    });
+                    prop_assert_eq!(changed, accepted);
+                    if accepted {
+                        expected.insert(
+                            uri,
+                            ResourceState {
+                                key,
+                                etag,
+                                last_modified,
+                                payload_digest,
+                                record_id,
+                                warc_date,
+                                observed_at,
+                            },
+                        );
+                    }
                 }
                 ResourceStateUpdate::NotModified {
                     etag,
                     last_modified,
+                    observed_at,
                 } => {
-                    // A 304 for a resource that was never captured leaves nothing behind.
-                    prop_assert_eq!(changed, expected.contains_key(&uri));
+                    let accepted = expected.get(&uri).is_some_and(|state| {
+                        observed_at.date_time() >= state.observed_at.date_time()
+                    });
+                    prop_assert_eq!(changed, accepted);
 
-                    if let Some(state) = expected.get_mut(&uri) {
+                    if accepted && let Some(state) = expected.get_mut(&uri) {
                         state.etag = etag.or_else(|| state.etag.take());
                         state.last_modified = last_modified.or_else(|| state.last_modified.take());
+                        state.observed_at = observed_at;
                     }
                 }
             }

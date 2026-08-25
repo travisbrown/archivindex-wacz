@@ -383,6 +383,7 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
             payload_digest: Some(digest.clone()),
             record_id: Some(uri(EXTERNAL_RECORD_ID)),
             warc_date: Some(original_date),
+            observed_at: original_date,
         },
     )?;
     drop(index);
