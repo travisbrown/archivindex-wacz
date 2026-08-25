@@ -49,10 +49,6 @@ impl<R: BufRead> Lines<R> {
     }
 
     /// Report blank lines as invalid data instead of skipping them.
-    ///
-    /// CDXJ and JSON Lines files are sequences of records, one per line, so a line with no
-    /// content is not a valid record. Readers that model a raw level skip such lines; readers
-    /// that enforce the specification use this.
     #[must_use]
     pub const fn rejecting_blank_lines(mut self) -> Self {
         self.reject_blanks = true;

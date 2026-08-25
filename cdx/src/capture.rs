@@ -48,7 +48,7 @@ pub struct Capture<'a> {
     pub robot_flags: Option<Cow<'a, str>>,
     /// Stored record length.
     ///
-    /// Public CDX Server results occasionally report a negative length; such a value is absent.
+    /// Negative lengths found in public CDX Server results are represented as `None`.
     pub length: Option<u64>,
     /// Stored record offset.
     pub offset: Option<u64>,

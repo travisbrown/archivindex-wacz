@@ -5,11 +5,8 @@
 //! required in every WACZ; additional lists (for example `extraPages.jsonl`) may sit alongside it
 //! in the `pages/` directory using the same format.
 //!
-//! Entries are read at two levels. [`RawPage`] models an entry with its timestamp exactly as it
-//! was written, and [`Page`] is the semantic form, whose timestamp is the RFC 3339 date-time the
-//! specification requires. [`PageListReader`] produces the latter directly; readers that need to
-//! accept the zone-less timestamps written by some other tools go through [`RawPageListReader`]
-//! and [`RawPage::into_page_compatible`].
+//! [`PageListReader`] requires RFC 3339 timestamps. [`RawPageListReader`] preserves timestamps as
+//! written so callers can apply compatibility parsing when needed.
 
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
@@ -198,10 +195,8 @@ impl Page<'_> {
 
 /// A page entry whose timestamp has not been interpreted.
 ///
-/// This is the raw level of page-list reading: every property is modeled, but `ts` is kept exactly
-/// as it was written. Converting to [`Page`] applies the specification's requirement that the
-/// timestamp be an RFC 3339 date-time; [`Self::into_page_compatible`] instead applies the
-/// compatibility parser, which also reads the zone-less date-times that some other tools write.
+/// Converting to [`Page`] requires an RFC 3339 timestamp. [`Self::into_page_compatible`] also
+/// accepts the nonstandard date-time forms produced by some tools.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize)]
 pub struct RawPage<'a> {
     /// The URL of the archived page.
@@ -245,12 +240,11 @@ pub struct RawPage<'a> {
 pub struct InvalidTimestamp(pub String);
 
 impl<'a> RawPage<'a> {
-    /// Interpret the timestamp with the compatibility parser, which accepts the zone-less
-    /// date-times and bare dates written by tools that do not follow the specification.
+    /// Interpret the timestamp with the compatibility parser.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidTimestamp`] if the timestamp is in none of those forms.
+    /// Returns [`InvalidTimestamp`] if the timestamp is not recognized.
     pub fn into_page_compatible(self) -> Result<Page<'a>, InvalidTimestamp> {
         self.into_page(crate::attributes::parse_compatible_datetime)
     }
@@ -283,11 +277,7 @@ impl<'a> TryFrom<RawPage<'a>> for Page<'a> {
     }
 }
 
-/// A reader that iteratively parses page entries from a page list stream, leaving their
-/// timestamps uninterpreted.
-///
-/// This is the raw level: blank lines are skipped rather than treated as invalid entries, which
-/// [`PageListReader`] does not do.
+/// A page-list reader that preserves timestamp text and skips blank lines.
 pub struct RawPageListReader<R> {
     lines: Lines<R>,
     header: PageListHeader<'static>,
@@ -360,11 +350,7 @@ impl<R: BufRead> Iterator for RawPageListReader<R> {
     }
 }
 
-/// A reader that iteratively parses page entries from a page list stream.
-///
-/// Entries are read at the semantic level, so a timestamp that is not the RFC 3339 date-time the
-/// specification requires is an error, as is a blank line, which JSON Lines does not allow;
-/// [`RawPageListReader`] reads such page lists.
+/// A page-list reader that requires RFC 3339 timestamps and rejects blank lines.
 pub struct PageListReader<R> {
     raw: RawPageListReader<R>,
 }

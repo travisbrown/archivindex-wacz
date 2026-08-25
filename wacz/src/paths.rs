@@ -42,12 +42,9 @@ pub fn is_cdxj_index(path: &str) -> bool {
         .is_some_and(|name| CDXJ_SUFFIXES.iter().any(|suffix| name.ends_with(suffix)))
 }
 
-/// Whether `path` could be the block file of a `ZipNum` pair.
+/// Whether `path` could be the `.cdx.gz` block file of a `ZipNum` pair.
 ///
-/// `ZipNum` is not part of the WACZ specification; it is the sharded index form that pywb writes
-/// as a `.cdx.gz` block file beside an `.idx` summary. A `.cdx.gz` member is only that pair's
-/// block file when the summary naming it is present, and is an ordinary gzip CDXJ index
-/// otherwise.
+/// This checks only the name; callers must verify that a matching `.idx` summary is present.
 pub fn is_zipnum_data(path: &str) -> bool {
     direct_name(path, INDEXES_PREFIX).is_some_and(|name| name.ends_with(".cdx.gz"))
 }
@@ -85,10 +82,7 @@ pub fn zipnum_partner(path: &str) -> Option<String> {
     }
 }
 
-/// Whether a member must be added to the ZIP container without compression.
-///
-/// WACZ addresses WARC members by byte offset, so their stored bytes must be the bytes the
-/// indexes describe, and content that is already gzip data must not be compressed a second time.
+/// Whether a member must be stored in the ZIP container without additional compression.
 pub fn requires_stored(path: &str) -> bool {
     path.starts_with(ARCHIVE_PREFIX) || path.ends_with(GZIP_EXTENSION)
 }

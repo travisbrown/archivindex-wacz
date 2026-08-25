@@ -1,8 +1,4 @@
-//! What a capture run reports and what it lets an observer decide.
-//!
-//! Both one-shot archiving with [`Archiver`](crate::Archiver) and the crawl sessions of the
-//! [`session`](crate::session) module report their work in these types, and both accept a
-//! [`CaptureEventSink`] that watches captures as they happen and may ask for a clean stop.
+//! Capture outcomes, lifecycle events, and cancellation.
 
 use chrono::{DateTime, Utc};
 
@@ -100,12 +96,12 @@ pub enum CaptureControl {
     Cancel,
 }
 
-/// Observer that can report progress or request clean cancellation.
+/// An observer that reports progress or requests clean cancellation.
 pub trait CaptureEventSink {
     /// Observe one event and decide whether capture should continue.
     fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl;
 
-    /// Report that a URL capture attempt is starting and return whether it should be cancelled.
+    /// Report that a URL capture attempt is starting; return `true` to stop.
     fn started(&mut self, url: &str, attempt: usize) -> bool {
         self.event(CaptureEvent::Started { url, attempt }) == CaptureControl::Cancel
     }

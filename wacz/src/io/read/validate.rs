@@ -108,8 +108,7 @@ pub enum LayoutProblem {
     /// A member under `indexes/` is neither a plain CDXJ index nor part of a complete `ZipNum` pair.
     #[error("invalid index member path or incomplete ZipNum pair: {0}")]
     InvalidIndexMember(String),
-    /// A member whose bytes the specification addresses by offset, or whose content is already
-    /// gzip data, was compressed by the ZIP container instead of stored.
+    /// A member that must be stored was compressed by the ZIP container.
     #[error("member is ZIP-compressed but must be stored: {0}")]
     RecompressedMember(String),
     /// There is no `datapackage.json` manifest.
@@ -149,8 +148,7 @@ pub enum ManifestProblem {
     /// The manifest lists no resources.
     #[error("empty resource list")]
     NoResources,
-    /// The package metadata does not meet a Data Package constraint (see
-    /// [`crate::frictionless::ConstraintError`]).
+    /// The package metadata violates a Data Package constraint.
     #[error("{0}")]
     Constraint(String),
     /// A resource name is empty or uses characters outside lowercase `a-z0-9._-`.

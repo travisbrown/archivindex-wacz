@@ -118,11 +118,9 @@ pub fn parse_rfc_3339(value: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
-/// Parse a date as written by the WACZ tools in the wild.
+/// Parse RFC 3339 or a nonstandard date-time form produced by WACZ tools.
 ///
-/// RFC 3339 is tried first; a zone-less ISO 8601 date-time is then read as UTC, and a bare date
-/// as midnight UTC. Neither fallback conforms to the specification: this is the compatibility
-/// stage used when reading foreign files, and is never used when writing.
+/// Zone-less date-times are interpreted as UTC and bare dates as midnight UTC.
 pub fn parse_compatible_datetime(value: &str) -> Option<DateTime<Utc>> {
     parse_rfc_3339(value)
         .or_else(|| {

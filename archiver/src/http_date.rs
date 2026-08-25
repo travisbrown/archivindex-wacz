@@ -1,18 +1,15 @@
-//! Parsing of the date forms an HTTP recipient is expected to accept.
+//! Parsing the HTTP date forms that recipients must accept.
 //!
 //! [RFC 9110 section 5.6.7](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.7) defines
-//! `HTTP-date` as the fixed-length IMF-fixdate form, which senders must generate, together with
-//! two obsolete forms that recipients must accept: the RFC 850 form, whose two-digit year is read
-//! against the time of reading, and the asctime form, which carries no zone. Every form denotes a
-//! time in UTC.
+//! `HTTP-date` as IMF-fixdate, which senders must generate, plus two obsolete forms that recipients
+//! must accept: RFC 850 and asctime. All three denote UTC.
 
 use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Utc};
 
 /// The preferred form: `Sun, 06 Nov 1994 08:49:37 GMT`.
 const IMF_FIXDATE: &str = "%a, %d %b %Y %H:%M:%S GMT";
 
-/// The obsolete RFC 850 form, with a two-digit year, after its day name: `06-Nov-94 08:49:37
-/// GMT`.
+/// The obsolete RFC 850 form after removing its weekday: `06-Nov-94 08:49:37 GMT`.
 ///
 /// The day name is dropped rather than matched, because the century the two digits denote is not
 /// known until the date is anchored, and the weekday depends on it.

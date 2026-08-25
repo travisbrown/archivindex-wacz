@@ -1,11 +1,7 @@
-//! Reading manifests whose date-times are not written as the specification requires.
+//! Compatibility parsing for manifests with nonstandard date-time values.
 //!
-//! The Data Package specification requires RFC 3339 date-times, and [`super::DataPackage`] is read
-//! that way. Several tools in the WACZ ecosystem instead write a zone-less ISO 8601 date-time or a
-//! bare date, so manifests in the wild cannot always be read at that level. The functions here add
-//! a raw stage in front of it: the JSON document is repaired before it is interpreted, and every
-//! repair is reported, so that a caller judging conformance can still tell that the manifest did
-//! not conform.
+//! Strict parsing requires RFC 3339. This module also accepts the zone-less date-times and bare
+//! dates produced by some WACZ tools, while reporting every repaired property.
 
 use std::borrow::Cow;
 
@@ -26,17 +22,13 @@ pub struct NonConformingDate {
     pub value: String,
 }
 
-/// Parse a manifest, accepting the date-time forms written by tools that do not follow the
-/// specification.
+/// Parse a manifest, repairing recognized date-time values that are not RFC 3339.
 ///
-/// Each modeled date property that is not RFC 3339 but is understood by the compatibility parser
-/// is rewritten into RFC 3339 before the manifest is deserialized, and is reported in the returned
-/// list. A date in no recognized form is left alone, and so fails the parse.
+/// The returned list identifies every repaired property. Unrecognized date formats fail parsing.
 ///
 /// # Errors
 ///
-/// Returns the deserialization error if the bytes are not a manifest, including when a date-time
-/// is in no form this crate recognizes.
+/// Returns the deserialization error if the bytes are not a valid manifest.
 pub fn parse_data_package(
     bytes: &[u8],
 ) -> Result<(DataPackage<'static>, Vec<NonConformingDate>), serde_json::Error> {

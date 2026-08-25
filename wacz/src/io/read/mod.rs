@@ -235,11 +235,9 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(PageListReader::with_source(member, path)?)
     }
 
-    /// Read a page list without interpreting its entry timestamps.
+    /// Read a page list while preserving its timestamp text.
     ///
-    /// [`Self::page_list`] requires the RFC 3339 timestamps the specification prescribes, so this
-    /// is the level at which a list written with other date forms can be read (see
-    /// [`crate::pages::RawPage::into_page_compatible`]).
+    /// Use [`crate::pages::RawPage::into_page_compatible`] to accept nonstandard date forms.
     pub fn raw_page_list(
         &mut self,
         path: &str,

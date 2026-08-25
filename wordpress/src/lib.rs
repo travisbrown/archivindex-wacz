@@ -1,8 +1,8 @@
 //! Capturing and reading `WordPress` REST API v2 resources.
 //!
-//! The [`CommentCaptureProcessor`] drives a crawl session from the `archivindex-archiver` crate
-//! over a site's comments collection, walking the paginated endpoint and archiving each response
-//! into a WARC file. The [`read`] module reads the comments back out of such an archive.
+//! [`CommentCaptureProcessor`] archives a site's paginated comments collection through an
+//! `archivindex-archiver` crawl session. The [`read`] module reads comments from the resulting
+//! WARC file.
 //!
 //! # Modules
 //!

@@ -15,15 +15,10 @@ use crate::{Archiver, Error};
 
 mod run;
 
-/// The session identifier cannot name the session's WARC file and records.
+/// A session identifier is empty or contains a character outside the RFC 3986 unreserved set.
 ///
-/// An identifier names the file the session writes (`{id}.warc`, or `{id}.warc.gz` when the WARC
-/// is compressed) and is recorded as the `isPartOf` field of that file's `warcinfo` record, so it
-/// is restricted to the unreserved set of RFC 3986: ASCII letters and digits, `-`, `.`, `_`, and
-/// `~`. That leaves it usable as a path segment on any platform, and as a URI component with
-/// nothing percent-encoded. An empty identifier names nothing and is rejected as well.
-///
-/// The rejected identifier is reported in the error message.
+/// Valid identifiers contain ASCII letters, digits, `-`, `.`, `_`, or `~`. The error message
+/// includes the rejected identifier.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid session identifier: {0:?}")]
 pub struct SessionIdError(String);
@@ -75,7 +70,7 @@ pub struct Capture<'a> {
 }
 
 impl<'a> Capture<'a> {
-    /// Build a capture from recorded response bytes, for driving a [`CaptureProcessor`] outside a
+    /// Build a capture from recorded response bytes to drive a [`CaptureProcessor`] outside a
     /// session.
     ///
     /// The status and headers are read from `response`, so a processor is shown exactly what a

@@ -6,11 +6,9 @@
 //!
 //! [data-package]: https://specs.frictionlessdata.io/data-package/
 //!
-//! Properties beyond those modeled here are preserved in [`DataPackage::extra`] and
-//! [`Resource::extra`] so that manifests written by other tools survive a read-modify-write cycle.
-//! Modeled properties are read as their specifications require: date-times must be RFC 3339, and
-//! the [`signature`] submodule's envelope parsing is likewise strict. The [`compat`] submodule
-//! reads manifests whose dates are written in the other forms found in the wild.
+//! Unmodeled properties are preserved in [`DataPackage::extra`] and [`Resource::extra`]. Modeled
+//! properties are parsed strictly; [`compat`] handles nonstandard date-time forms found in the
+//! wild.
 
 use std::borrow::Cow;
 
@@ -44,8 +42,7 @@ pub const CONTRIBUTOR_ROLES: [&str; 5] = [
     "contributor",
 ];
 
-/// A requirement the Data Package specification places on a package's metadata that a package does
-/// not meet.
+/// A violation of a Data Package metadata constraint.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConstraintError {
     /// The package name is empty or uses characters outside lowercase `a-z0-9._-`.
@@ -69,8 +66,6 @@ pub enum ConstraintError {
 }
 
 /// Collect every violation of the specification's metadata constraints.
-///
-/// The package and its builder hold the same caller-supplied properties, so both check them here.
 fn constraint_errors(
     name: Option<&str>,
     sources: &[Source<'_>],
@@ -224,12 +219,7 @@ pub struct DataPackage<'a> {
 }
 
 impl DataPackage<'_> {
-    /// Every way this package's metadata violates the Data Package specification.
-    ///
-    /// This covers the constraints the manifest can be judged against on its own: the package name
-    /// alphabet, the identity requirements on sources, licenses, and contributors, and the
-    /// contributor role vocabulary. Requirements that involve the rest of the WACZ, such as the
-    /// resource list, are reported by [`crate::io::read::validate`].
+    /// Return every metadata constraint violated by this package and its resources.
     #[must_use]
     pub fn constraint_errors(&self) -> Vec<ConstraintError> {
         let mut errors = constraint_errors(
@@ -497,8 +487,7 @@ impl Source<'_> {
 
 /// A license under which a package or resource is provided.
 ///
-/// The Data Package specification requires at least one of `name` or `path`, which
-/// [`DataPackage::constraint_errors`] checks.
+/// At least one of `name` or `path` is required by the Data Package specification.
 #[derive(Clone, Debug, Default, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 // Every field is optional, so no `#[serde(borrow)]` field ties the deserializer's input lifetime to
 // `'a`; state the bound explicitly to allow borrowing from the input.
@@ -544,8 +533,8 @@ impl License<'_> {
 
 /// A person or organization who contributed to a package.
 ///
-/// The Data Package specification requires `title` and restricts `role` to [`CONTRIBUTOR_ROLES`]
-/// (`contributor` by default), both of which [`DataPackage::constraint_errors`] checks.
+/// The Data Package specification requires `title` and restricts `role` to
+/// [`CONTRIBUTOR_ROLES`] (`contributor` by default).
 #[derive(Clone, Debug, Default, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 // Every field is optional, so no `#[serde(borrow)]` field ties the deserializer's input lifetime to
 // `'a`; state the bound explicitly to allow borrowing from the input.

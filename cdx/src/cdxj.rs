@@ -24,8 +24,7 @@ pub enum Error {
 
 /// A single CDXJ line.
 ///
-/// The default field object is the lenient [`Fields`]; [`ConformingItem`] requires every
-/// standard field.
+/// [`Item`] uses lenient [`Fields`] by default; [`ConformingItem`] requires every standard field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Item<'a, F = Fields<'a>> {
     /// The searchable URL key.
@@ -250,7 +249,7 @@ impl<'a> From<ConformingFields<'a>> for Fields<'a> {
     }
 }
 
-/// A lenient CDXJ field object cannot become a conforming one.
+/// A lenient CDXJ field object cannot be converted to the conforming model.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConformanceError {
     /// Required properties are absent.
@@ -262,11 +261,7 @@ pub enum ConformanceError {
 }
 
 impl Fields<'_> {
-    /// Check that every property the CDXJ profile requires is present and that no extension
-    /// property duplicates a modeled one.
-    ///
-    /// This is the conformance test applied by the conversion to [`ConformingFields`], for callers
-    /// that only need the verdict.
+    /// Check that all required properties are present and no extension property duplicates one.
     pub fn check_conformance(&self) -> Result<(), ConformanceError> {
         let mut missing = Vec::new();
         if self.digest.is_none() {
