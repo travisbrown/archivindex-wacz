@@ -153,12 +153,9 @@ pub enum Error {
     /// An index entry omits required CDXJ fields.
     #[error(transparent)]
     InvalidIndexFields(#[from] archivindex_cdx::cdxj::ConformanceError),
-    /// A CDXJ extension property duplicates a modeled field.
-    #[error(transparent)]
-    CdxExtraProperty(#[from] archivindex_cdx::properties::Error),
     /// An extension property duplicates a modeled JSON property.
     #[error(transparent)]
-    ExtraProperty(#[from] crate::ExtraPropertyError),
+    ExtraProperty(#[from] archivindex_cdx::properties::Error),
     /// A previous member write failed after mutating the ZIP stream.
     #[error("WACZ writer is unusable after a member write failure")]
     Poisoned,

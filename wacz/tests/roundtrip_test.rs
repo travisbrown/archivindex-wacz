@@ -4,10 +4,9 @@ use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
 
 use archivindex_cdx::cdxj;
-use archivindex_cdx::properties::ExtraProperties as CdxExtraProperties;
+use archivindex_cdx::properties::ExtraProperties;
 use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
-use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::read::{self as reader, WaczReader, validate};
@@ -58,7 +57,7 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Err
             length: Some(10),
             filename: Some(Cow::Borrowed("data.warc.gz")),
             record_digest: None,
-            extra: CdxExtraProperties::default(),
+            extra: ExtraProperties::default(),
         },
     })
 }
@@ -155,7 +154,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
             length: Some(warc_data.len() as u64),
             filename: Some(Cow::Borrowed(warc_name)),
             record_digest: None,
-            extra: CdxExtraProperties::default(),
+            extra: ExtraProperties::default(),
         },
     };
 
@@ -1223,7 +1222,7 @@ fn normal_index_writing_requires_standard_fields() -> Result<(), Box<dyn std::er
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.add_index("index.cdx", [&required]),
-        Err(writer::Error::CdxExtraProperty(_))
+        Err(writer::Error::ExtraProperty(_))
     ));
 
     item.fields.digest = None;

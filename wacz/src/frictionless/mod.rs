@@ -16,7 +16,8 @@ use std::borrow::Cow;
 use bounded_static::ToStatic;
 use chrono::{DateTime, Utc};
 
-use crate::ExtraProperties;
+use archivindex_cdx::properties::ExtraProperties;
+
 use crate::digest::Sha256Digest;
 
 pub mod resource;
@@ -266,8 +267,11 @@ impl DataPackageBuilder {
     }
 
     /// Set extension properties, replacing any previously configured properties.
-    pub fn extra(mut self, value: ExtraProperties) -> Result<Self, crate::ExtraPropertyError> {
-        crate::validate_extra("DataPackage", &value, DATA_PACKAGE_PROPERTIES)?;
+    pub fn extra(
+        mut self,
+        value: ExtraProperties,
+    ) -> Result<Self, archivindex_cdx::properties::Error> {
+        value.validate("DataPackage", DATA_PACKAGE_PROPERTIES)?;
         self.extra = value;
         Ok(self)
     }
@@ -300,8 +304,9 @@ impl DataPackageBuilder {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra("DataPackage", &self.extra, DATA_PACKAGE_PROPERTIES)?;
+    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra
+            .validate("DataPackage", DATA_PACKAGE_PROPERTIES)?;
         for source in &self.sources {
             source.validate()?;
         }
@@ -390,8 +395,8 @@ pub struct Source<'a> {
 }
 
 impl Source<'_> {
-    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra("Source", &self.extra, &["title", "path", "email"])
+    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra.validate("Source", &["title", "path", "email"])
     }
 }
 
@@ -432,8 +437,8 @@ pub struct License<'a> {
 }
 
 impl License<'_> {
-    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra("License", &self.extra, &["name", "path", "title"])
+    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra.validate("License", &["name", "path", "title"])
     }
 }
 
@@ -487,10 +492,9 @@ pub struct Contributor<'a> {
 }
 
 impl Contributor<'_> {
-    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra(
+    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra.validate(
             "Contributor",
-            &self.extra,
             &["title", "path", "email", "role", "organization"],
         )
     }

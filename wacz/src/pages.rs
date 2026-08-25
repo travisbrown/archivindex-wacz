@@ -13,8 +13,10 @@ use archivindex_warc::value::marker::Sha256;
 use bounded_static::{IntoBoundedStatic, ToStatic};
 use chrono::{DateTime, SecondsFormat, Utc};
 
+use archivindex_cdx::properties::ExtraProperties;
+
+use crate::LineContext;
 use crate::lines::Lines;
-use crate::{ExtraProperties, LineContext};
 
 /// The format identifier required in the header line of a page list.
 pub const FORMAT: &str = "json-pages-1.0";
@@ -66,7 +68,7 @@ pub enum Error {
     Serialization(#[source] serde_json::Error),
     /// An extension property duplicates a modeled page-list property.
     #[error(transparent)]
-    ExtraProperty(#[from] crate::ExtraPropertyError),
+    ExtraProperty(#[from] archivindex_cdx::properties::Error),
 }
 
 impl From<std::io::Error> for Error {
@@ -166,18 +168,16 @@ pub struct Page<'a> {
 }
 
 impl PageListHeader<'_> {
-    fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra("PageListHeader", &self.extra, &["format", "id", "title"])
+    fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra
+            .validate("PageListHeader", &["format", "id", "title"])
     }
 }
 
 impl Page<'_> {
-    fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra(
-            "Page",
-            &self.extra,
-            &["url", "ts", "id", "title", "text", "size"],
-        )
+    fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra
+            .validate("Page", &["url", "ts", "id", "title", "text", "size"])
     }
 }
 

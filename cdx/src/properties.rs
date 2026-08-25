@@ -1,6 +1,9 @@
-//! Extension properties shared by the JSON-backed CDX models.
+//! Extension properties preserved by JSON-backed models.
 
-/// Additional JSON properties preserved in insertion order.
+/// Additional JSON properties preserved verbatim, in insertion order.
+///
+/// Lenient models keep the properties they do not model here so that documents written by other
+/// tools survive a read-modify-write cycle.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(transparent)]
 pub struct ExtraProperties(serde_json::Map<String, serde_json::Value>);

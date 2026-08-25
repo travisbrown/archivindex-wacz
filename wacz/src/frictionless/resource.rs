@@ -10,7 +10,8 @@ use std::borrow::Cow;
 
 use bounded_static::ToStatic;
 
-use crate::ExtraProperties;
+use archivindex_cdx::properties::ExtraProperties;
+
 use crate::digest::Sha256Digest;
 
 use super::{License, Source};
@@ -113,10 +114,9 @@ impl<'a> Resource<'a> {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), crate::ExtraPropertyError> {
-        crate::validate_extra(
+    pub(crate) fn validate(&self) -> Result<(), archivindex_cdx::properties::Error> {
+        self.extra.validate(
             "Resource",
-            &self.extra,
             &[
                 "name",
                 "path",
