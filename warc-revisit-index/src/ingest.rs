@@ -6,12 +6,12 @@ use archivindex_warc::record::header::{RevisitHeader, RevisitProfile};
 use archivindex_warc::record::http::ResponseMetadata;
 use rusqlite::Connection;
 
-use crate::db::{insert_payload, lookup_payload, lookup_resource, update_resource};
+use crate::db::{Handle, insert_payload, lookup_payload, lookup_resource, update_resource};
 use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceStateUpdate};
 use crate::{IndexRecordOutcome, IngestError, Store};
 
-impl<C> Store<C> {
+impl<C: Handle> Store<C> {
     /// Index one semantic WARC record.
     ///
     /// Payload-bearing HTTP `response` records establish canonical payloads. HTTP 200 responses

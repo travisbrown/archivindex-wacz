@@ -10,6 +10,28 @@ use crate::payload::RevisitTarget;
 use crate::resource::{ResourceKey, ResourceState, ResourceStateUpdate};
 use crate::{DatabaseError, Error, Index, OpenError, Store, Transaction};
 
+/// A SQLite handle a [`Store`] can run statements through.
+///
+/// The trait lives in this private module, so [`Connection`] and [`rusqlite::Transaction`] are
+/// its only implementors and no caller can name it to add another.
+pub trait Handle {
+    /// Borrow the underlying connection.
+    fn as_connection(&self) -> &Connection;
+}
+
+impl Handle for Connection {
+    fn as_connection(&self) -> &Connection {
+        self
+    }
+}
+
+impl Handle for rusqlite::Transaction<'_> {
+    // `Transaction` dereferences to the connection it borrows.
+    fn as_connection(&self) -> &Connection {
+        self
+    }
+}
+
 const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -79,10 +101,7 @@ impl Store<Connection> {
             });
         }
 
-        Ok(Self {
-            connection,
-            connection_ref: |connection| connection,
-        })
+        Ok(Self { connection })
     }
 
     /// Begin a transaction for bulk WARC ingestion.
@@ -97,14 +116,13 @@ impl Store<Connection> {
             .map_err(DatabaseError::during("begin transaction"))?;
         Ok(Store {
             connection: transaction,
-            connection_ref: |transaction| transaction,
         })
     }
 }
 
-impl<C> Store<C> {
+impl<C: Handle> Store<C> {
     pub(crate) fn connection(&self) -> &Connection {
-        (self.connection_ref)(&self.connection)
+        self.connection.as_connection()
     }
 
     /// Find the canonical payload-bearing WARC record for `digest`.

@@ -53,10 +53,12 @@ mod strategies;
 
 use rusqlite::Connection;
 
-/// A database connection view shared by persistent indexes and bulk transactions.
+/// A database handle shared by persistent indexes and bulk transactions.
+///
+/// The type parameter is one of the two handles below; the crate seals it, so `Store` has no
+/// other instantiation.
 pub struct Store<C> {
     connection: C,
-    connection_ref: fn(&C) -> &Connection,
 }
 
 /// A persistent payload and conditional-request state index.
