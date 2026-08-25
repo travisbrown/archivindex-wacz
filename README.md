@@ -15,29 +15,18 @@ Tools for capturing web pages and packaging them as web archive collections.
 | [`archivindex-cdx`](cdx/) | Data models for classic CDX, CDXJ, and CDX Server JSON |
 | [`archivindex-wacz`](wacz/) | Reading and writing web archive collections in the [WACZ][wacz-spec] format |
 | [`archivindex-packager`](packager/) | Packaging WARC captures as indexed WACZ distributions |
-| [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into WARC files |
 | [`archivindex-wordpress`](wordpress/) | Capturing and reading WordPress REST API resources |
-| [`archivindex-warc-revisit-index`](warc-revisit-index/) | A revisit index over WARC records: payload sources and conditional-request state |
-| [`archivindex-archiver-cli`](archiver-cli/) | An `archivindex-archiver` command-line front end |
 | [`archivindex-packager-cli`](packager-cli/) | An `archivindex-packager` command-line front end |
 | [`archivindex-wordpress-cli`](wordpress-cli/) | An `archivindex-wordpress` command-line front end |
 
 The WARC reading and writing core these crates are built on lives in a separate repository,
-[`archivindex-warc`][archivindex-warc], and is used here as a source dependency.
+[`archivindex-warc`][archivindex-warc], and is used here as a source dependency. The archiver and
+its revisit index live there too.
 
 ## Usage
 
 Each library with a command-line front end has its own binary, so a command below is invoked
 through the binary that owns it.
-
-### Archiving
-
-The `archive` command reads one URL per line from standard input and writes a single WARC file:
-
-```bash
-echo https://example.com/ \
-  | cargo run --bin archivindex-archiver -- archive --output example.warc
-```
 
 Capture output is uncompressed by default. Pass `--gzip` and use a `.warc.gz` output name to
 compress each WARC record as an independent gzip member.

@@ -82,32 +82,20 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
+source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
 dependencies = [
  "archivindex-warc",
  "archivindex-warc-revisit-index",
  "chrono",
  "data-encoding",
- "flate2",
  "fluent-uri",
  "http",
- "proptest",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "test-strategy",
  "thiserror 2.0.20",
  "url",
-]
-
-[[package]]
-name = "archivindex-archiver-cli"
-version = "0.1.0"
-dependencies = [
- "archivindex-archiver",
- "cli-helpers",
- "indicatif",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -158,11 +146,13 @@ name = "archivindex-surt"
 version = "0.1.0"
 dependencies = [
  "bounded-static",
+ "fluent-uri",
  "proptest",
  "serde",
  "serde_json",
  "test-strategy",
  "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]
@@ -189,7 +179,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#e9fe11bafefc4ab107382edafe48f0d3fac3e6a0"
+source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
 dependencies = [
  "archivindex-warc-digest",
  "chrono",
@@ -208,7 +198,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#e9fe11bafefc4ab107382edafe48f0d3fac3e6a0"
+source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -220,15 +210,11 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
+source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
 dependencies = [
  "archivindex-warc",
  "fluent-uri",
- "http",
- "proptest",
  "rusqlite",
- "sha2",
- "tempfile",
- "test-strategy",
  "thiserror 2.0.20",
 ]
 
@@ -1530,7 +1516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

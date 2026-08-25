@@ -1,13 +1,10 @@
 [workspace]
 members = [
-  "archiver",
-  "archiver-cli",
   "cdx",
   "packager",
   "packager-cli",
   "surt",
   "wacz",
-  "warc-revisit-index",
   "wordpress",
   "wordpress-cli",
 ]
@@ -24,32 +21,24 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
+archivindex-archiver = { version = "0.1.0", git = "https://github.com/travisbrown/archivindex-warc" }
+archivindex-cdx = { version = "0.1.0", path = "cdx" }
+archivindex-surt = { version = "0.1.0", path = "surt" }
+archivindex-wacz = { version = "0.1.0", path = "wacz" }
 # Keep the shared declaration feature-free. Each consumer enables only the WARC capabilities it
 # uses, so lightweight readers do not inherit the archiver's HTTP and payload-identification stack.
 archivindex-warc = { version = "0.1.0", git = "https://github.com/travisbrown/archivindex-warc", default-features = false }
-archivindex-cdx = { path = "cdx" }
+# Feature-free as well: the borrowing models opt into `derive`, and only WACZ needs `chrono`.
+bounded-static = "0.8"
 chrono = "0.4"
 cli-helpers = "0.1"
-data-encoding = "2"
 flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
 # The WARC crate takes and returns URI-valued header fields as `fluent_uri::Uri<String>`.
 fluent-uri = "0.4"
-# The WARC crate's recorder takes its request parts (method, target, headers) as `http` types.
-http = "1"
-indicatif = "0.18"
 proptest = "1"
-redb = "4"
-rusqlite = "0.40"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.11"
 tempfile = "3"
 test-strategy = "0.4"
 thiserror = "2"
 url = "2"
-# Only the DEFLATE codec is needed: WARC and CDX members are stored, and gzip payloads are handled
-# by `flate2` so that compressed members can be read as streams.
-zip = { version = "8", default-features = false, features = [
-  "deflate-flate2",
-  "deflate-zopfli",
-] }

@@ -19,10 +19,10 @@ doc = false
 bundled = ["archivindex-archiver/bundled"]
 
 [dependencies]
-archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
+archivindex-archiver.workspace = true
 archivindex-wordpress = { version = "0.1.0", path = "../wordpress/" }
 cli-helpers.workspace = true
-indicatif.workspace = true
+indicatif = "0.18"
 serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true

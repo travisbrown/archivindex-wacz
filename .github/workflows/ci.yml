@@ -86,8 +86,6 @@ jobs:
         run: |
           cargo package --allow-dirty --list -p archivindex-surt
           cargo package --allow-dirty --list -p archivindex-wacz
-          cargo package --allow-dirty --list -p archivindex-warc-revisit-index
-          cargo package --allow-dirty --list -p archivindex-archiver
           cargo package --allow-dirty --list -p archivindex-packager
 
   coverage:

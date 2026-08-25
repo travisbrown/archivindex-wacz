@@ -12,7 +12,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
+archivindex-archiver.workspace = true
 archivindex-warc = { workspace = true, features = ["gzip", "http"] }
 chrono.workspace = true
 serde.workspace = true

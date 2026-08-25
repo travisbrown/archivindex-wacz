@@ -24,6 +24,9 @@
 //! # Ok::<_, archivindex_surt::url::Error>(())
 //! ```
 //!
+//! Keys and URLs convert to and from the URL types other crates hand around: `fluent_uri::Uri`
+//! under the default `fluent-uri` feature, and `url::Url` under the `url` feature.
+//!
 //! [heritrix]: http://crawler.archive.org/articles/user_manual/glossary.html#surt
 //! [ssurt]: https://github.com/iipc/urlcanon/blob/master/ssurt.rst
 
@@ -219,6 +222,48 @@ impl<'a> Surt<'a> {
         })
     }
 
+    /// The URL the key stands for as a [`fluent_uri::Uri`], given a scheme.
+    ///
+    /// [`url`](Self::url) renders the same text; this parses it, so that the result can be passed
+    /// to an interface that takes URIs, such as the WARC record headers of `archivindex-warc`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the canonical URL is not a URI. Escape normalization re-encodes only controls,
+    /// space, `#`, `%`, and non-ASCII bytes, so a path can keep characters like `{` or `|` that
+    /// RFC 3986 does not allow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use archivindex_surt::Surt;
+    ///
+    /// let key = Surt::parse("com,example)/movies?a=1")?;
+    ///
+    /// assert_eq!(key.to_uri("https")?.as_str(), "https://example.com/movies?a=1");
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    #[cfg(feature = "fluent-uri")]
+    pub fn to_uri(&self, scheme: &str) -> Result<fluent_uri::Uri<String>, fluent_uri::ParseError> {
+        // The owned parse returns the input alongside the error, which the caller still holds.
+        fluent_uri::Uri::parse(self.url(scheme).to_string()).map_err(|(error, _)| error)
+    }
+
+    /// The URL the key stands for as a [`url::Url`](::url::Url), given a scheme.
+    ///
+    /// [`url`](Self::url) renders the same text; this parses it. The WHATWG rules that parser
+    /// follows are more forgiving than RFC 3986, so it accepts keys [`to_uri`](Self::to_uri)
+    /// rejects, and it percent-encodes whatever a URI would not allow.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the canonical URL is not a URL, which for a well-formed key means a host the
+    /// WHATWG parser rejects.
+    #[cfg(feature = "url")]
+    pub fn to_url(&self, scheme: &str) -> Result<::url::Url, ::url::ParseError> {
+        ::url::Url::parse(&self.url(scheme).to_string())
+    }
+
     /// Detach the key from the text it was parsed from.
     #[must_use]
     pub fn into_owned(self) -> Surt<'static> {
@@ -252,6 +297,38 @@ impl<'a> From<Surt<'a>> for Cow<'a, str> {
 impl AsRef<str> for Surt<'_> {
     fn as_ref(&self) -> &str {
         &self.key
+    }
+}
+
+/// Canonicalizes with the Wayback Machine's rules, as [`Surt::from_url`] does; another convention
+/// is applied by passing [`Uri::as_str`](fluent_uri::Uri::as_str) to [`url::Canonicalizer::surt`].
+#[cfg(feature = "fluent-uri")]
+impl TryFrom<&fluent_uri::Uri<String>> for Surt<'static> {
+    type Error = url::Error;
+
+    fn try_from(uri: &fluent_uri::Uri<String>) -> Result<Self, Self::Error> {
+        Self::from_url(uri.as_str())
+    }
+}
+
+/// See the implementation for [`fluent_uri::Uri<String>`].
+#[cfg(feature = "fluent-uri")]
+impl TryFrom<fluent_uri::Uri<&str>> for Surt<'static> {
+    type Error = url::Error;
+
+    fn try_from(uri: fluent_uri::Uri<&str>) -> Result<Self, Self::Error> {
+        Self::from_url(uri.as_str())
+    }
+}
+
+/// Canonicalizes with the Wayback Machine's rules, as [`Surt::from_url`] does. The URL has already
+/// been through the WHATWG parser, which normalizes some of the same things in its own way.
+#[cfg(feature = "url")]
+impl TryFrom<&::url::Url> for Surt<'static> {
+    type Error = url::Error;
+
+    fn try_from(url: &::url::Url) -> Result<Self, Self::Error> {
+        Self::from_url(url.as_str())
     }
 }
 
@@ -510,6 +587,42 @@ mod tests {
                 .url("http")
                 .to_string(),
             "http://[2001:db8::1]:8080/p"
+        );
+    }
+
+    #[cfg(feature = "fluent-uri")]
+    #[test]
+    fn converts_to_and_from_uris() {
+        let uri =
+            fluent_uri::Uri::parse("https://www.Example.com:443/Movies/?b=2&a=1#top".to_string())
+                .unwrap();
+        let key = Surt::try_from(&uri).unwrap();
+
+        assert_eq!(key.as_str(), "com,example)/movies?a=1&b=2");
+        assert_eq!(
+            key.to_uri("https").unwrap().as_str(),
+            "https://example.com/movies?a=1&b=2"
+        );
+    }
+
+    #[cfg(feature = "fluent-uri")]
+    #[test]
+    fn converts_from_borrowing_uris() {
+        let uri = fluent_uri::Uri::parse("http://EXAMPLE.com:80/A/B/").unwrap();
+
+        assert_eq!(Surt::try_from(uri).unwrap().as_str(), "com,example)/a/b");
+    }
+
+    #[cfg(feature = "url")]
+    #[test]
+    fn converts_to_and_from_whatwg_urls() {
+        let url = ::url::Url::parse("https://www.Example.com:443/Movies/?b=2&a=1#top").unwrap();
+        let key = Surt::try_from(&url).unwrap();
+
+        assert_eq!(key.as_str(), "com,example)/movies?a=1&b=2");
+        assert_eq!(
+            key.to_url("https").unwrap().as_str(),
+            "https://example.com/movies?a=1&b=2"
         );
     }
 }

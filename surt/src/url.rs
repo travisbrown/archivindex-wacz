@@ -325,6 +325,60 @@ impl fmt::Display for Url<'_> {
     }
 }
 
+/// Borrows the URI's text; unlike [`crate::Surt`], this type does not canonicalize, so the
+/// result is the same URL, only indexed.
+#[cfg(feature = "fluent-uri")]
+impl<'a> TryFrom<&'a fluent_uri::Uri<String>> for Url<'a> {
+    type Error = Error;
+
+    fn try_from(uri: &'a fluent_uri::Uri<String>) -> Result<Self, Self::Error> {
+        Self::parse(uri.as_str())
+    }
+}
+
+/// See the implementation for [`fluent_uri::Uri<String>`].
+#[cfg(feature = "fluent-uri")]
+impl<'a> TryFrom<fluent_uri::Uri<&'a str>> for Url<'a> {
+    type Error = Error;
+
+    fn try_from(uri: fluent_uri::Uri<&'a str>) -> Result<Self, Self::Error> {
+        Self::parse(uri.as_str())
+    }
+}
+
+/// Fails when the URL is not a URI: escape normalization leaves characters like `{` or `|` that
+/// RFC 3986 does not allow, and a URL that was never canonicalized may contain anything.
+#[cfg(feature = "fluent-uri")]
+impl TryFrom<&Url<'_>> for fluent_uri::Uri<String> {
+    type Error = fluent_uri::ParseError;
+
+    fn try_from(url: &Url<'_>) -> Result<Self, Self::Error> {
+        // The owned parse returns the input alongside the error, which the caller still holds.
+        Self::parse(url.as_str().to_string()).map_err(|(error, _)| error)
+    }
+}
+
+/// Borrows the URL's text, which the WHATWG parser has already normalized in its own way.
+#[cfg(feature = "url")]
+impl<'a> TryFrom<&'a ::url::Url> for Url<'a> {
+    type Error = Error;
+
+    fn try_from(url: &'a ::url::Url) -> Result<Self, Self::Error> {
+        Self::parse(url.as_str())
+    }
+}
+
+/// Re-parses under the WHATWG rules, which are more forgiving than the ones here, but which also
+/// re-encode: the result may not be the same text.
+#[cfg(feature = "url")]
+impl TryFrom<&Url<'_>> for ::url::Url {
+    type Error = ::url::ParseError;
+
+    fn try_from(url: &Url<'_>) -> Result<Self, Self::Error> {
+        Self::parse(url.as_str())
+    }
+}
+
 /// Append a host with its labels reversed and comma-separated; IPv6 literals are kept whole.
 fn push_reversed_host(output: &mut String, host: &str, trailing_comma: bool) {
     if host.starts_with('[') {
@@ -601,5 +655,40 @@ mod tests {
         prop_assert_eq!(key.port(), parts.port);
         prop_assert!(url.heritrix().contains(&heritrix_host));
         prop_assert!(url.ssurt().starts_with(&ssurt_prefix));
+    }
+
+    #[cfg(feature = "fluent-uri")]
+    #[test]
+    fn converts_to_and_from_uris() {
+        let uri = fluent_uri::Uri::parse("https://user@Example.com:8080/a/b?c=d#frag".to_string())
+            .unwrap();
+        let url = Url::try_from(&uri).unwrap();
+
+        assert_eq!(url.host(), "Example.com");
+        assert_eq!(url.port(), Some(8080));
+        assert_eq!(url.userinfo(), Some("user"));
+        assert_eq!(
+            fluent_uri::Uri::try_from(&url).unwrap().as_str(),
+            uri.as_str()
+        );
+    }
+
+    #[cfg(feature = "fluent-uri")]
+    #[test]
+    fn converts_from_borrowing_uris() {
+        let uri = fluent_uri::Uri::parse("http://example.com/a").unwrap();
+
+        assert_eq!(Url::try_from(uri).unwrap().host(), "example.com");
+    }
+
+    #[cfg(feature = "url")]
+    #[test]
+    fn converts_to_and_from_whatwg_urls() {
+        let parsed = ::url::Url::parse("https://example.com:8080/a/b?c=d#frag").unwrap();
+        let url = Url::try_from(&parsed).unwrap();
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.query(), Some("c=d"));
+        assert_eq!(::url::Url::try_from(&url).unwrap(), parsed);
     }
 }

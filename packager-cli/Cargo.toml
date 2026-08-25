@@ -16,6 +16,6 @@ doc = false
 
 [dependencies]
 archivindex-packager = { version = "0.1.0", path = "../packager/" }
-archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
+archivindex-wacz.workspace = true
 cli-helpers.workspace = true
 thiserror.workspace = true

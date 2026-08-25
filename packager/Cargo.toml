@@ -13,18 +13,18 @@ version.workspace = true
 
 [dependencies]
 archivindex-cdx.workspace = true
-archivindex-surt = { version = "0.1.0", path = "../surt/" }
-archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
+archivindex-surt.workspace = true
+archivindex-wacz.workspace = true
 archivindex-warc = { workspace = true, features = ["gzip", "http"] }
 chrono.workspace = true
-redb.workspace = true
+redb = "4"
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
+archivindex-archiver.workspace = true
 flate2.workspace = true
 proptest.workspace = true
 test-strategy.workspace = true

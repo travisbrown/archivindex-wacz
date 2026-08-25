@@ -12,15 +12,24 @@ license.workspace = true
 version.workspace = true
 
 [features]
+default = ["bounded-static", "fluent-uri", "serde"]
 ## Borrowing `serde::Deserialize` and `serde::Serialize` implementations for `Surt`.
 serde = ["dep:serde"]
 ## `bounded_static` implementations for `Surt`, so that it can be a field of a `ToStatic` type.
 bounded-static = ["dep:bounded-static"]
+## Conversions between the types here and `fluent_uri::Uri`, the URI type WARC records use.
+fluent-uri = ["dep:fluent-uri"]
+## Conversions between the types here and `url::Url`, the WHATWG URL parser.
+url = ["dep:url"]
 
 [dependencies]
-bounded-static = { version = "0.8", optional = true }
+bounded-static = { workspace = true, optional = true }
+fluent-uri = { workspace = true, optional = true }
+# Not the shared declaration, which enables `derive`: the implementations here are written by
+# hand, so a dependent enabling this feature should not have to build `serde_derive`.
 serde = { version = "1", optional = true }
 thiserror.workspace = true
+url = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
