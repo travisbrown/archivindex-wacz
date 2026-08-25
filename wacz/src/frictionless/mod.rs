@@ -6,10 +6,11 @@
 //!
 //! [data-package]: https://specs.frictionlessdata.io/data-package/
 //!
-//! Parsing is lenient: properties beyond those modeled here are preserved in [`DataPackage::extra`]
-//! and [`Resource::extra`] so that manifests written by other tools survive a read-modify-write
-//! cycle. The [`signature`] submodule models the digest file's signature envelope, whose parsing is
-//! strict as its specification requires.
+//! Properties beyond those modeled here are preserved in [`DataPackage::extra`] and
+//! [`Resource::extra`] so that manifests written by other tools survive a read-modify-write cycle.
+//! Modeled properties are read as their specifications require: date-times must be RFC 3339, and
+//! the [`signature`] submodule's envelope parsing is likewise strict. The [`compat`] submodule
+//! reads manifests whose dates are written in the other forms found in the wild.
 
 use std::borrow::Cow;
 
@@ -20,6 +21,7 @@ use archivindex_cdx::properties::ExtraProperties;
 
 use crate::digest::Sha256Digest;
 
+pub mod compat;
 pub mod resource;
 pub mod signature;
 
@@ -115,14 +117,14 @@ pub struct DataPackage<'a> {
     /// When the WACZ file was created.
     #[serde(
         default,
-        deserialize_with = "crate::attributes::optional_lenient_datetime",
+        deserialize_with = "crate::attributes::optional_rfc_3339_datetime",
         skip_serializing_if = "Option::is_none"
     )]
     pub created: Option<DateTime<Utc>>,
     /// When the WACZ file was last modified.
     #[serde(
         default,
-        deserialize_with = "crate::attributes::optional_lenient_datetime",
+        deserialize_with = "crate::attributes::optional_rfc_3339_datetime",
         skip_serializing_if = "Option::is_none"
     )]
     pub modified: Option<DateTime<Utc>>,
@@ -146,7 +148,7 @@ pub struct DataPackage<'a> {
     #[serde(
         rename = "mainPageDate",
         default,
-        deserialize_with = "crate::attributes::optional_lenient_datetime",
+        deserialize_with = "crate::attributes::optional_rfc_3339_datetime",
         skip_serializing_if = "Option::is_none"
     )]
     pub main_page_date: Option<DateTime<Utc>>,

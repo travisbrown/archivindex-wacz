@@ -4,6 +4,12 @@
 //! and naming the list, followed by one [`Page`] entry per line. The `pages/pages.jsonl` file is
 //! required in every WACZ; additional lists (for example `extraPages.jsonl`) may sit alongside it
 //! in the `pages/` directory using the same format.
+//!
+//! Entries are read at two levels. [`RawPage`] models an entry with its timestamp exactly as it
+//! was written, and [`Page`] is the semantic form, whose timestamp is the RFC 3339 date-time the
+//! specification requires. [`PageListReader`] produces the latter directly; readers that need to
+//! accept the zone-less timestamps written by some other tools go through [`RawPageListReader`]
+//! and [`RawPage::into_page_compatible`].
 
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
@@ -60,6 +66,15 @@ pub enum Error {
         /// The underlying deserialization error.
         #[source]
         source: serde_json::Error,
+        /// Bounded source context.
+        context: LineContext,
+    },
+    /// A page entry has a timestamp that the specification does not permit.
+    #[error("invalid page list entry at {context}")]
+    InvalidTimestamp {
+        /// The underlying conversion error.
+        #[source]
+        source: InvalidTimestamp,
         /// Bounded source context.
         context: LineContext,
     },
@@ -136,7 +151,7 @@ pub struct Page<'a> {
     #[serde(borrow)]
     pub url: Cow<'a, str>,
     /// When the page was captured.
-    #[serde(deserialize_with = "crate::attributes::lenient_datetime")]
+    #[serde(deserialize_with = "crate::attributes::rfc_3339_datetime")]
     pub ts: DateTime<Utc>,
     /// An arbitrary identifier for the page.
     #[serde(
@@ -181,16 +196,104 @@ impl Page<'_> {
     }
 }
 
-/// A reader that iteratively parses page entries from a page list stream.
+/// A page entry whose timestamp has not been interpreted.
+///
+/// This is the raw level of page-list reading: every property is modeled, but `ts` is kept exactly
+/// as it was written. Converting to [`Page`] applies the specification's requirement that the
+/// timestamp be an RFC 3339 date-time; [`Self::into_page_compatible`] instead applies the
+/// compatibility parser, which also reads the zone-less date-times that some other tools write.
+#[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize)]
+pub struct RawPage<'a> {
+    /// The URL of the archived page.
+    #[serde(borrow)]
+    pub url: Cow<'a, str>,
+    /// When the page was captured, as written.
+    #[serde(borrow)]
+    pub ts: Cow<'a, str>,
+    /// An arbitrary identifier for the page.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id: Option<Cow<'a, str>>,
+    /// A title describing the page.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub title: Option<Cow<'a, str>>,
+    /// Text content extracted from the page, used for search.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub text: Option<Cow<'a, str>>,
+    /// The total size in bytes of the page and its resources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Additional properties, preserved verbatim for round-tripping.
+    #[serde(flatten)]
+    pub extra: ExtraProperties,
+}
+
+/// A page timestamp that could not be interpreted as a date-time.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("invalid page timestamp: {0}")]
+pub struct InvalidTimestamp(pub String);
+
+impl<'a> RawPage<'a> {
+    /// Interpret the timestamp with the compatibility parser, which accepts the zone-less
+    /// date-times and bare dates written by tools that do not follow the specification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidTimestamp`] if the timestamp is in none of those forms.
+    pub fn into_page_compatible(self) -> Result<Page<'a>, InvalidTimestamp> {
+        self.into_page(crate::attributes::parse_compatible_datetime)
+    }
+
+    /// Interpret the timestamp with `parse`, moving the other properties across unchanged.
+    fn into_page(
+        self,
+        parse: fn(&str) -> Option<DateTime<Utc>>,
+    ) -> Result<Page<'a>, InvalidTimestamp> {
+        let ts = parse(&self.ts).ok_or_else(|| InvalidTimestamp(self.ts.into_owned()))?;
+
+        Ok(Page {
+            url: self.url,
+            ts,
+            id: self.id,
+            title: self.title,
+            text: self.text,
+            size: self.size,
+            extra: self.extra,
+        })
+    }
+}
+
+impl<'a> TryFrom<RawPage<'a>> for Page<'a> {
+    type Error = InvalidTimestamp;
+
+    /// Interpret the timestamp as the RFC 3339 date-time the specification requires.
+    fn try_from(page: RawPage<'a>) -> Result<Self, Self::Error> {
+        page.into_page(crate::attributes::parse_rfc_3339)
+    }
+}
+
+/// A reader that iteratively parses page entries from a page list stream, leaving their
+/// timestamps uninterpreted.
 ///
 /// Blank lines (such as a trailing newline at the end of the file) are skipped rather than treated
 /// as invalid entries.
-pub struct PageListReader<R> {
+pub struct RawPageListReader<R> {
     lines: Lines<R>,
     header: PageListHeader<'static>,
 }
 
-impl<R: BufRead> PageListReader<R> {
+impl<R: BufRead> RawPageListReader<R> {
     /// Create a new reader, reading and validating the header line.
     ///
     /// # Errors
@@ -227,16 +330,13 @@ impl<R: BufRead> PageListReader<R> {
     pub const fn header(&self) -> &PageListHeader<'static> {
         &self.header
     }
-}
 
-impl<R: BufRead> Iterator for PageListReader<R> {
-    type Item = Result<Page<'static>, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Read the next entry together with the source context it came from.
+    fn next_located(&mut self) -> Option<Result<(LineContext, RawPage<'static>), Error>> {
         match self.lines.next_content() {
             Ok(Some((location, line_text))) => Some(
-                serde_json::from_str::<Page<'_>>(line_text)
-                    .map(IntoBoundedStatic::into_static)
+                serde_json::from_str::<RawPage<'_>>(line_text)
+                    .map(|page| (location.clone(), page.into_static()))
                     .map_err(|source| Error::InvalidEntry {
                         source,
                         context: location,
@@ -245,6 +345,57 @@ impl<R: BufRead> Iterator for PageListReader<R> {
             Ok(None) => None,
             Err(error) => Some(Err(error.into())),
         }
+    }
+}
+
+impl<R: BufRead> Iterator for RawPageListReader<R> {
+    type Item = Result<RawPage<'static>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.next_located()?.map(|(_, page)| page))
+    }
+}
+
+/// A reader that iteratively parses page entries from a page list stream.
+///
+/// Entries are read at the semantic level, so a timestamp that is not the RFC 3339 date-time the
+/// specification requires is an error; [`RawPageListReader`] reads such entries. Blank lines (such
+/// as a trailing newline at the end of the file) are skipped rather than treated as invalid
+/// entries.
+pub struct PageListReader<R> {
+    raw: RawPageListReader<R>,
+}
+
+impl<R: BufRead> PageListReader<R> {
+    /// Create a new reader, reading and validating the header line.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the stream has no non-blank lines, if the header line is not valid JSON, or if the
+    /// header declares a format other than [`FORMAT`].
+    pub fn new(reader: R) -> Result<Self, Error> {
+        Self::with_source(reader, "<stream>")
+    }
+
+    /// Create a reader carrying a member path or source name for diagnostics.
+    pub fn with_source(reader: R, source: impl Into<String>) -> Result<Self, Error> {
+        RawPageListReader::with_source(reader, source).map(|raw| Self { raw })
+    }
+
+    /// The parsed header line.
+    #[must_use]
+    pub const fn header(&self) -> &PageListHeader<'static> {
+        self.raw.header()
+    }
+}
+
+impl<R: BufRead> Iterator for PageListReader<R> {
+    type Item = Result<Page<'static>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.raw.next_located()?.and_then(|(context, page)| {
+            Page::try_from(page).map_err(|source| Error::InvalidTimestamp { source, context })
+        }))
     }
 }
 
@@ -424,6 +575,63 @@ mod tests {
             id.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         );
+    }
+
+    /// A page list holding one entry whose timestamp is written as `ts`.
+    fn page_list(ts: &str) -> String {
+        format!(
+            "{{\"format\":\"{FORMAT}\"}}\n{{\"url\":\"https://example.com/\",\"ts\":\"{ts}\"}}\n"
+        )
+    }
+
+    #[test]
+    fn zoneless_timestamps_are_rejected_at_the_semantic_level() {
+        let list = page_list("2020-10-07T21:22:36");
+        let mut reader = PageListReader::new(list.as_bytes()).expect("a valid header");
+
+        assert!(matches!(
+            reader.next(),
+            Some(Err(Error::InvalidTimestamp { context, .. })) if context.line == 2
+        ));
+    }
+
+    #[test]
+    fn zoneless_timestamps_are_read_at_the_raw_level() {
+        let list = page_list("2020-10-07T21:22:36");
+        let mut reader = RawPageListReader::new(list.as_bytes()).expect("a valid header");
+        let raw = reader
+            .next()
+            .expect("one entry")
+            .expect("a parseable entry");
+
+        assert_eq!(raw.ts, "2020-10-07T21:22:36");
+        assert_eq!(
+            Page::try_from(raw.clone()),
+            Err(InvalidTimestamp("2020-10-07T21:22:36".to_owned()))
+        );
+        assert_eq!(
+            raw.into_page_compatible().map(|page| page.ts),
+            DateTime::parse_from_rfc3339("2020-10-07T21:22:36Z")
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|_| InvalidTimestamp(String::new()))
+        );
+    }
+
+    #[test_strategy::proptest]
+    fn written_entries_are_read_at_both_levels(
+        #[strategy(strategies::page_list_header())] header: PageListHeader<'static>,
+        #[strategy(proptest::collection::vec(strategies::page(), 0..=4))] pages: Vec<Page<'static>>,
+    ) {
+        let mut output = Vec::new();
+        write_page_list(&mut output, &header, &pages).unwrap();
+
+        let read = RawPageListReader::new(output.as_slice())
+            .unwrap()
+            .map(|page| Page::try_from(page.expect("invariant violation: written entries parse")))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("invariant violation: written timestamps are RFC 3339");
+
+        prop_assert_eq!(read, pages);
     }
 
     #[test]

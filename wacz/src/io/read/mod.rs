@@ -16,7 +16,7 @@ use bounded_static::IntoBoundedStatic;
 use crate::cdxj::IndexReader;
 use crate::digest::Sha256Digest;
 use crate::frictionless::{DataPackage, DataPackageDigest};
-use crate::pages::PageListReader;
+use crate::pages::{PageListReader, RawPageListReader};
 use crate::{
     ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, GZIP_EXTENSION, INDEXES_PREFIX,
     PAGES_PATH,
@@ -233,6 +233,20 @@ impl<R: Read + Seek> WaczReader<R> {
         let member = self.member_stream(path)?;
 
         Ok(PageListReader::with_source(member, path)?)
+    }
+
+    /// Read a page list without interpreting its entry timestamps.
+    ///
+    /// [`Self::page_list`] requires the RFC 3339 timestamps the specification prescribes, so this
+    /// is the level at which a list written with other date forms can be read (see
+    /// [`crate::pages::RawPage::into_page_compatible`]).
+    pub fn raw_page_list(
+        &mut self,
+        path: &str,
+    ) -> Result<RawPageListReader<MemberReader<'_>>, Error> {
+        let member = self.member_stream(path)?;
+
+        Ok(RawPageListReader::with_source(member, path)?)
     }
 
     /// The paths of the WARC files, in unspecified order.

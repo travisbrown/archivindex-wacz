@@ -21,6 +21,7 @@ use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::value::LabelledDigest;
 
 use crate::digest::Sha256Digest;
+use crate::frictionless;
 use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
 use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, PAGES_PATH, PAGES_PREFIX};
 
@@ -132,6 +133,14 @@ pub enum ManifestProblem {
     /// The `wacz_version` property is not `1.1.1`.
     #[error("wacz_version is not 1.1.1: {0}")]
     WaczVersion(String),
+    /// A date-time property is not written in the RFC 3339 form the specification requires.
+    #[error("{property} is not an RFC 3339 date-time: {value}")]
+    NonConformingDate {
+        /// The property name, as it appears in the manifest.
+        property: String,
+        /// The value, as it was written.
+        value: String,
+    },
     /// The manifest lists no resources.
     #[error("empty resource list")]
     NoResources,
@@ -318,9 +327,20 @@ impl<R: Read + Seek> WaczReader<R> {
         };
 
         let mut manifest = Vec::new();
+        // The manifest is read through the compatibility stage so that a date written in a
+        // non-conforming form is reported as exactly that, rather than collapsing every other
+        // manifest check into a single parse failure.
         let package = manifest_bytes.as_deref().and_then(|bytes| {
-            match serde_json::from_slice::<DataPackage<'_>>(bytes) {
-                Ok(package) => Some(package),
+            match frictionless::compat::parse_data_package(bytes) {
+                Ok((package, non_conforming)) => {
+                    manifest.extend(non_conforming.into_iter().map(|date| {
+                        ManifestProblem::NonConformingDate {
+                            property: date.property.to_owned(),
+                            value: date.value,
+                        }
+                    }));
+                    Some(package)
+                }
                 Err(error) => {
                     manifest.push(ManifestProblem::Unparseable(error.to_string()));
                     None
