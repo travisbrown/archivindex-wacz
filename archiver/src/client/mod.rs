@@ -8,7 +8,7 @@ use archivindex_warc_revisit_index::db::Index as RevisitIndex;
 use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::capture::{ArchiveSummary, CaptureControl, CaptureEvent, CaptureEventSink};
-use crate::{Archiver, Config, Error, InvalidUserAgent};
+use crate::{Archiver, Config, Error, UserAgentError};
 
 pub mod collection;
 pub mod outcome;
@@ -36,10 +36,10 @@ impl Archiver {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidUserAgent`] if the configured `User-Agent` is not a valid header value.
-    pub fn new(config: Config) -> Result<Self, InvalidUserAgent> {
+    /// Returns [`UserAgentError`] if the configured `User-Agent` cannot be sent as a field value.
+    pub fn new(config: Config) -> Result<Self, UserAgentError> {
         let user_agent = HeaderValue::from_str(&config.user_agent)
-            .map_err(|_| InvalidUserAgent(config.user_agent.clone()))?;
+            .map_err(|_| UserAgentError(config.user_agent.clone()))?;
         let mut headers = HeaderMap::with_capacity(2);
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         headers.insert(USER_AGENT, user_agent);

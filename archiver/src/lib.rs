@@ -71,8 +71,9 @@ pub struct Archiver {
 pub struct Config {
     /// The `User-Agent` header value sent with every request.
     ///
-    /// The value must be a valid HTTP header value (in particular, it cannot contain line breaks);
-    /// [`Archiver::new`] rejects anything else.
+    /// The value is sent with every request and recorded in every `warcinfo` record;
+    /// [`Archiver::new`] rejects anything a field value cannot hold, as [`UserAgentError`]
+    /// describes.
     pub user_agent: String,
     /// The network timeout, applied to connecting and to each socket read and write.
     ///
@@ -149,7 +150,7 @@ pub enum Error {
     },
     /// The configured `User-Agent` cannot be sent or recorded safely.
     #[error(transparent)]
-    InvalidUserAgent(#[from] InvalidUserAgent),
+    InvalidUserAgent(#[from] UserAgentError),
     /// A session identifier is empty or contains a non-URI-unreserved character.
     #[error(transparent)]
     InvalidSessionId(#[from] crate::session::InvalidSessionId),
@@ -179,7 +180,16 @@ impl From<archivindex_warc_revisit_index::error::DatabaseError> for Error {
     }
 }
 
-/// The configured `User-Agent` cannot be sent or recorded safely.
+/// The configured `User-Agent` cannot be sent and recorded as it is written.
+///
+/// The value is sent as an HTTP field value and recorded in the `warcinfo` record of every WARC
+/// file written, so it cannot contain a control character other than the horizontal tab: a
+/// carriage return or line feed would end the field early in both places, and the remaining
+/// controls (including `DEL`) are not field value bytes at all. Anything else a `String` can hold
+/// is accepted, including non-ASCII text, which RFC 9110 carries as opaque bytes without giving it
+/// a meaning; a `User-Agent` a server will display as written is plain ASCII.
+///
+/// The rejected value is reported in the error message.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid User-Agent header value: {0:?}")]
-pub struct InvalidUserAgent(String);
+pub struct UserAgentError(String);

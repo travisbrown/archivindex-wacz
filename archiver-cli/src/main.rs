@@ -290,7 +290,7 @@ enum Error {
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::Error),
     #[error(transparent)]
-    UserAgent(#[from] archivindex_archiver::InvalidUserAgent),
+    UserAgent(#[from] archivindex_archiver::UserAgentError),
     #[error(transparent)]
     SessionId(#[from] archivindex_archiver::session::InvalidSessionId),
     #[error("WARC conversion error: {0}")]
