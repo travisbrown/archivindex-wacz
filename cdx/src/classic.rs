@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::model::capture::{self, Capture};
-use crate::model::field::Field;
+use crate::capture::{self, Capture};
+use crate::field::Field;
 
 /// A classic CDX header or record is malformed.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -185,7 +185,7 @@ impl<'a> Header<'a> {
                 (field, value.clone())
             })
             .collect::<Vec<_>>();
-        Ok(crate::model::capture::from_fields(&fields)?)
+        Ok(crate::capture::from_fields(&fields)?)
     }
 
     /// Format a record with this header's delimiter.

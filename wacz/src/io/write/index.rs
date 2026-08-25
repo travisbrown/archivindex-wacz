@@ -7,8 +7,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 use std::path::PathBuf;
 
-use archivindex_cdx::format::cdxj;
-use archivindex_cdx::model::timestamp::Timestamp;
+use archivindex_cdx::cdxj;
+use archivindex_cdx::timestamp::Timestamp;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 

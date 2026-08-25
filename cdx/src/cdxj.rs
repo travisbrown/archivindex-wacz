@@ -4,9 +4,9 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::model::capture::{self, Capture, Location};
-use crate::model::properties::{self, ExtraProperties};
-use crate::model::timestamp::{self, Timestamp};
+use crate::capture::{self, Capture, Location};
+use crate::properties::{self, ExtraProperties};
+use crate::timestamp::{self, Timestamp};
 
 /// A CDXJ line cannot be parsed.
 #[derive(Debug, thiserror::Error)]

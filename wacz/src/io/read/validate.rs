@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 
-use archivindex_cdx::format::cdxj::ParsedItem;
-use archivindex_cdx::model::timestamp::Timestamp;
+use archivindex_cdx::cdxj::ParsedItem;
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;

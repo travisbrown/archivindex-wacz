@@ -10,9 +10,9 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use archivindex_cdx::format::cdxj;
-use archivindex_cdx::model::properties::ExtraProperties;
-use archivindex_cdx::model::timestamp::Timestamp;
+use archivindex_cdx::cdxj;
+use archivindex_cdx::properties::ExtraProperties;
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;

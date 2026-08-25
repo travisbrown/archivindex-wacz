@@ -2,9 +2,9 @@
 
 use std::borrow::Cow;
 
-use crate::model::field::Field;
-use crate::model::properties::ExtraProperties;
-use crate::model::timestamp::Timestamp;
+use crate::field::Field;
+use crate::properties::ExtraProperties;
+use crate::timestamp::Timestamp;
 
 /// A standard field in a CDX record is absent or malformed.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]

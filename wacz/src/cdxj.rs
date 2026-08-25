@@ -1,11 +1,11 @@
 //! CDXJ models and WACZ-specific stream reading.
 //!
-//! The data model is provided by [`archivindex_cdx::format::cdxj`]. This module retains the stream reader
+//! The data model is provided by [`archivindex_cdx::cdxj`]. This module retains the stream reader
 //! because line-oriented I/O and source diagnostics are WACZ processing concerns.
 
 use std::io::BufRead;
 
-use archivindex_cdx::format::cdxj::{Error as ParseError, ParsedItem};
+use archivindex_cdx::cdxj::{Error as ParseError, ParsedItem};
 
 use crate::LineContext;
 use crate::lines::Lines;

@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
 
-use archivindex_cdx::format::cdxj;
-use archivindex_cdx::model::properties::ExtraProperties as CdxExtraProperties;
-use archivindex_cdx::model::timestamp::Timestamp;
+use archivindex_cdx::cdxj;
+use archivindex_cdx::properties::ExtraProperties as CdxExtraProperties;
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_wacz::ExtraProperties;
 use archivindex_wacz::digest::Sha256Digest;

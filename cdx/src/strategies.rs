@@ -3,11 +3,11 @@ use std::borrow::Cow;
 use chrono::{TimeZone as _, Utc};
 use proptest::prelude::*;
 
-use crate::format::cdxj::{ParsedFields, ParsedItem};
-use crate::format::classic::{Header, Record};
-use crate::format::json::Document;
-use crate::model::properties::ExtraProperties;
-use crate::model::timestamp::Timestamp;
+use crate::cdxj::{ParsedFields, ParsedItem};
+use crate::classic::{Header, Record};
+use crate::json::Document;
+use crate::properties::ExtraProperties;
+use crate::timestamp::Timestamp;
 
 fn text() -> impl Strategy<Value = String> {
     "[A-Za-z0-9._~:/(),-]{1,32}"

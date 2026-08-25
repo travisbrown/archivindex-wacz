@@ -2,9 +2,9 @@
 //!
 //! The crate covers the three CDX representations commonly encountered in web archiving:
 //!
-//! - [`format::classic`] header-described, delimiter-separated CDX records;
-//! - [`format::cdxj`] records with a searchable-key and timestamp prefix followed by a JSON object;
-//! - [`format::json`] CDX Server documents with a header row and JSON-array records.
+//! - [`classic`] header-described, delimiter-separated CDX records;
+//! - [`cdxj`] records with a searchable-key and timestamp prefix followed by a JSON object;
+//! - [`json`] CDX Server documents with a header row and JSON-array records.
 //!
 //! These modules model and convert individual values and records. Reading files, sorting indexes,
 //! looking up captures, and resolving WARC byte ranges belong to higher-level crates.
@@ -22,8 +22,13 @@
 #![forbid(unsafe_code)]
 
 mod attributes;
-pub mod format;
-pub mod model;
+pub mod capture;
+pub mod cdxj;
+pub mod classic;
+pub mod field;
+pub mod json;
+pub mod properties;
+pub mod timestamp;
 
 #[cfg(test)]
 mod strategies;
