@@ -43,3 +43,6 @@ pub mod error;
 pub mod ingest;
 pub mod payload;
 pub mod resource;
+
+#[cfg(test)]
+mod strategies;

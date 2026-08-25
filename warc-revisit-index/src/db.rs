@@ -466,3 +466,113 @@ fn parse_date(field: &'static str, value: String) -> Result<WarcDate, Error> {
     WarcDate::parse(&value, archivindex_warc::version::WarcVersion::V1_1)
         .ok_or(Error::MalformedDate { field, value })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn integer_columns_round_trip(#[strategy(0..=u64::MAX >> 1)] value: u64) {
+        let round_tripped =
+            signed("payload_length", value).and_then(|value| unsigned("payload_length", value));
+
+        prop_assert_eq!(round_tripped.ok(), Some(value));
+    }
+
+    #[test_strategy::proptest]
+    fn out_of_range_integers_are_rejected(
+        #[strategy((u64::MAX >> 1) + 1..=u64::MAX)] too_large: u64,
+        #[strategy(i64::MIN..0)] negative: i64,
+    ) {
+        prop_assert!(signed("payload_length", too_large).is_err());
+        prop_assert!(unsigned("payload_length", negative).is_err());
+    }
+
+    #[test_strategy::proptest]
+    fn payload_sources_are_inserted_once_and_read_back(
+        #[strategy(proptest::collection::vec(strategies::revisit_target(), 0..=6))] targets: Vec<
+            RevisitTarget,
+        >,
+    ) {
+        let index = Index::open_in_memory().unwrap();
+        let mut expected: HashMap<String, RevisitTarget> = HashMap::new();
+
+        for target in targets {
+            let inserted = index.insert_payload(&target).unwrap();
+            let digest = target.payload_digest.to_string();
+
+            // The first record seen for a digest stays canonical.
+            prop_assert_eq!(inserted, !expected.contains_key(&digest));
+            expected.entry(digest).or_insert(target);
+        }
+
+        for target in expected.values() {
+            let found = index.lookup_payload(&target.payload_digest).unwrap();
+
+            prop_assert_eq!(found.as_ref(), Some(target));
+        }
+    }
+
+    #[test_strategy::proptest]
+    fn resource_state_follows_the_update_model(
+        #[strategy(proptest::collection::vec(
+            (strategies::resource_key(), strategies::resource_state_update()),
+            0..=8,
+        ))]
+        updates: Vec<(ResourceKey, ResourceStateUpdate)>,
+    ) {
+        let index = Index::open_in_memory().unwrap();
+        let mut expected: HashMap<String, ResourceState> = HashMap::new();
+
+        for (key, update) in updates {
+            let changed = index.update_resource(&key, update.clone()).unwrap();
+            let uri = key.target_uri().as_str().to_owned();
+
+            match update {
+                ResourceStateUpdate::Representation {
+                    etag,
+                    last_modified,
+                    payload_digest,
+                    record_id,
+                    warc_date,
+                } => {
+                    prop_assert!(changed);
+                    expected.insert(
+                        uri,
+                        ResourceState {
+                            key,
+                            etag,
+                            last_modified,
+                            payload_digest,
+                            record_id,
+                            warc_date,
+                        },
+                    );
+                }
+                ResourceStateUpdate::NotModified {
+                    etag,
+                    last_modified,
+                } => {
+                    // A 304 for a resource that was never captured leaves nothing behind.
+                    prop_assert_eq!(changed, expected.contains_key(&uri));
+
+                    if let Some(state) = expected.get_mut(&uri) {
+                        state.etag = etag.or_else(|| state.etag.take());
+                        state.last_modified = last_modified.or_else(|| state.last_modified.take());
+                    }
+                }
+            }
+        }
+
+        for state in expected.values() {
+            let found = index.lookup_resource(&state.key).unwrap();
+
+            prop_assert_eq!(found.as_ref(), Some(state));
+        }
+    }
+}
