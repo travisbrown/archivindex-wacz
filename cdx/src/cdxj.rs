@@ -262,6 +262,9 @@ pub enum ConformanceError {
 
 impl Fields<'_> {
     /// Check that all required properties are present and no extension property duplicates one.
+    ///
+    /// This is the check the conversion to [`ConformingFields`] applies, for callers that only need
+    /// the verdict.
     pub fn check_conformance(&self) -> Result<(), ConformanceError> {
         let mut missing = Vec::new();
         if self.digest.is_none() {

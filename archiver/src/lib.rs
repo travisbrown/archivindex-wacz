@@ -56,9 +56,9 @@ use http::header::HeaderMap;
 
 /// An HTTP client that captures lists of URLs in WARC files.
 ///
-/// Requests use HTTP/1.1. Redirect hops, wire-format messages, and capture metadata are retained.
-/// One-shot lists request every URL unconditionally; only crawl sessions revalidate earlier
-/// captures.
+/// Each URL is fetched synchronously over HTTP/1.1. Redirect hops, wire-format messages, and
+/// capture metadata are retained. One-shot lists request every URL unconditionally; only crawl
+/// sessions revalidate earlier captures.
 #[derive(Clone, Debug)]
 pub struct Archiver {
     recorder: Recorder,
@@ -180,8 +180,10 @@ impl From<archivindex_warc_revisit_index::error::DatabaseError> for Error {
 
 /// The configured `User-Agent` is not a valid HTTP field value.
 ///
-/// Values may contain visible ASCII and horizontal tabs. The error message includes the rejected
-/// value.
+/// Control characters are rejected, apart from the horizontal tab; a carriage return or line feed
+/// would end the field early, both in the request and in the `warcinfo` record. Everything else is
+/// accepted, including non-ASCII text, which RFC 9110 carries as opaque bytes without giving it a
+/// meaning. The error message includes the rejected value.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid User-Agent header value: {0:?}")]
 pub struct UserAgentError(String);

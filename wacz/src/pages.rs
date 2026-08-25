@@ -5,8 +5,10 @@
 //! required in every WACZ; additional lists (for example `extraPages.jsonl`) may sit alongside it
 //! in the `pages/` directory using the same format.
 //!
-//! [`PageListReader`] requires RFC 3339 timestamps. [`RawPageListReader`] preserves timestamps as
-//! written so callers can apply compatibility parsing when needed.
+//! Entries are read at two levels: [`Page`] is the semantic form, whose timestamp is the RFC 3339
+//! date-time the specification requires, while [`RawPage`] keeps the timestamp exactly as written.
+//! [`PageListReader`] produces the former, and [`RawPageListReader`] the latter, for lists whose
+//! timestamps another tool wrote in another form.
 
 use std::borrow::Cow;
 use std::io::{BufRead, Write};

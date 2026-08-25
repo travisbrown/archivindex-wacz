@@ -220,6 +220,9 @@ pub struct DataPackage<'a> {
 
 impl DataPackage<'_> {
     /// Return every metadata constraint violated by this package and its resources.
+    ///
+    /// Requirements that involve the rest of the archive, such as the resource list, are reported
+    /// by [`crate::io::read::validate`] instead.
     #[must_use]
     pub fn constraint_errors(&self) -> Vec<ConstraintError> {
         let mut errors = constraint_errors(

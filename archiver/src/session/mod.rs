@@ -17,8 +17,9 @@ mod run;
 
 /// A session identifier is empty or contains a character outside the RFC 3986 unreserved set.
 ///
-/// Valid identifiers contain ASCII letters, digits, `-`, `.`, `_`, or `~`. The error message
-/// includes the rejected identifier.
+/// Valid identifiers contain ASCII letters, digits, `-`, `.`, `_`, or `~`, so that the identifier
+/// can name the session's WARC file and appear unencoded in that file's `warcinfo` record. The
+/// error message includes the rejected identifier.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid session identifier: {0:?}")]
 pub struct SessionIdError(String);

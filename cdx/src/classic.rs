@@ -89,7 +89,8 @@ impl<'a> Header<'a> {
             (true, delimiter, rest)
         };
 
-        // Report the complete header instead of the legend fragment rejected by `new`.
+        // `new` can only reject the legend itself, since the delimiter is a character of this
+        // line, which has no line break. Report the whole header rather than that fragment.
         let markers = rest.split(delimiter).map(Cow::Borrowed).collect::<Vec<_>>();
         Self::new(delimiter, leading_delimiter, markers)
             .map_err(|_| Error::InvalidLegend(line.to_owned()))

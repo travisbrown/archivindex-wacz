@@ -1,4 +1,6 @@
 //! Capture outcomes, lifecycle events, and cancellation.
+//!
+//! One-shot archiving and crawl sessions both report their work in these types.
 
 use chrono::{DateTime, Utc};
 
@@ -101,7 +103,7 @@ pub trait CaptureEventSink {
     /// Observe one event and decide whether capture should continue.
     fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl;
 
-    /// Report that a URL capture attempt is starting; return `true` to stop.
+    /// Report that a URL capture attempt is starting, returning whether the sink asked to stop.
     fn started(&mut self, url: &str, attempt: usize) -> bool {
         self.event(CaptureEvent::Started { url, attempt }) == CaptureControl::Cancel
     }

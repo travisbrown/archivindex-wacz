@@ -24,8 +24,9 @@ impl<W: Write + Seek> WaczWriter<W> {
     ///
     /// # Errors
     ///
-    /// Fails if an extension property duplicates a modeled CDXJ property, the name is not a direct
-    /// `.cdx` member name, or index writing fails.
+    /// Returns [`Error::InvalidIndexFields`] if an entry's extension properties duplicate a
+    /// modeled CDXJ property, [`Error::InvalidIndexName`] if the name is not a direct `.cdx` member
+    /// name, and [`Error::Io`] if the index cannot be written.
     pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
         &mut self,
         name: &str,
@@ -207,8 +208,8 @@ impl IndexSpool {
     ///
     /// # Errors
     ///
-    /// Fails if an extension property duplicates a modeled CDXJ property or a run cannot be
-    /// written.
+    /// Returns [`Error::InvalidIndexFields`] if the item's extension properties duplicate a
+    /// modeled CDXJ property, or [`Error::Io`] if a run cannot be written.
     pub fn push(&mut self, item: &cdxj::ConformingItem<'_>) -> Result<(), Error> {
         item.fields.validate()?;
 
