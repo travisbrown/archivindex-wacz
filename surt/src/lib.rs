@@ -87,9 +87,8 @@ struct Shape {
 /// A SURT key: `com,example[:port])[path][?query]`.
 ///
 /// The host's labels are in reverse DNS order, separated by commas, and followed by `)`; an IPv6
-/// literal is a single label, bracketed or, as the Wayback Machine writes it, bare (in which case
-/// what follows the address is part of the host, not a port). Keys order by their text, which is what makes them
-/// useful: a prefix of a key is a prefix of the keys of everything below it.
+/// literal is a single bracketed label, or a bare label in Wayback-style keys. Keys sort as text,
+/// so a key prefix selects everything beneath it.
 ///
 /// Parsing borrows the text; [`Surt::into_owned`] detaches it.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

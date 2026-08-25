@@ -46,9 +46,7 @@ pub(super) struct MetadataValues<'a> {
 
 /// Build the `warcinfo` record at the start of a WARC file.
 ///
-/// The builder opens the body with `format` and `conformsTo`; the remaining fields follow in
-/// the order they are set here. `software` and `http-header-user-agent` are always written,
-/// even though WARC lets every `warcinfo` field be omitted.
+/// `software` and `http-header-user-agent` are always included.
 pub(super) fn warcinfo_record(
     warc_name: &str,
     options: &WarcinfoOptions<'_>,

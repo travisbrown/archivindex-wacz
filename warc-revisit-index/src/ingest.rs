@@ -63,14 +63,13 @@ fn index_response<E: Extension>(
         unreachable!("index_response is only called for response records");
     };
 
-    // A truncated body is not the resource's representation, and nothing may revisit it.
+    // A truncated body is neither a representation nor a revisit target.
     if header.core.truncated.is_some() {
         return Ok(IndexRecordOutcome::default());
     }
     let metadata = http_metadata(body)?;
     let payload_digest = header.payload.payload_digest.clone();
-    // Without a transfer coding the entity body is the stored body, whose length needs no
-    // decoding; only a coded body has to be decoded to be measured.
+    // Decode only transfer-coded bodies; otherwise the stored body gives the payload length.
     let payload_length = if metadata.transfer_encoded {
         record
             .payload_bytes()
@@ -147,9 +146,7 @@ fn index_revisit<E: Extension>(
                         "identical-payload-digest revisit has no payload digest",
                     ))?;
             let canonical = lookup_payload(connection, digest)?;
-            // Without a known canonical record the revisit itself must never become the
-            // resource's record: it carries no payload, so a later `WARC-Refers-To` pointing at
-            // it would be unresolvable. A missing `WARC-Refers-To` is stored as NULL.
+            // A revisit without a canonical payload record cannot itself become the original.
             let (record_id, warc_date) = canonical.as_ref().map_or_else(
                 || (header.refers_to.clone(), header.refers_to_date),
                 |target| (Some(target.record_id.clone()), Some(target.warc_date)),

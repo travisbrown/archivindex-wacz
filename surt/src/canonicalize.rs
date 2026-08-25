@@ -3,9 +3,9 @@
 //! Every rule set repairs its input the way the Python `surt` library's `handyurl.parse` does
 //! (trimming whitespace, removing tabs and newlines, defaulting to `http://`, and unwrapping
 //! `http://https://...`), lowercases the scheme, host, path, and query, drops the user
-//! information and fragment, drops a default port and an empty query, resolves `.` and `..`
-//! path segments (keeping a `..` with nothing above it), strips trailing dots from the host, rewrites numeric IPv4 hosts as dotted
-//! quads, and encodes non-ASCII hosts as IDNA. The flags on [`Canonicalizer`] select the rest.
+//! information and fragment, drops a default port and an empty query, resolves path dot segments,
+//! strips trailing dots from the host, rewrites numeric IPv4 hosts as dotted quads, and encodes
+//! non-ASCII hosts as IDNA. The flags on [`Canonicalizer`] select the remaining rules.
 
 use std::borrow::Cow;
 use std::fmt::Write;

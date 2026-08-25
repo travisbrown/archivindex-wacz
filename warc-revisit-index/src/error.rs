@@ -10,7 +10,7 @@ pub struct DatabaseError {
 }
 
 impl DatabaseError {
-    /// Name the operation a SQLite failure interrupted, for `map_err`.
+    /// Wrap a SQLite error with the operation it interrupted.
     pub(crate) const fn during(operation: &'static str) -> impl FnOnce(rusqlite::Error) -> Self {
         move |source| Self { operation, source }
     }

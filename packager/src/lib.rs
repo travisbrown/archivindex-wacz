@@ -163,19 +163,13 @@ pub struct ConversionSummary {
 
 /// A conversion from one existing WARC file to a new WACZ package.
 ///
-/// Records are copied into a new WARC member exactly as read: header fields and blocks are written
-/// byte for byte, so only the gzip framing can differ from the source. This makes offsets and
-/// lengths independently addressable even when the input was a continuously compressed gzip
-/// stream. Only `warcinfo`, `metadata`, `response`, and `revisit` records are parsed semantically;
-/// records of other types are validated as raw records and copied unread. Metadata fields linked
-/// by `WARC-Refers-To` or `WARC-Concurrent-To` classify captures:
+/// Records are copied byte for byte into a random-access WARC member; only gzip framing may
+/// change. The converter parses only the record types needed for package metadata and indexing.
+/// Metadata linked by `WARC-Refers-To` or `WARC-Concurrent-To` classifies captures:
 /// those with `via` enter `extraPages.jsonl`, while the rest enter the required page list. A
 /// metadata `title` takes precedence over one supplied by an optional [`PageTitleGenerator`].
-/// Every CDXJ line carries the fields CDXJ requires: `mime` comes from the HTTP `Content-Type`
-/// (without parameters), then from `WARC-Identified-Payload-Type`, and is `unk` otherwise, while a
-/// missing payload digest is computed from the block for the index without being added to the
-/// record. A capture whose status or digest cannot be determined is copied but not indexed, and
-/// reported as a [`ConversionWarning`].
+/// Missing index digests are computed without changing the copied record. Captures without a
+/// usable status or digest are copied but reported as [`ConversionWarning`] and not indexed.
 /// WARCs declaring `pageList: metadata` in their first `warcinfo` include only captures whose
 /// linked metadata has a `pageUrl`; other WARCs retain the legacy one-page-per-capture behavior.
 pub struct WarcToWacz<'a> {
@@ -295,7 +289,7 @@ impl<'a> WarcToWacz<'a> {
             if !is_inspected(&record.header) {
                 continue;
             }
-            // The raw record has been written, so converting it can take its body without a copy.
+            // Writing is complete, so semantic parsing can consume the raw record.
             let record = parse_record(record)?;
             package_info.inspect(&record);
             collect_metadata(&mut spool, &record)?;
@@ -355,8 +349,7 @@ const INSPECTED_TYPES: [RecordType; 4] = [
 
 /// Whether a raw record declares one of the [`INSPECTED_TYPES`].
 ///
-/// The comparison is deliberately lenient about case and surrounding white space: the semantic
-/// parser decides what the value means, and this only avoids parsing records it will not use.
+/// This preliminary check ignores case and surrounding whitespace; semantic parsing validates it.
 fn is_inspected(header: &raw::RecordHeader) -> bool {
     header.get("WARC-Type").is_some_and(|value| {
         let value = value.trim_ascii();

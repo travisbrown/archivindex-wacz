@@ -151,8 +151,7 @@ impl<C> Store<C> {
     ///
     /// # Returns
     ///
-    /// Whether a row was written: always for a representation, and only when the resource is
-    /// already known for a not-modified update.
+    /// Whether a row was inserted or updated.
     ///
     /// # Errors
     ///
@@ -169,9 +168,7 @@ impl<C> Store<C> {
 impl Transaction<'_> {
     /// Copy every row of `source` into this transaction.
     ///
-    /// Payloads already known here keep their earlier canonical record, as with
-    /// [`Store::insert_payload`]; resource state takes `source`'s row, as with a representation
-    /// update.
+    /// Existing canonical payload records are preserved; resource-state rows are replaced.
     ///
     /// # Errors
     ///
@@ -379,7 +376,7 @@ pub(crate) fn update_resource(
     Ok(changed > 0)
 }
 
-/// Feed every row `select` yields on `source` to `insert` on `target`, column for column.
+/// Copy rows selected from one connection into another.
 fn copy_rows(
     source: &Connection,
     select: &str,

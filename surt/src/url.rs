@@ -84,9 +84,8 @@ struct Layout {
 /// Whichever flags are set, the input is repaired the way the Python library does (whitespace
 /// trimmed, tabs and newlines removed, `http://` defaulted, `http://https://...` unwrapped),
 /// the scheme, host, path, and query are lowercased, the user information and fragment are
-/// dropped along with a default port or an empty query, `.` and `..` path segments are
-/// resolved (keeping a `..` with nothing above it, as the Python library does), trailing dots are stripped from the host, numeric IPv4 hosts become dotted quads,
-/// and non-ASCII hosts are encoded as IDNA.
+/// dropped along with a default port or empty query, path dot segments are resolved, trailing host
+/// dots are stripped, numeric IPv4 hosts become dotted quads, and non-ASCII hosts use IDNA.
 // The flags are independent, so they are not a state machine in disguise.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -105,8 +104,7 @@ pub struct Canonicalizer {
     pub collapse_slashes: bool,
     /// Sort query parameters by name, then value.
     pub sort_query: bool,
-    /// Drop the brackets around an IPv6 host, as the Python library does: `2001:db8::1:8080)/`
-    /// rather than `[2001:db8::1]:8080)/`.
+    /// Render IPv6 hosts without brackets, as the Python library does.
     pub strip_ipv6_brackets: bool,
 }
 

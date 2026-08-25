@@ -47,8 +47,7 @@ pub struct Exchange {
     /// The capture date at the recorded precision, shared by the WARC records.
     pub(super) date: WarcDate,
     pub(crate) status: u16,
-    /// The transfer-decoded entity body, absent when the stored body already is the entity body
-    /// or when transfer decoding fails.
+    /// The decoded entity body when it differs from the stored body.
     decoded: Option<Vec<u8>>,
     /// The SHA-256 digest of the entity body, absent when transfer decoding fails.
     pub(super) payload_digest: Option<LabelledDigest>,
@@ -242,15 +241,13 @@ impl Archiver {
         let revalidated = original
             .filter(|_| status == StatusCode::NOT_MODIFIED.as_u16())
             .map(|original| original.target);
-        // The entity body is decoded and digested once here; the digest decides whether the
-        // response is written as a revisit, and the decoded body serves the processor.
+        // Decode and digest the entity body once for revisit detection and processing.
         let (decoded, payload_digest) = captured.entity_body().map_or((None, None), |payload| {
             let mut hasher = Sha256::hasher();
             hasher.update(&payload);
             let decoded = match payload {
                 Cow::Owned(decoded) => Some(decoded),
-                // An identity body is normally the stored body itself; only a body split
-                // differently from the recorded header boundary is kept apart.
+                // Keep a borrowed body only when it differs from the stored body.
                 Cow::Borrowed(body) => {
                     (body.len() != captured.stored_body().len()).then(|| body.to_vec())
                 }
@@ -277,11 +274,9 @@ const fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
-/// The URL as an RFC 3986 request target without its fragment.
+/// Render an RFC 3986 request target without a fragment.
 ///
-/// The WHATWG serializer leaves `|`, `^`, `[`, and `]` unencoded in paths and queries, where the
-/// URI grammar allows them only percent-encoded, so they are encoded here; everything else in a
-/// serialized URL is already a valid URI.
+/// Percent-encode characters that WHATWG URLs allow but RFC 3986 does not.
 fn request_target(url: &Url) -> Cow<'_, str> {
     let text = &url[..Position::AfterQuery];
     let path_start = url[..Position::BeforePath].len();
@@ -296,7 +291,7 @@ fn request_target(url: &Url) -> Cow<'_, str> {
 
     for character in text[path_start..].chars() {
         if needs_encoding(character) {
-            // Writing to a `String` cannot fail, so the `fmt::Result` carries no information.
+            // Writing to a `String` cannot fail.
             let _ = write!(encoded, "%{:02X}", u32::from(character));
         } else {
             encoded.push(character);

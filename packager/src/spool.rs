@@ -90,8 +90,7 @@ impl Annotation {
 
 /// The private database holding a conversion's page drafts and annotations.
 ///
-/// It lives in a temporary directory removed when the store is dropped, and outlives the
-/// [`WriteTransaction`] that a [`ConversionSpool`] works in.
+/// Its temporary directory is removed when the store is dropped.
 pub struct SpoolStore {
     _directory: tempfile::TempDir,
     database: redb::Database,
@@ -108,8 +107,7 @@ impl SpoolStore {
         })
     }
 
-    /// Begin the transaction a conversion's spool works in; it is never committed, since the
-    /// store is discarded with the conversion.
+    /// Begin the uncommitted transaction used by a conversion spool.
     pub fn begin(&self) -> Result<WriteTransaction, Error> {
         self.database.begin_write().spool()
     }
@@ -117,7 +115,7 @@ impl SpoolStore {
 
 /// The index lines, page drafts and annotations gathered while a source is read.
 ///
-/// Both tables stay open for the whole conversion instead of being reopened per call.
+/// Its tables remain open for the duration of the conversion.
 pub struct ConversionSpool<'txn> {
     pages: Table<'txn, u64, &'static [u8]>,
     annotations: Table<'txn, &'static str, &'static [u8]>,

@@ -170,10 +170,8 @@ const SORT_MERGE_FAN_IN: usize = 64;
 
 /// A disk-backed, incrementally populated CDXJ sorter.
 ///
-/// Lines are sorted and deduplicated in bounded-memory runs, each a closed file in a private
-/// temporary directory, and runs are merged with bounded fan-in as they accumulate, so neither
-/// memory nor open descriptors grow with the number of lines. The completed spool can be passed
-/// to [`WaczWriter::add_spooled_index`] after another streaming member has released the writer.
+/// Lines are sorted and deduplicated in bounded-memory runs with bounded merge fan-in. The
+/// completed spool can be passed to [`WaczWriter::add_spooled_index`].
 pub struct IndexSpool {
     chunk: Vec<String>,
     chunk_bytes: usize,
@@ -228,8 +226,7 @@ impl IndexSpool {
         Ok(())
     }
 
-    /// Sort the buffered lines into a new run, then merge runs while the newest `fan_in` of them
-    /// share a level, so every line is rewritten once per level rather than once per run.
+    /// Sort buffered lines into a run and merge complete groups of same-level runs.
     fn flush_run(&mut self) -> Result<(), std::io::Error> {
         let path = self.run_path()?;
         write_sorted(&mut self.chunk, File::create(&path)?)?;

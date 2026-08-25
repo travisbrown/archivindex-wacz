@@ -238,8 +238,7 @@ fn read_wp_comments(options: ReadWpCommentsOptions) -> Result<(), Error> {
 
 /// Read one URL per line, trimming surrounding whitespace and skipping blank lines.
 ///
-/// A read failure ends the iterator and is stored in `error`, which the caller inspects once the
-/// iterator has been consumed.
+/// A read failure ends iteration and is stored in `error`.
 fn read_urls<'a, R: BufRead + 'a>(
     reader: R,
     error: &'a mut Option<std::io::Error>,

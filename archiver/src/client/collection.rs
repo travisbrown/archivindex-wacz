@@ -335,8 +335,7 @@ impl Collection {
                 .map_err(|error| error.error)?;
         }
 
-        // The session index already holds every row the published WARC would yield, so it is
-        // copied into durable state rather than re-read from the file.
+        // The session index already contains the state derived from the completed WARC.
         if let Some(index) = &mut persistent_index {
             let transaction = index.begin()?;
             transaction.merge_from(&session_index)?;
