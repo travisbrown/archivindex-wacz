@@ -1168,6 +1168,55 @@ fn validate_rejects_mistyped_required_member_paths() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// WARC members and gzip content must be stored: indexes address WARC bytes by offset, and
+/// already-compressed content must not be compressed a second time.
+#[test]
+fn validate_reports_zip_compressed_members() -> Result<(), Box<dyn std::error::Error>> {
+    let members: [(&str, &[u8]); 5] = [
+        ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
+        ("pages/pages.jsonl", b"{\"format\": \"json-pages-1.0\"}\n"),
+        ("archive/data.warc.gz", b"gzip"),
+        ("indexes/index.cdx.gz", b"gzip"),
+        ("indexes/index.idx", b"summary"),
+    ];
+
+    let mut reader = WaczReader::new(Cursor::new(zip_of(&members)?))?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
+
+    for path in ["archive/data.warc.gz", "indexes/index.cdx.gz"] {
+        assert!(
+            report
+                .layout
+                .contains(&validate::LayoutProblem::RecompressedMember(
+                    path.to_owned()
+                )),
+            "{path} should be reported as compressed"
+        );
+    }
+    // The plain-text members carry no compressed content and may use DEFLATE.
+    for path in ["datapackage.json", "pages/pages.jsonl", "indexes/index.idx"] {
+        assert!(
+            !report
+                .layout
+                .contains(&validate::LayoutProblem::RecompressedMember(
+                    path.to_owned()
+                )),
+            "{path} may be compressed"
+        );
+    }
+
+    let mut reader = WaczReader::new(Cursor::new(stored_zip_of(&members)?))?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
+    assert!(
+        !report
+            .layout
+            .iter()
+            .any(|problem| matches!(problem, validate::LayoutProblem::RecompressedMember(_)))
+    );
+
+    Ok(())
+}
+
 #[test]
 fn writer_rejects_nonconforming_layout_and_reserved_custom_resources() {
     let writer = WaczWriter::new(Cursor::new(Vec::new()));
@@ -1598,6 +1647,7 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
     let mut incomplete = item_for(URL)?;
     incomplete.fields.digest = None;
     let incomplete_index = format!("{incomplete}\n");
+    let blank_line_index = format!("{page0}\n\n{page1}\n");
     let zoneless_pages = "{\"format\": \"json-pages-1.0\"}\n        {\"url\": \"https://www.example.com/\", \"ts\": \"2020-10-07T21:22:36\"}\n";
 
     let bytes = stored_zip_of(&[
@@ -1607,9 +1657,15 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
             "{\"format\": \"json-pages-1.0\", \"id\": \"pages\", \"title\": \"t\"}\n".as_bytes(),
         ),
         ("pages/bad.jsonl", b"not a page list".as_slice()),
+        (
+            "pages/blank.jsonl",
+            "{\"format\": \"json-pages-1.0\"}\n\n{\"url\": \"https://www.example.com/\", \"ts\": \"2020-10-07T21:22:36Z\"}\n"
+                .as_bytes(),
+        ),
         ("pages/zoneless.jsonl", zoneless_pages.as_bytes()),
         ("indexes/unsorted.cdx", unsorted_index.as_bytes()),
         ("indexes/incomplete.cdx", incomplete_index.as_bytes()),
+        ("indexes/blank.cdx", blank_line_index.as_bytes()),
         ("indexes/bad.cdx", b"garbage\n".as_slice()),
         ("indexes/bad.idx", b"garbage\n".as_slice()),
         (
@@ -1625,10 +1681,12 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
     })?;
     let content = report.content.expect("content layer should run");
 
-    assert_eq!(content.len(), 7);
+    assert_eq!(content.len(), 9);
     for (path, kind) in [
         ("pages/bad.jsonl", validate::ContentKind::Pages),
         ("pages/zoneless.jsonl", validate::ContentKind::Pages),
+        ("pages/blank.jsonl", validate::ContentKind::Pages),
+        ("indexes/blank.cdx", validate::ContentKind::Index),
         ("indexes/unsorted.cdx", validate::ContentKind::IndexOrder),
         ("indexes/incomplete.cdx", validate::ContentKind::IndexFields),
         ("indexes/bad.cdx", validate::ContentKind::Index),

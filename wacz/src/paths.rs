@@ -1,6 +1,6 @@
 //! Typed WACZ member-path classification shared by reading and writing.
 
-use crate::{ARCHIVE_PREFIX, INDEXES_PREFIX};
+use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION, INDEXES_PREFIX};
 
 /// Whether `path` is relative, uses `/` separators, and has no empty, `.`, or `..` segments.
 pub fn is_safe(path: &str) -> bool {
@@ -69,6 +69,14 @@ pub fn zipnum_partner(path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Whether a member must be added to the ZIP container without compression.
+///
+/// WACZ addresses WARC members by byte offset, so their stored bytes must be the bytes the
+/// indexes describe, and content that is already gzip data must not be compressed a second time.
+pub fn requires_stored(path: &str) -> bool {
+    path.starts_with(ARCHIVE_PREFIX) || path.ends_with(GZIP_EXTENSION)
 }
 
 fn direct_name<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {

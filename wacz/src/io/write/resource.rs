@@ -11,8 +11,7 @@ use super::{Error, WaczWriter};
 use crate::digest::Sha256Digest;
 use crate::frictionless::resource::Resource;
 use crate::{
-    ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, GZIP_EXTENSION, INDEXES_PREFIX,
-    PAGES_PREFIX,
+    ARCHIVE_PREFIX, DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, INDEXES_PREFIX, PAGES_PREFIX,
 };
 
 impl<W: Write + Seek> WaczWriter<W> {
@@ -125,7 +124,7 @@ impl<W: Write> Write for HashingWriter<W> {
 }
 
 pub(super) fn options_for(path: &str, compression_level: Option<u32>) -> SimpleFileOptions {
-    let method = if path.starts_with(ARCHIVE_PREFIX) || path.ends_with(GZIP_EXTENSION) {
+    let method = if crate::paths::requires_stored(path) {
         CompressionMethod::Stored
     } else {
         CompressionMethod::Deflated

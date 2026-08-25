@@ -38,7 +38,10 @@ pub enum InvalidLineSource {
     Io(#[source] std::io::Error),
 }
 
-/// A reader that parses nonblank CDXJ lines from a stream.
+/// A reader that parses CDXJ lines from a stream.
+///
+/// Blank lines are skipped unless the reader is built with [`Self::rejecting_blank_lines`], which
+/// enforces the rule that every line of a CDXJ file is a record.
 pub struct IndexReader<R> {
     lines: Lines<R>,
 }
@@ -55,6 +58,14 @@ impl<R: BufRead> IndexReader<R> {
     pub fn with_source(reader: R, source: impl Into<String>) -> Self {
         Self {
             lines: Lines::with_source(reader, source),
+        }
+    }
+
+    /// Report a blank line as an invalid line instead of skipping it.
+    #[must_use]
+    pub fn rejecting_blank_lines(self) -> Self {
+        Self {
+            lines: self.lines.rejecting_blank_lines(),
         }
     }
 }
@@ -82,6 +93,27 @@ impl<R: BufRead> Iterator for IndexReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reader skips blank lines by default and reports them when built strictly.
+    #[test]
+    fn blank_lines_are_skipped_or_reported() {
+        let input = "\ncom,example)/ 20201007212236 {\"url\":\"https://example.com/\"}\n";
+
+        let mut items = IndexReader::with_source(input.as_bytes(), "indexes/example.cdx");
+        assert!(items.next().expect("one content line").is_ok());
+        assert!(items.next().is_none());
+
+        let error = IndexReader::with_source(input.as_bytes(), "indexes/example.cdx")
+            .rejecting_blank_lines()
+            .next()
+            .expect("the blank first line")
+            .expect_err("blank lines are not records");
+        let Error::InvalidLine { context, source } = error else {
+            panic!("unexpected error")
+        };
+        assert_eq!(context.line, 1);
+        assert!(matches!(source, InvalidLineSource::Io(_)));
+    }
 
     #[test]
     fn reports_source_and_line() {

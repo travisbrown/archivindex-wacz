@@ -23,13 +23,15 @@ pub struct Error {
     pub source: std::io::Error,
 }
 
-/// A line source that trims line endings, skips blank lines, and tracks line numbers.
+/// A line source that trims line endings, tracks line numbers, and either skips or rejects blank
+/// lines.
 pub struct Lines<R> {
     underlying: R,
     /// Scratch buffer reused across lines; returned content is only valid until the next call.
     line: Vec<u8>,
     line_number: usize,
     source: String,
+    reject_blanks: bool,
     fused: bool,
 }
 
@@ -41,20 +43,33 @@ impl<R: BufRead> Lines<R> {
             line: Vec::new(),
             line_number: 0,
             source: source.into(),
+            reject_blanks: false,
             fused: false,
         }
+    }
+
+    /// Report blank lines as invalid data instead of skipping them.
+    ///
+    /// CDXJ and JSON Lines files are sequences of records, one per line, so a line with no
+    /// content is not a valid record. Readers that model a raw level skip such lines; readers
+    /// that enforce the specification use this.
+    #[must_use]
+    pub const fn rejecting_blank_lines(mut self) -> Self {
+        self.reject_blanks = true;
+        self
     }
 
     /// Read the next non-blank line, returning its one-based line number and its content with any
     /// trailing line ending removed.
     ///
-    /// Blank lines (such as a trailing newline at the end of a file) are skipped rather than
-    /// returned, but still counted; `None` marks the end of the stream.
+    /// Blank lines are skipped rather than returned, but still counted, unless the source was
+    /// built with [`Self::rejecting_blank_lines`]; `None` marks the end of the stream.
     ///
     /// # Errors
     ///
     /// Returns an error, and yields nothing further, when the underlying read fails, when a line
-    /// is longer than [`MAX_LINE_BYTES`], or when a line is not valid UTF-8.
+    /// is longer than [`MAX_LINE_BYTES`], when a line is not valid UTF-8, or when a line is blank
+    /// and the source was built with [`Self::rejecting_blank_lines`].
     pub fn next_content(&mut self) -> Result<Option<(LineContext, &str)>, Error> {
         if self.fused {
             return Ok(None);
@@ -88,6 +103,11 @@ impl<R: BufRead> Lines<R> {
                     io::ErrorKind::InvalidData,
                     format!("line exceeds {MAX_LINE_BYTES} bytes"),
                 );
+                return Err(self.fail(self.line_number, source));
+            }
+
+            if trimmed == 0 && self.reject_blanks {
+                let source = io::Error::new(io::ErrorKind::InvalidData, "blank line");
                 return Err(self.fail(self.line_number, source));
             }
 
@@ -179,6 +199,32 @@ mod tests {
         assert_eq!((location.line, line_text), (3, " "));
         let (location, line_text) = lines.next_content()?.expect("fourth line");
         assert_eq!((location.line, line_text), (4, "second"));
+        assert_eq!(lines.next_content()?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn blank_lines_are_rejected_when_the_source_is_strict() {
+        let mut lines =
+            Lines::with_source(&b"first\n\nsecond\n"[..], "test").rejecting_blank_lines();
+
+        let (location, line_text) = lines.next_content().expect("a line").expect("first line");
+        assert_eq!((location.line, line_text), (1, "first"));
+        let error = lines.next_content().expect_err("the blank second line");
+        assert_eq!(
+            (error.context.line, error.source.kind()),
+            (2, io::ErrorKind::InvalidData)
+        );
+        assert!(lines.next_content().expect("fused source").is_none());
+    }
+
+    /// A file that simply ends with a line ending has no blank line to reject.
+    #[test]
+    fn a_trailing_line_ending_is_not_a_blank_line() -> Result<(), Error> {
+        let mut lines = Lines::with_source(&b"only\r\n"[..], "test").rejecting_blank_lines();
+
+        assert_eq!(lines.next_content()?.map(|(_, text)| text), Some("only"));
         assert_eq!(lines.next_content()?, None);
 
         Ok(())

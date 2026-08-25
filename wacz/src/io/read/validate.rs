@@ -20,6 +20,7 @@ use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::value::LabelledDigest;
 
+use crate::cdxj;
 use crate::digest::Sha256Digest;
 use crate::frictionless;
 use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
@@ -95,7 +96,7 @@ impl ValidationReport {
     }
 }
 
-/// A required member that is absent from the ZIP container.
+/// A way the ZIP container's members violate the specification's layout rules.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, thiserror::Error)]
 pub enum LayoutProblem {
     /// More than one ZIP central-directory entry has the same file name.
@@ -107,6 +108,10 @@ pub enum LayoutProblem {
     /// A member under `indexes/` is neither a plain CDXJ index nor part of a complete `ZipNum` pair.
     #[error("invalid index member path or incomplete ZipNum pair: {0}")]
     InvalidIndexMember(String),
+    /// A member whose bytes the specification addresses by offset, or whose content is already
+    /// gzip data, was compressed by the ZIP container instead of stored.
+    #[error("member is ZIP-compressed but must be stored: {0}")]
+    RecompressedMember(String),
     /// There is no `datapackage.json` manifest.
     #[error("missing required member: datapackage.json")]
     MissingDataPackage,
@@ -324,7 +329,8 @@ impl<R: Read + Seek> WaczReader<R> {
     /// the fixity layer is skipped even if selected, since there are no declared digests to
     /// check.
     pub fn validate(&mut self, options: ValidationOptions) -> Result<ValidationReport, Error> {
-        let layout = self.layout_problems();
+        let mut layout = self.layout_problems();
+        layout.extend(self.compression_problems());
 
         let manifest_bytes = match self.member_bytes(DATA_PACKAGE_PATH) {
             Ok(bytes) => Some(bytes),
@@ -438,6 +444,32 @@ impl<R: Read + Seek> WaczReader<R> {
         }
         if !has_index {
             problems.push(LayoutProblem::NoIndexMembers);
+        }
+
+        problems
+    }
+
+    /// Members that the specification requires to be stored but that the container compressed.
+    ///
+    /// Unlike the other layout checks this one reads local file headers, so it is separated from
+    /// the name-based checks in [`Self::layout_problems`].
+    fn compression_problems(&mut self) -> Vec<LayoutProblem> {
+        let mut problems = Vec::new();
+
+        // Reading by index gives each member's name and compression method together, which a
+        // shared borrow of the central directory cannot provide.
+        for index in 0..self.archive.len() {
+            // A member whose local header cannot be read is reported by the content layer.
+            let Ok(member) = self.archive.by_index(index) else {
+                continue;
+            };
+            let name = member.name();
+            if !name.ends_with('/')
+                && crate::paths::requires_stored(name)
+                && member.compression() != zip::CompressionMethod::Stored
+            {
+                problems.push(LayoutProblem::RecompressedMember(name.to_owned()));
+            }
         }
 
         problems
@@ -604,7 +636,11 @@ impl<R: Read + Seek> WaczReader<R> {
                 .map(|error| ContentProblem::new(path, ContentKind::ZipNum, error.to_string()));
         }
 
-        let items = match self.index(path) {
+        // The validator reads at the strictest level: a blank line is not a CDXJ record.
+        let items = match self
+            .index(path)
+            .map(cdxj::IndexReader::rejecting_blank_lines)
+        {
             Ok(items) => items,
             Err(error) => {
                 return Some(ContentProblem::new(

@@ -286,8 +286,8 @@ impl<'a> TryFrom<RawPage<'a>> for Page<'a> {
 /// A reader that iteratively parses page entries from a page list stream, leaving their
 /// timestamps uninterpreted.
 ///
-/// Blank lines (such as a trailing newline at the end of the file) are skipped rather than treated
-/// as invalid entries.
+/// This is the raw level: blank lines are skipped rather than treated as invalid entries, which
+/// [`PageListReader`] does not do.
 pub struct RawPageListReader<R> {
     lines: Lines<R>,
     header: PageListHeader<'static>,
@@ -306,7 +306,11 @@ impl<R: BufRead> RawPageListReader<R> {
 
     /// Create a reader carrying a member path or source name for diagnostics.
     pub fn with_source(reader: R, source: impl Into<String>) -> Result<Self, Error> {
-        let mut lines = Lines::with_source(reader, source);
+        Self::from_lines(Lines::with_source(reader, source))
+    }
+
+    /// Read the header line and build a reader around the remaining lines.
+    fn from_lines(mut lines: Lines<R>) -> Result<Self, Error> {
         let (location, line_text) = lines.next_content()?.ok_or(Error::MissingHeader)?;
 
         let header = serde_json::from_str::<PageListHeader<'_>>(line_text).map_err(|source| {
@@ -359,9 +363,8 @@ impl<R: BufRead> Iterator for RawPageListReader<R> {
 /// A reader that iteratively parses page entries from a page list stream.
 ///
 /// Entries are read at the semantic level, so a timestamp that is not the RFC 3339 date-time the
-/// specification requires is an error; [`RawPageListReader`] reads such entries. Blank lines (such
-/// as a trailing newline at the end of the file) are skipped rather than treated as invalid
-/// entries.
+/// specification requires is an error, as is a blank line, which JSON Lines does not allow;
+/// [`RawPageListReader`] reads such page lists.
 pub struct PageListReader<R> {
     raw: RawPageListReader<R>,
 }
@@ -371,7 +374,7 @@ impl<R: BufRead> PageListReader<R> {
     ///
     /// # Errors
     ///
-    /// Fails if the stream has no non-blank lines, if the header line is not valid JSON, or if the
+    /// Fails if the stream is empty, if the header line is blank or is not valid JSON, or if the
     /// header declares a format other than [`FORMAT`].
     pub fn new(reader: R) -> Result<Self, Error> {
         Self::with_source(reader, "<stream>")
@@ -379,7 +382,8 @@ impl<R: BufRead> PageListReader<R> {
 
     /// Create a reader carrying a member path or source name for diagnostics.
     pub fn with_source(reader: R, source: impl Into<String>) -> Result<Self, Error> {
-        RawPageListReader::with_source(reader, source).map(|raw| Self { raw })
+        RawPageListReader::from_lines(Lines::with_source(reader, source).rejecting_blank_lines())
+            .map(|raw| Self { raw })
     }
 
     /// The parsed header line.
@@ -593,6 +597,28 @@ mod tests {
             reader.next(),
             Some(Err(Error::InvalidTimestamp { context, .. })) if context.line == 2
         ));
+    }
+
+    /// JSON Lines has no blank records, so the semantic level rejects a blank line that the raw
+    /// level skips.
+    #[test]
+    fn blank_lines_are_read_only_at_the_raw_level() {
+        let list = page_list("2020-10-07T21:22:36Z").replace('\n', "\n\n");
+
+        let mut raw = RawPageListReader::new(list.as_bytes()).expect("a valid header");
+        assert!(raw.next().expect("one entry").is_ok());
+        assert!(raw.next().is_none());
+
+        let error = PageListReader::new(list.as_bytes())
+            .expect("a valid header")
+            .next()
+            .expect("the blank second line")
+            .expect_err("blank lines are not entries");
+
+        assert!(
+            matches!(&error, Error::Io { context: Some(context), .. } if context.line == 2),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
