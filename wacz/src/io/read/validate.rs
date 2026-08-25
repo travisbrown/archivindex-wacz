@@ -239,6 +239,8 @@ pub enum ContentKind {
     Pages,
     /// A CDXJ index.
     Index,
+    /// The JSON fields of a CDXJ index entry.
+    IndexFields,
     /// Sorted CDXJ index lines.
     IndexOrder,
     /// A `ZipNum` summary.
@@ -604,9 +606,16 @@ impl<R: Read + Seek> WaczReader<R> {
         };
 
         let mut previous: Option<(String, Timestamp)> = None;
-        for item in items {
+        for (index, item) in items.enumerate() {
             match item {
                 Ok(item) => {
+                    if let Err(error) = item.fields.check_conformance() {
+                        return Some(ContentProblem::new(
+                            path,
+                            ContentKind::IndexFields,
+                            format!("line {}: {error}", index + 1),
+                        ));
+                    }
                     let current = (item.key.into_owned(), item.timestamp);
                     if previous.is_some_and(|previous| previous > current) {
                         return Some(ContentProblem::index_order(path));

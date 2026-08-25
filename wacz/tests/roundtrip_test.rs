@@ -1569,6 +1569,10 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
     let page0 = item_for("https://www.example.com/page0")?;
     let page1 = item_for("https://www.example.com/page1")?;
     let unsorted_index = format!("{page1}\n{page0}\n");
+    let mut incomplete = item_for(URL)?;
+    incomplete.fields.digest = None;
+    let incomplete_index = format!("{incomplete}\n");
+    let zoneless_pages = "{\"format\": \"json-pages-1.0\"}\n        {\"url\": \"https://www.example.com/\", \"ts\": \"2020-10-07T21:22:36\"}\n";
 
     let bytes = stored_zip_of(&[
         ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
@@ -1577,7 +1581,9 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
             "{\"format\": \"json-pages-1.0\", \"id\": \"pages\", \"title\": \"t\"}\n".as_bytes(),
         ),
         ("pages/bad.jsonl", b"not a page list".as_slice()),
+        ("pages/zoneless.jsonl", zoneless_pages.as_bytes()),
         ("indexes/unsorted.cdx", unsorted_index.as_bytes()),
+        ("indexes/incomplete.cdx", incomplete_index.as_bytes()),
         ("indexes/bad.cdx", b"garbage\n".as_slice()),
         ("indexes/bad.idx", b"garbage\n".as_slice()),
         (
@@ -1593,10 +1599,12 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
     })?;
     let content = report.content.expect("content layer should run");
 
-    assert_eq!(content.len(), 5);
+    assert_eq!(content.len(), 7);
     for (path, kind) in [
         ("pages/bad.jsonl", validate::ContentKind::Pages),
+        ("pages/zoneless.jsonl", validate::ContentKind::Pages),
         ("indexes/unsorted.cdx", validate::ContentKind::IndexOrder),
+        ("indexes/incomplete.cdx", validate::ContentKind::IndexFields),
         ("indexes/bad.cdx", validate::ContentKind::Index),
         ("indexes/bad.idx", validate::ContentKind::ZipNum),
         ("archive/truncated.warc", validate::ContentKind::Warc),
