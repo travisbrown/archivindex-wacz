@@ -250,12 +250,6 @@ impl<'a, 'de: 'a> serde::Deserialize<'de> for CaptureList<'a> {
     }
 }
 
-/// Compatibility name for the common seven-field CDX Server result model.
-pub type ItemList<'a> = CaptureList<'a>;
-
-/// Compatibility name for extended CDX Server result models.
-pub type ExtendedItemList<'a> = CaptureList<'a>;
-
 #[derive(serde::Deserialize)]
 struct Row<'a>(
     #[serde(borrow, deserialize_with = "crate::attributes::borrowed_str_seq")] Vec<Cow<'a, str>>,
