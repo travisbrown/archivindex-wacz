@@ -11,11 +11,11 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::Duration;
 
-use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent};
-use archivindex_archiver::config::Config;
+use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
+use archivindex_archiver::{Archiver, Config};
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::io::write::IndexFormat;
 use archivindex_wordpress::read::read_comments;
@@ -288,9 +288,9 @@ enum Error {
     #[error("invalid WordPress base URL: {0}")]
     Url(#[from] url::ParseError),
     #[error("archiving error: {0}")]
-    Archive(#[from] archivindex_archiver::client::Error),
+    Archive(#[from] archivindex_archiver::Error),
     #[error(transparent)]
-    UserAgent(#[from] archivindex_archiver::client::InvalidUserAgent),
+    UserAgent(#[from] archivindex_archiver::InvalidUserAgent),
     #[error(transparent)]
     SessionId(#[from] archivindex_archiver::session::InvalidSessionId),
     #[error("WARC conversion error: {0}")]

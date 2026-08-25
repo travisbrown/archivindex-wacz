@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
-use archivindex_archiver::config::Config;
+use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
+use archivindex_archiver::{Archiver, Config, Error};
 use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;

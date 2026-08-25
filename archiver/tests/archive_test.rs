@@ -9,8 +9,8 @@ mod support;
 
 use support::{plain, records, request_path, serve_with, sha256};
 
-use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
-use archivindex_archiver::config::Config;
+use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
+use archivindex_archiver::{Archiver, Config, Error};
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};

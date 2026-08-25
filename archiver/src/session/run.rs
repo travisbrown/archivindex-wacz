@@ -8,9 +8,11 @@ use std::time::Duration;
 use archivindex_warc_revisit_index::db::Index as RevisitIndex;
 
 use super::{Capture, Inspection, Session, SessionSummary};
-use crate::client::capture::{CaptureOutcome, Exchange};
+use crate::Error;
+use crate::capture::{ArchiveSummary, CaptureControl, CaptureEvent};
 use crate::client::collection::Collection;
-use crate::client::{ArchiveSummary, CaptureControl, CaptureEvent, Error, notify_outcome};
+use crate::client::notify_outcome;
+use crate::client::outcome::{CaptureOutcome, Exchange};
 
 enum AttemptOutcome {
     Finished(CaptureOutcome),

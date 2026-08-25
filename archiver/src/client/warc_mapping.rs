@@ -12,9 +12,9 @@ use archivindex_warc::value::{LabelledDigest, MediaType, WarcDate};
 use archivindex_warc_revisit_index::payload::RevisitTarget;
 use fluent_uri::Uri;
 
-use super::Error;
-use super::capture::Exchange;
+use super::outcome::Exchange;
 use super::warc_fields::{MetadataValues, metadata_record};
+use crate::Error;
 
 /// Optional fields added to the metadata record accompanying an exchange.
 #[derive(Clone, Copy)]

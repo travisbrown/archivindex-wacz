@@ -11,11 +11,12 @@ use archivindex_warc_revisit_index::resource::{ResourceKey, ResourceState, Resou
 use fluent_uri::Uri;
 use tempfile::{NamedTempFile, TempPath};
 
-use super::capture::Original;
-use super::capture::{CaptureOutcome, Exchange};
+use super::outcome::Original;
+use super::outcome::{CaptureOutcome, Exchange};
 use super::warc_fields::{WarcinfoOptions, warcinfo_record};
 use super::warc_mapping::{MetadataOptions, write_exchange, write_record};
-use super::{ArchiveSummary, CaptureSummary, Error, Failure};
+use crate::Error;
+use crate::capture::{ArchiveSummary, CaptureSummary, Failure};
 
 /// Files accumulated while captures are written to a spooled WARC file.
 pub struct Collection {

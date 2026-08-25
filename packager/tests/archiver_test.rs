@@ -8,9 +8,8 @@ mod support;
 
 use support::{plain, request_header, request_path, serve_with};
 
-use archivindex_archiver::client::Archiver;
-use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Operator, Session};
+use archivindex_archiver::{Archiver, Config};
 use archivindex_cdx::cdxj::Fields;
 use archivindex_packager::WarcToWacz;
 use archivindex_surt::Surt;

@@ -50,8 +50,7 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 /// # Examples
 ///
 /// ```no_run
-/// use archivindex_archiver::client::Archiver;
-/// use archivindex_archiver::config::Config;
+/// use archivindex_archiver::{Archiver, Config};
 /// use archivindex_archiver::session::{Operator, Session};
 /// use archivindex_wordpress::CommentCaptureProcessor;
 ///

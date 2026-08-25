@@ -10,8 +10,8 @@ use archivindex_warc::value::WarcDate;
 use chrono::Utc;
 use fluent_uri::Uri;
 
-use super::Error;
-use super::capture::DATE_PRECISION;
+use super::outcome::DATE_PRECISION;
+use crate::Error;
 use crate::session::{Operator, Software};
 
 /// Information recorded in the WARC file's initial `warcinfo` record.

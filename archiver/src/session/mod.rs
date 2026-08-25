@@ -10,9 +10,8 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::client::{
-    Archiver, CaptureControl, CaptureEvent, CaptureEventSink, CaptureSummary, Error, Failure,
-};
+use crate::capture::{CaptureControl, CaptureEvent, CaptureEventSink, CaptureSummary, Failure};
+use crate::{Archiver, Error};
 
 mod run;
 

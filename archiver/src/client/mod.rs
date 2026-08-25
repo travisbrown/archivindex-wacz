@@ -1,196 +1,27 @@
-//! The public archiving client facade and outcome types.
+//! The archiving client's implementation.
 
 use std::io::Write;
 use std::path::Path;
 
-use archivindex_warc::record::BlockError;
 use archivindex_warc::recorder::Recorder;
 use archivindex_warc_revisit_index::db::Index as RevisitIndex;
-use chrono::{DateTime, Utc};
 use http::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 
-use crate::config::Config;
+use crate::capture::{ArchiveSummary, CaptureControl, CaptureEvent, CaptureEventSink};
+use crate::{Archiver, Config, Error, InvalidUserAgent};
 
-pub(crate) mod capture;
-pub(crate) mod collection;
+pub mod collection;
+pub mod outcome;
 mod pool;
 mod warc_fields;
 mod warc_mapping;
 
-use capture::CaptureOutcome;
 use collection::Collection;
+use outcome::CaptureOutcome;
 use warc_fields::WarcinfoOptions;
 
 const WARC_NAME: &str = "data.warc";
 const GZIP_WARC_NAME: &str = "data.warc.gz";
-
-/// An error type for archiving.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    /// The archive could not be written.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    /// An exchange could not be completed.
-    #[error(transparent)]
-    Fetch(#[from] archivindex_warc::recorder::Error),
-    /// A URL to be archived could not be parsed.
-    #[error(transparent)]
-    InvalidUrl(#[from] url::ParseError),
-    /// A URL to be archived contains credentials. The displayed URL has them removed.
-    #[error("URL contains credentials: {0}")]
-    CredentialedUrl(String),
-    /// A URL to be archived does not have a host.
-    #[error("URL has no host: {0}")]
-    MissingHost(String),
-    /// A parsed URL cannot be represented by the HTTP request URI grammar.
-    #[error("URL is not a valid URI: {url}")]
-    InvalidUri {
-        /// The URL as requested.
-        url: String,
-        /// Where the URL departs from the URI grammar.
-        #[source]
-        source: http::uri::InvalidUri,
-    },
-    /// An HTTP response status remained retryable after the configured attempts were exhausted.
-    #[error("HTTP status {status} after retries for {url}")]
-    HttpStatus {
-        /// The URL whose response remained unsuccessful.
-        url: String,
-        /// The final HTTP response status.
-        status: u16,
-    },
-    /// A capture processor could not complete its traversal.
-    #[error("capture processor failed for {url}: {message}")]
-    Processor {
-        /// The URL being inspected.
-        url: String,
-        /// The processor's description of the failure.
-        message: String,
-    },
-    /// The configured `User-Agent` cannot be sent or recorded safely.
-    #[error(transparent)]
-    InvalidUserAgent(#[from] InvalidUserAgent),
-    /// A session identifier is empty or contains a non-URI-unreserved character.
-    #[error(transparent)]
-    InvalidSessionId(#[from] crate::session::InvalidSessionId),
-    /// A revisit index could not be opened.
-    #[error(transparent)]
-    RevisitIndexOpen(#[from] archivindex_warc_revisit_index::error::OpenError),
-    /// A revisit index could not be queried or updated.
-    #[error(transparent)]
-    RevisitIndex(#[from] archivindex_warc_revisit_index::error::Error),
-    /// A WARC content block could not be attached to its record.
-    #[error(transparent)]
-    WarcBlock(#[from] BlockError),
-    /// A `warc-fields` value could not be written.
-    #[error(transparent)]
-    WarcFields(#[from] archivindex_warc::record::fields::Error),
-    /// A WARC record could not be rendered.
-    #[error(transparent)]
-    WarcRender(#[from] archivindex_warc::record::RenderError),
-    /// A WARC record could not be written.
-    #[error(transparent)]
-    WarcWrite(#[from] archivindex_warc::io::write::Error),
-}
-
-impl From<archivindex_warc_revisit_index::error::DatabaseError> for Error {
-    fn from(error: archivindex_warc_revisit_index::error::DatabaseError) -> Self {
-        Self::RevisitIndex(error.into())
-    }
-}
-
-/// The configured `User-Agent` cannot be sent or recorded safely.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("invalid User-Agent header value: {0:?}")]
-pub struct InvalidUserAgent(String);
-
-/// The outcome of an archiving run.
-#[derive(Debug, Default)]
-pub struct ArchiveSummary {
-    /// URLs archived successfully, in request order.
-    pub captures: Vec<CaptureSummary>,
-    /// URLs that could not be captured.
-    pub failures: Vec<Failure>,
-    /// Whether an event sink requested a clean stop before all input was dispatched.
-    pub cancelled: bool,
-}
-
-impl ArchiveSummary {
-    /// Whether every URL was captured.
-    #[must_use]
-    pub const fn is_complete(&self) -> bool {
-        self.failures.is_empty() && !self.cancelled
-    }
-}
-
-/// A live capture lifecycle notification.
-#[derive(Clone, Copy, Debug)]
-pub enum CaptureEvent<'a> {
-    /// A URL capture attempt is starting.
-    Started {
-        /// Requested URL.
-        url: &'a str,
-        /// One-based attempt number.
-        attempt: usize,
-    },
-    /// A transient failure will be retried after a delay.
-    Retrying {
-        /// Requested URL.
-        url: &'a str,
-        /// One-based number of the upcoming attempt.
-        attempt: usize,
-        /// Delay before that attempt.
-        delay: std::time::Duration,
-    },
-    /// A URL produced a final HTTP response.
-    Captured {
-        /// Requested URL.
-        url: &'a str,
-        /// Final HTTP status.
-        status: u16,
-    },
-    /// A URL could not be captured.
-    Failed {
-        /// Requested URL.
-        url: &'a str,
-        /// Final capture error.
-        error: &'a Error,
-    },
-    /// The URL's records were written to the pending collection.
-    Written {
-        /// Requested URL.
-        url: &'a str,
-    },
-}
-
-/// Decision returned by a [`CaptureEventSink`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CaptureControl {
-    /// Continue capturing.
-    Continue,
-    /// Stop dispatching work and finalize what has already completed.
-    Cancel,
-}
-
-/// Observer that can report progress or request clean cancellation.
-pub trait CaptureEventSink {
-    /// Observe one event and decide whether capture should continue.
-    fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl;
-
-    /// Report that a URL capture attempt is starting and return whether it should be cancelled.
-    fn started(&mut self, url: &str, attempt: usize) -> bool {
-        self.event(CaptureEvent::Started { url, attempt }) == CaptureControl::Cancel
-    }
-}
-
-impl<F> CaptureEventSink for F
-where
-    F: for<'a> FnMut(CaptureEvent<'a>) -> CaptureControl,
-{
-    fn event(&mut self, event: CaptureEvent<'_>) -> CaptureControl {
-        self(event)
-    }
-}
 
 struct IgnoreEvents;
 
@@ -198,42 +29,6 @@ impl CaptureEventSink for IgnoreEvents {
     fn event(&mut self, _event: CaptureEvent<'_>) -> CaptureControl {
         CaptureControl::Continue
     }
-}
-
-/// The outcome of capturing one URL.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CaptureSummary {
-    /// The requested URL.
-    pub url: String,
-    /// When capture of the final response began.
-    pub date: DateTime<Utc>,
-    /// The final response status.
-    pub status: u16,
-    /// The decoded entity-body length.
-    pub size: u64,
-    /// The number of redirects followed.
-    pub redirects: usize,
-}
-
-/// A URL that could not be captured.
-#[derive(Debug)]
-pub struct Failure {
-    /// The requested URL.
-    pub url: String,
-    /// The capture failure.
-    pub error: Error,
-}
-
-/// An HTTP client that captures lists of URLs in WARC files.
-///
-/// Each URL is fetched synchronously over HTTP/1.1. Redirect hops, wire-format messages, capture
-/// metadata are retained. One-shot lists request every URL unconditionally; only crawl sessions
-/// revalidate earlier captures.
-#[derive(Clone, Debug)]
-pub struct Archiver {
-    recorder: Recorder,
-    headers: HeaderMap,
-    config: Config,
 }
 
 impl Archiver {
@@ -390,7 +185,7 @@ impl Archiver {
     }
 }
 
-pub(crate) fn notify_outcome(
+pub fn notify_outcome(
     events: &mut (impl CaptureEventSink + ?Sized),
     url: &str,
     outcome: &CaptureOutcome,
