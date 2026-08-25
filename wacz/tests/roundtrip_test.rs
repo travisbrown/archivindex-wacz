@@ -1084,7 +1084,7 @@ fn add_warc_from_path_requires_a_usable_file_name() {
 fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_warc("data.warc", &b""[..])?;
-    let item = item_for(URL)?;
+    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
 
     assert!(matches!(
         writer.add_warc("data.warc", &b""[..]),
@@ -1101,7 +1101,7 @@ fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
     for name in ["nested/index.cdx", "index.cdx.gz", "index.idx", "index"] {
         assert!(
             matches!(
-                writer.add_index_lenient(name, [&item]),
+                writer.add_index(name, [&item]),
                 Err(writer::Error::InvalidIndexName(value)) if value == name
             ),
             "{name:?} should be rejected"
@@ -1212,7 +1212,7 @@ fn writer_validates_warc_names_not_content() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn normal_index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Error>> {
     let mut item = item_for(URL)?;
     let mut required = cdxj::ConformingItem::try_from(&item)?;
     required
@@ -1225,11 +1225,16 @@ fn normal_index_writing_requires_standard_fields() -> Result<(), Box<dyn std::er
         Err(writer::Error::ExtraProperty(_))
     ));
 
+    // An index file is held to the same requirements as items written from memory.
     item.fields.digest = None;
-    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-
     assert!(cdxj::ConformingItem::try_from(&item).is_err());
-    writer.add_index_lenient("index.cdx", [&item])?;
+
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    assert!(matches!(
+        writer.add_sorted_index_file("index.cdx", Cursor::new(format!("{item}\n"))),
+        Err(writer::Error::NonConformingIndex { line: 1, .. })
+    ));
+
     Ok(())
 }
 

@@ -261,33 +261,45 @@ pub enum ConformanceError {
     Extra(#[from] properties::Error),
 }
 
-impl<'a> TryFrom<&Fields<'a>> for ConformingFields<'a> {
-    type Error = ConformanceError;
-
-    fn try_from(fields: &Fields<'a>) -> Result<Self, Self::Error> {
+impl Fields<'_> {
+    /// Check that every property the CDXJ profile requires is present and that no extension
+    /// property duplicates a modeled one.
+    ///
+    /// This is the conformance test applied by the conversion to [`ConformingFields`], for callers
+    /// that only need the verdict.
+    pub fn check_conformance(&self) -> Result<(), ConformanceError> {
         let mut missing = Vec::new();
-        if fields.digest.is_none() {
+        if self.digest.is_none() {
             missing.push("digest");
         }
-        if fields.mime.is_none() {
+        if self.mime.is_none() {
             missing.push("mime");
         }
-        if fields.status.is_none() {
+        if self.status.is_none() {
             missing.push("status");
         }
-        if fields.offset.is_none() {
+        if self.offset.is_none() {
             missing.push("offset");
         }
-        if fields.length.is_none() {
+        if self.length.is_none() {
             missing.push("length");
         }
-        if fields.filename.is_none() {
+        if self.filename.is_none() {
             missing.push("filename");
         }
         if !missing.is_empty() {
             return Err(ConformanceError::Missing(missing));
         }
-        validate_extra(&fields.extra)?;
+
+        Ok(validate_extra(&self.extra)?)
+    }
+}
+
+impl<'a> TryFrom<&Fields<'a>> for ConformingFields<'a> {
+    type Error = ConformanceError;
+
+    fn try_from(fields: &Fields<'a>) -> Result<Self, Self::Error> {
+        fields.check_conformance()?;
 
         Ok(Self {
             url: fields.url.clone(),

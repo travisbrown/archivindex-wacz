@@ -21,21 +21,23 @@ use crate::{GZIP_EXTENSION, INDEXES_PREFIX};
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write a sorted CDXJ index in the configured plain or `ZipNum` format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidIndexFields`] for an entry whose extension properties duplicate a
+    /// modeled CDXJ property, and [`Error::InvalidIndexName`] for a name that is not a direct
+    /// `.cdx` member name.
     pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
         &mut self,
         name: &str,
         items: I,
     ) -> Result<(), Error> {
-        self.write_index(name, items, |item| Ok(item.fields.validate()?))
-    }
+        let mut spool = IndexSpool::new();
+        for item in items {
+            spool.push(item)?;
+        }
 
-    /// Write an index while allowing entries that omit required CDXJ fields.
-    pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
-        &mut self,
-        name: &str,
-        items: I,
-    ) -> Result<(), Error> {
-        self.write_index(name, items, |_| Ok(()))
+        self.add_spooled_index(name, spool)
     }
 
     /// Add an already sorted, deduplicated CDXJ file without retaining the collection in memory.
@@ -47,8 +49,9 @@ impl<W: Write + Seek> WaczWriter<W> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidIndexName`] for a name that is not a direct `.cdx` member name,
-    /// [`Error::InvalidIndex`] for a line that is not a CDXJ item, and [`Error::UnsortedIndex`]
-    /// for the first line that sorts before the line preceding it.
+    /// [`Error::InvalidIndex`] for a line that is not a CDXJ item, [`Error::NonConformingIndex`]
+    /// for a line that omits a required CDXJ field, and [`Error::UnsortedIndex`] for the first
+    /// line that sorts before the line preceding it.
     pub fn add_sorted_index_file<R: BufRead + Seek>(
         &mut self,
         name: &str,
@@ -60,6 +63,12 @@ impl<W: Write + Seek> WaczWriter<W> {
         let mut previous: Option<(String, Timestamp)> = None;
         for (index, item) in IndexReader::new(&mut reader).enumerate() {
             let item = item.map_err(Error::InvalidIndex)?;
+            item.fields
+                .check_conformance()
+                .map_err(|source| Error::NonConformingIndex {
+                    line: index + 1,
+                    source,
+                })?;
             // The reader yields owned keys, so `into_owned` moves rather than copies.
             let current = (item.key.into_owned(), item.timestamp);
             if previous.is_some_and(|previous| previous > current) {
@@ -75,20 +84,6 @@ impl<W: Write + Seek> WaczWriter<W> {
             }
             IndexFormat::ZipNum { lines } => self.add_zipnum_stream(name, reader, lines),
         }
-    }
-
-    fn write_index<'a, F: serde::Serialize + 'a, I: IntoIterator<Item = &'a cdxj::Item<'a, F>>>(
-        &mut self,
-        name: &str,
-        items: I,
-        validate: impl Fn(&cdxj::Item<'a, F>) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        let mut sorter = IndexSpool::new();
-        for item in items {
-            validate(item)?;
-            sorter.push(item)?;
-        }
-        self.add_sorted_index_file(name, BufReader::new(sorter.finish()?))
     }
 
     /// Add an index accumulated by an [`IndexSpool`].
@@ -210,11 +205,15 @@ impl IndexSpool {
     }
 
     /// Add one CDXJ item.
-    pub fn push<F: serde::Serialize>(
-        &mut self,
-        item: &cdxj::Item<'_, F>,
-    ) -> Result<(), std::io::Error> {
-        self.push_line(format!("{item}\n"))
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidIndexFields`] if the item's extension properties duplicate a
+    /// modeled CDXJ property, or [`Error::Io`] if a run could not be written.
+    pub fn push(&mut self, item: &cdxj::ConformingItem<'_>) -> Result<(), Error> {
+        item.fields.validate()?;
+
+        Ok(self.push_line(format!("{item}\n"))?)
     }
 
     fn push_line(&mut self, line: String) -> Result<(), std::io::Error> {

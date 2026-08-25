@@ -150,9 +150,18 @@ pub enum Error {
     /// The package is missing one or more member classes required by WACZ.
     #[error("missing required WACZ members: {}", .0.join(", "))]
     MissingRequiredMembers(Vec<&'static str>),
-    /// An index entry omits required CDXJ fields.
+    /// An index entry does not conform to the CDXJ profile.
     #[error(transparent)]
     InvalidIndexFields(#[from] archivindex_cdx::cdxj::ConformanceError),
+    /// A line of a pre-rendered CDXJ index does not conform to the CDXJ profile.
+    #[error("CDXJ index line {line} does not conform")]
+    NonConformingIndex {
+        /// One-based number of the offending line.
+        line: usize,
+        /// The properties the line is missing, or its property collision.
+        #[source]
+        source: archivindex_cdx::cdxj::ConformanceError,
+    },
     /// An extension property duplicates a modeled JSON property.
     #[error(transparent)]
     ExtraProperty(#[from] archivindex_cdx::properties::Error),

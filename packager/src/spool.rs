@@ -27,6 +27,8 @@ pub enum Error {
     Serialization(#[from] serde_json::Error),
     #[error(transparent)]
     PageList(#[from] archivindex_wacz::pages::Error),
+    #[error(transparent)]
+    Index(#[from] archivindex_wacz::io::write::Error),
 }
 
 /// A page entry retaining its WARC record identity until linked metadata has been collected.
