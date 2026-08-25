@@ -30,7 +30,7 @@ pub enum Error {
 }
 
 /// A page entry retaining its WARC record identity until linked metadata has been collected.
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct PageDraft {
     record_id: String,
     url: String,
@@ -56,7 +56,7 @@ impl PageDraft {
 }
 
 /// Page properties contributed by `metadata` records.
-#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Annotation {
     title: Option<String>,
     via: bool,
@@ -260,5 +260,53 @@ trait RedbResultExt<T> {
 impl<T, E: Into<redb::Error>> RedbResultExt<T> for Result<T, E> {
     fn spool(self) -> Result<T, Error> {
         self.map_err(|error| Error::Database(error.into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn annotations_merge_to_the_last_present_values(
+        #[strategy(proptest::collection::vec(strategies::annotation(), 0..=6))] updates: Vec<
+            Annotation,
+        >,
+    ) {
+        let mut merged = Annotation::default();
+
+        for update in &updates {
+            merged.merge(update);
+        }
+
+        let last_title = updates.iter().rev().find_map(|update| update.title.clone());
+        let last_page_url = updates
+            .iter()
+            .rev()
+            .find_map(|update| update.page_url.clone());
+
+        prop_assert_eq!(merged.title, last_title);
+        prop_assert_eq!(merged.via, updates.iter().any(|update| update.via));
+        prop_assert_eq!(merged.page_url, last_page_url);
+    }
+
+    #[test_strategy::proptest]
+    fn spooled_values_round_trip_through_json(
+        #[strategy(strategies::annotation())] annotation: Annotation,
+        #[strategy(strategies::page_draft())] draft: PageDraft,
+    ) {
+        let bytes = serde_json::to_vec(&annotation).unwrap();
+
+        prop_assert_eq!(
+            serde_json::from_slice::<Annotation>(&bytes).unwrap(),
+            annotation
+        );
+
+        let bytes = serde_json::to_vec(&draft).unwrap();
+
+        prop_assert_eq!(serde_json::from_slice::<PageDraft>(&bytes).unwrap(), draft);
     }
 }

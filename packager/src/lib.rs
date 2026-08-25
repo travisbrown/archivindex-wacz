@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 mod spool;
+#[cfg(test)]
+mod strategies;
 
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
