@@ -154,6 +154,8 @@ impl<'de> serde::de::Deserialize<'de> for Sha256Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategies;
+    use proptest::prelude::*;
 
     /// The well-known SHA-256 digest of the empty input.
     const EMPTY: &str = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -229,5 +231,40 @@ mod tests {
         assert_eq!(serde_json::from_str::<Sha256Digest>(&encoded)?, digest);
 
         Ok(())
+    }
+
+    #[test_strategy::proptest]
+    fn text_round_trips(#[strategy(strategies::digest())] digest: Sha256Digest) {
+        prop_assert_eq!(
+            digest.to_string().parse::<Sha256Digest>().ok(),
+            Some(digest)
+        );
+    }
+
+    #[test_strategy::proptest]
+    fn parsing_ignores_hexadecimal_case(#[strategy(strategies::digest())] digest: Sha256Digest) {
+        let text = digest.to_string();
+        let upper = format!("{PREFIX}{}", text[PREFIX.len()..].to_uppercase());
+
+        prop_assert_eq!(upper.parse::<Sha256Digest>().ok(), Some(digest));
+    }
+
+    #[test_strategy::proptest]
+    fn serde_round_trips(#[strategy(strategies::digest())] digest: Sha256Digest) {
+        let json = serde_json::to_string(&digest).unwrap();
+
+        prop_assert_eq!(
+            serde_json::from_str::<Sha256Digest>(&json).ok(),
+            Some(digest)
+        );
+    }
+
+    /// Hashing a buffer and hashing the same bytes as a stream are two code paths.
+    #[test_strategy::proptest]
+    fn computing_and_reading_agree(bytes: Vec<u8>) {
+        let (from_reader, length) = Sha256Digest::from_reader(&bytes[..]).unwrap();
+
+        prop_assert_eq!(from_reader, Sha256Digest::compute(&bytes));
+        prop_assert_eq!(length, bytes.len() as u64);
     }
 }

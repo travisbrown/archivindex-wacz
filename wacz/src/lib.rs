@@ -28,6 +28,9 @@ pub mod pages;
 mod paths;
 mod zipnum;
 
+#[cfg(test)]
+mod strategies;
+
 /// Bounded source context for an error in a line-oriented member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LineContext {

@@ -78,6 +78,8 @@ fn direct_name<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategies;
+    use proptest::prelude::*;
 
     #[test]
     fn warc_names_report_their_content_compression() {
@@ -96,5 +98,49 @@ mod tests {
         assert!(!valid_resource_name("Pages.JSONL"));
         assert!(!valid_resource_name("archive/data.warc"));
         assert!(!valid_resource_name("caf\u{e9}.warc"));
+    }
+
+    /// A `ZipNum` member and its counterpart name each other.
+    #[test_strategy::proptest]
+    fn zipnum_partners_are_mutual(#[strategy(strategies::zipnum_path())] path: String) {
+        let partner = zipnum_partner(&path).expect("a ZipNum member has a counterpart");
+
+        prop_assert_ne!(&partner, &path);
+        prop_assert_eq!(zipnum_partner(&partner), Some(path.clone()));
+        prop_assert_eq!(is_zipnum_data(&path), is_zipnum_summary(&partner));
+        prop_assert_eq!(is_zipnum_summary(&path), is_zipnum_data(&partner));
+    }
+
+    /// Only `ZipNum` members have counterparts.
+    #[test_strategy::proptest]
+    fn only_zipnum_members_have_partners(#[strategy(strategies::member_path())] path: String) {
+        prop_assert_eq!(
+            zipnum_partner(&path).is_some(),
+            is_zipnum_data(&path) || is_zipnum_summary(&path)
+        );
+    }
+
+    /// A path is a member of at most one kind, and every recognized kind is a safe path.
+    #[test_strategy::proptest]
+    fn member_kinds_are_exclusive_and_safe(#[strategy(strategies::member_path())] path: String) {
+        let kinds = [
+            is_warc(&path),
+            is_plain_index(&path),
+            is_zipnum_data(&path),
+            is_zipnum_summary(&path),
+        ];
+        let recognized = kinds.iter().filter(|kind| **kind).count();
+
+        prop_assert!(recognized <= 1);
+        prop_assert!(recognized == 0 || is_safe(&path));
+    }
+
+    /// The names the index writer accepts are exactly the plain indexes the reader recognizes.
+    #[test_strategy::proptest]
+    fn index_names_agree_with_index_paths(#[strategy(strategies::member_path())] name: String) {
+        prop_assert_eq!(
+            valid_index_name(&name),
+            is_plain_index(&format!("{INDEXES_PREFIX}{name}"))
+        );
     }
 }

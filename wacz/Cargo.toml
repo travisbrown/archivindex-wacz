@@ -30,4 +30,6 @@ zip.workspace = true
 fluent-uri.workspace = true
 # Integration tests construct gzip WARC members and hand-rolled ZIP containers directly.
 flate2.workspace = true
+proptest.workspace = true
+test-strategy.workspace = true
 zip.workspace = true
