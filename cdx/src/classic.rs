@@ -308,7 +308,10 @@ impl<'a> Record<'a> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
 
     #[test]
     fn parses_standard_record() -> Result<(), Box<dyn std::error::Error>> {
@@ -352,5 +355,54 @@ mod tests {
         assert_eq!(capture.extra["e"], "10.0.0.1");
         assert!(!capture.extra.contains_key("c"));
         Ok(())
+    }
+
+    #[test_strategy::proptest]
+    fn header_and_record_round_trip(
+        #[strategy(strategies::legend_and_values())] legend: (char, bool, Vec<String>, Vec<String>),
+    ) {
+        let (delimiter, leading_delimiter, markers, values) = legend;
+        let header = Header::new(
+            delimiter,
+            leading_delimiter,
+            markers.into_iter().map(Cow::Owned).collect(),
+        )
+        .unwrap();
+        let record = Record::new(values.into_iter().map(Cow::Owned).collect());
+        let header_text = header.to_string();
+        let record_text = header.render(&record).unwrap();
+
+        prop_assert_eq!(
+            Header::parse(&header_text).map(Header::into_owned).ok(),
+            Some(header.clone())
+        );
+        prop_assert_eq!(
+            header
+                .parse_record(&record_text)
+                .map(Record::into_owned)
+                .ok(),
+            Some(record)
+        );
+    }
+
+    #[test_strategy::proptest]
+    fn the_standard_legend_recovers_every_value(
+        #[strategy(strategies::capture_parts())] parts: strategies::CaptureParts,
+    ) {
+        let capture = Header::standard_11().capture(&parts.record()).unwrap();
+
+        prop_assert_eq!(capture.key.as_ref(), parts.key.as_str());
+        prop_assert_eq!(capture.timestamp, parts.timestamp);
+        prop_assert_eq!(capture.url.as_ref(), parts.url.as_str());
+        prop_assert_eq!(capture.mime.as_deref(), parts.mime.as_deref());
+        prop_assert_eq!(capture.status, parts.status);
+        prop_assert_eq!(capture.digest.as_deref(), parts.digest.as_deref());
+        prop_assert_eq!(capture.redirect.as_deref(), parts.redirect.as_deref());
+        prop_assert_eq!(capture.robot_flags.as_deref(), parts.robot_flags.as_deref());
+        prop_assert_eq!(capture.length, parts.length);
+        prop_assert_eq!(capture.offset, parts.offset);
+        prop_assert_eq!(capture.filename.as_deref(), parts.filename.as_deref());
+        prop_assert!(capture.original.is_none());
+        prop_assert!(capture.extra.is_empty());
     }
 }

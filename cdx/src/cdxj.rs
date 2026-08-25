@@ -433,7 +433,10 @@ impl bounded_static::IntoBoundedStatic for ConformingItem<'_> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
 
     const EXAMPLE: &str = concat!(
         "com,example)/ 20201007212236 {\"url\":\"https://example.com/\",",
@@ -501,5 +504,45 @@ mod tests {
             Err(ConformanceError::Extra(properties::Error { property, .. }))
                 if property == "offset"
         ));
+    }
+
+    #[test_strategy::proptest]
+    fn text_round_trips(#[strategy(strategies::item())] item: Item<'static>) {
+        let line = item.to_string();
+
+        prop_assert_eq!(Item::parse(&line).map(Item::into_owned).ok(), Some(item));
+    }
+
+    /// The lenient field object accepts a JSON number wherever it accepts a numeric string.
+    #[test_strategy::proptest]
+    fn numbers_and_numeric_strings_agree(
+        status: u16,
+        offset: u64,
+        length: u64,
+        #[strategy(strategies::json_text())] filename: String,
+    ) {
+        let filename = serde_json::Value::String(filename);
+        let quoted = format!(
+            "{{\"url\":\"u\",\"status\":\"{status}\",\"offset\":\"{offset}\",\
+             \"length\":\"{length}\",\"filename\":{filename}}}"
+        );
+        let bare = format!(
+            "{{\"url\":\"u\",\"status\":{status},\"offset\":{offset},\
+             \"length\":{length},\"filename\":{filename}}}"
+        );
+
+        let parsed = serde_json::from_str::<Fields<'_>>(&quoted).ok();
+
+        prop_assert!(parsed.is_some());
+        prop_assert_eq!(parsed, serde_json::from_str::<Fields<'_>>(&bare).ok());
+    }
+
+    #[test_strategy::proptest]
+    fn conforming_fields_survive_the_lenient_form(
+        #[strategy(strategies::conforming_fields())] fields: ConformingFields<'static>,
+    ) {
+        let lenient = Fields::from(fields.clone());
+
+        prop_assert_eq!(ConformingFields::try_from(&lenient).ok(), Some(fields));
     }
 }

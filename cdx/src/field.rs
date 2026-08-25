@@ -157,3 +157,31 @@ impl bounded_static::IntoBoundedStatic for Field<'_> {
         self.into_owned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use proptest::sample::select;
+
+    use super::*;
+    use crate::strategies;
+
+    /// Aliases resolve to a canonical name that names the same field.
+    #[test_strategy::proptest]
+    fn names_are_canonical(#[strategy(strategies::bare_text())] name: String) {
+        let field = Field::named(&name);
+
+        prop_assert_eq!(&Field::named(field.as_name()), &field);
+    }
+
+    #[test_strategy::proptest]
+    fn classic_markers_are_canonical(
+        #[strategy(select(vec!["N", "A", "b", "a", "m", "s", "k", "R", "r", "M", "S", "V", "g",
+                               "c", "e", "n", "z"]))]
+        marker: &'static str,
+    ) {
+        let field = Field::classic(marker);
+
+        prop_assert_eq!(&Field::named(field.as_name()), &field);
+    }
+}

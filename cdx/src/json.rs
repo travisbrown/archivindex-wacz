@@ -300,7 +300,11 @@ impl bounded_static::IntoBoundedStatic for CaptureList<'_> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::classic::Header;
+    use crate::strategies;
 
     const EXAMPLE: &str = concat!(
         "[[\"urlkey\",\"timestamp\",\"url\",\"mime\",\"status\",\"digest\",\"length\"],",
@@ -362,5 +366,60 @@ mod tests {
             "[[\"urlkey\",\"timestamp\"],[\"com,example)/\"]]",
         );
         assert!(result.is_err());
+    }
+
+    /// The names the CDX Server uses for the fields of a standard classic legend.
+    const NAMES: [&str; 11] = [
+        "urlkey",
+        "timestamp",
+        "original",
+        "mimetype",
+        "statuscode",
+        "digest",
+        "redirect",
+        "robotflags",
+        "length",
+        "offset",
+        "filename",
+    ];
+
+    #[test_strategy::proptest]
+    fn document_round_trips(
+        #[strategy(proptest::collection::vec(strategies::capture_parts(), 0..=3))] rows: Vec<
+            strategies::CaptureParts,
+        >,
+        #[strategy(proptest::option::of(strategies::json_text()))] resume_key: Option<String>,
+    ) {
+        let document = Document::new(
+            NAMES.iter().copied().map(Cow::Borrowed).collect(),
+            rows.iter().map(strategies::CaptureParts::values).collect(),
+            resume_key.map(Cow::Owned),
+        )
+        .unwrap();
+        let text = serde_json::to_string(&document).unwrap();
+
+        prop_assert_eq!(
+            serde_json::from_str::<Document<'_>>(&text)
+                .map(Document::into_owned)
+                .ok(),
+            Some(document)
+        );
+    }
+
+    #[test_strategy::proptest]
+    fn captures_recover_every_value(
+        #[strategy(strategies::capture_parts())] parts: strategies::CaptureParts,
+    ) {
+        let document = Document::new(
+            NAMES.iter().copied().map(Cow::Borrowed).collect(),
+            vec![parts.values()],
+            None,
+        )
+        .unwrap();
+        let captures = document.into_captures().unwrap();
+        let expected = Header::standard_11().capture(&parts.record()).unwrap();
+
+        prop_assert_eq!(captures.values, vec![expected]);
+        prop_assert_eq!(captures.resume_key, None);
     }
 }

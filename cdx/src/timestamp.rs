@@ -167,7 +167,10 @@ impl bounded_static::IntoBoundedStatic for Timestamp {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
 
     #[test]
     fn preserves_precision_and_text_order() -> Result<(), Error> {
@@ -213,5 +216,25 @@ mod tests {
         assert_eq!(json, "\"20201007212236123\"");
         assert_eq!(serde_json::from_str::<Timestamp>(&json)?, timestamp);
         Ok(())
+    }
+
+    #[test_strategy::proptest]
+    fn text_round_trips(#[strategy(strategies::timestamp())] timestamp: Timestamp) {
+        prop_assert_eq!(
+            timestamp.to_string().parse::<Timestamp>().ok(),
+            Some(timestamp)
+        );
+    }
+
+    /// CDX indexes are sorted as text, so the text order has to agree with the value order.
+    #[test_strategy::proptest]
+    fn text_order_matches_value_order(
+        #[strategy(strategies::timestamp())] first: Timestamp,
+        #[strategy(strategies::timestamp())] second: Timestamp,
+    ) {
+        prop_assert_eq!(
+            first.cmp(&second),
+            first.to_string().cmp(&second.to_string())
+        );
     }
 }

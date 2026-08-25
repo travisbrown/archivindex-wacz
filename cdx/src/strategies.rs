@@ -1,19 +1,73 @@
+//! Property-testing strategies for CDX values and records.
+
 use std::borrow::Cow;
+use std::fmt::Display;
+use std::ops::RangeInclusive;
 
 use chrono::{TimeZone as _, Utc};
 use proptest::prelude::*;
+use proptest::sample::select;
 
-use crate::cdxj::{Fields, Item};
-use crate::classic::{Header, Record};
-use crate::json::Document;
+use crate::cdxj::{ConformingFields, Fields, Item};
+use crate::classic::Record;
 use crate::properties::ExtraProperties;
 use crate::timestamp::Timestamp;
 
-fn text() -> impl Strategy<Value = String> {
-    "[A-Za-z0-9._~:/(),-]{1,32}"
+/// The value a text representation uses for an absent field.
+const ABSENT: &str = "-";
+
+/// Strings of `range` tokens drawn from `tokens`.
+fn tokens_of(
+    tokens: &'static [&'static str],
+    range: RangeInclusive<usize>,
+) -> impl Strategy<Value = String> {
+    proptest::collection::vec(select(tokens), range).prop_map(|tokens| tokens.concat())
 }
 
-fn timestamp() -> impl Strategy<Value = Timestamp> {
+/// Text for a value that appears outside a JSON string: a search key, or a field of a
+/// delimiter-separated record.
+pub fn bare_text() -> impl Strategy<Value = String> {
+    const TOKENS: &[&str] = &[
+        "a", "Z", "0", "9", "-", "_", "~", ".", ",", "(", ")", "/", "?", "=", "&", ":", "+", "#",
+        "%20", "sha1:", "é",
+    ];
+
+    tokens_of(TOKENS, 1..=8)
+}
+
+/// Text that is not the absent marker, for a field that must be present.
+pub fn present_text() -> impl Strategy<Value = String> {
+    bare_text().prop_filter("value is present", |value| value != ABSENT)
+}
+
+/// Text for a value inside a JSON string, including the characters JSON must escape.
+pub fn json_text() -> impl Strategy<Value = String> {
+    const TOKENS: &[&str] = &[
+        "a",
+        "Z",
+        "0",
+        " ",
+        "\"",
+        "\\",
+        "{",
+        "}",
+        "[",
+        "]",
+        ":",
+        ",",
+        "\n",
+        "\t",
+        "\u{7f}",
+        "é",
+        "日",
+        "\u{1f600}",
+    ];
+
+    tokens_of(TOKENS, 1..=8)
+}
+
+/// A timestamp in either supported precision.
+pub fn timestamp() -> impl Strategy<Value = Timestamp> {
     (
         946_684_800_i64..1_893_456_000_i64,
         any::<bool>(),
@@ -24,6 +78,7 @@ fn timestamp() -> impl Strategy<Value = Timestamp> {
                 .timestamp_opt(seconds, fraction * 1_000_000)
                 .single()
                 .expect("generated timestamp is in range");
+
             if milliseconds {
                 Timestamp::with_milliseconds(instant)
             } else {
@@ -32,84 +87,219 @@ fn timestamp() -> impl Strategy<Value = Timestamp> {
         })
 }
 
-#[test_strategy::proptest]
-fn timestamp_text_round_trips(#[strategy(timestamp())] value: Timestamp) {
-    prop_assert_eq!(value.to_string().parse::<Timestamp>(), Ok(value));
+/// Extension properties under names that cannot collide with a modeled field.
+pub fn extra_properties() -> impl Strategy<Value = ExtraProperties> {
+    proptest::collection::vec((bare_text(), json_text()), 0..=3).prop_map(|entries| {
+        let mut extra = ExtraProperties::default();
+        for (name, value) in entries {
+            extra.insert(format!("x-{name}"), serde_json::Value::String(value));
+        }
+        extra
+    })
 }
 
-#[test_strategy::proptest]
-fn cdxj_text_round_trips(
-    #[strategy(text())] key: String,
-    #[strategy(timestamp())] captured_at: Timestamp,
-    #[strategy(text())] url: String,
-    #[strategy(proptest::option::of(any::<u16>()))] status: Option<u16>,
-    #[strategy(proptest::option::of(any::<u64>()))] offset: Option<u64>,
-    #[strategy(proptest::option::of(any::<u64>()))] length: Option<u64>,
-) {
-    let item = Item {
-        key: Cow::Owned(key),
-        timestamp: captured_at,
-        fields: Fields {
-            url: Cow::Owned(url),
-            digest: None,
-            mime: None,
-            status,
-            offset,
-            length,
-            filename: None,
-            record_digest: None,
-            extra: ExtraProperties::default(),
-        },
-    };
-    let line = item.to_string();
-    let parsed = Item::parse(&line).unwrap().into_owned();
-    prop_assert_eq!(parsed, item);
-}
-
-#[test_strategy::proptest]
-fn classic_header_and_record_round_trip(
-    #[strategy(prop_oneof![Just(' '), Just('|'), Just('\t')])] delimiter: char,
-    leading: bool,
-    #[strategy(prop::collection::vec(text(), 3))] values: Vec<String>,
-) {
-    let prefix = if leading {
-        delimiter.to_string()
-    } else {
-        String::new()
-    };
-    let header_text = format!("{prefix}CDX{delimiter}N{delimiter}b{delimiter}a");
-    let header = Header::parse(&header_text).unwrap();
-    let record = Record::new(values.into_iter().map(Cow::Owned).collect());
-    let rendered = header.render(&record).unwrap();
-    let serialized_header = header.to_string();
-    prop_assert_eq!(Header::parse(&serialized_header).unwrap(), header.clone());
-    prop_assert_eq!(header.parse_record(&rendered).unwrap().into_owned(), record);
-}
-
-#[test_strategy::proptest]
-fn json_document_round_trips(
-    #[strategy(text())] key: String,
-    #[strategy(timestamp())] captured_at: Timestamp,
-    #[strategy(text())] url: String,
-    #[strategy(proptest::option::of(text()))] resume_key: Option<String>,
-) {
-    let document = Document::new(
-        vec![
-            Cow::Borrowed("urlkey"),
-            Cow::Borrowed("timestamp"),
-            Cow::Borrowed("url"),
-        ],
-        vec![vec![
-            Cow::Owned(key),
-            Cow::Owned(captured_at.to_string()),
-            Cow::Owned(url),
-        ]],
-        resume_key.map(Cow::Owned),
+/// A lenient CDXJ field object.
+pub fn fields() -> impl Strategy<Value = Fields<'static>> {
+    (
+        json_text(),
+        proptest::option::of(bare_text()),
+        proptest::option::of(json_text()),
+        proptest::option::of(any::<u16>()),
+        proptest::option::of(any::<u64>()),
+        proptest::option::of(any::<u64>()),
+        proptest::option::of(json_text()),
+        proptest::option::of(bare_text()),
+        extra_properties(),
     )
-    .unwrap();
-    let serialized = serde_json::to_string(&document).unwrap();
-    let parsed = serde_json::from_str::<Document<'_>>(&serialized)
-        .unwrap()
-        .into_owned();
-    prop_assert_eq!(parsed, document.into_owned());
+        .prop_map(
+            |(url, digest, mime, status, offset, length, filename, record_digest, extra)| Fields {
+                url: Cow::Owned(url),
+                digest: digest.map(Cow::Owned),
+                mime: mime.map(Cow::Owned),
+                status,
+                offset,
+                length,
+                filename: filename.map(Cow::Owned),
+                record_digest: record_digest.map(Cow::Owned),
+                extra,
+            },
+        )
+}
+
+/// A CDXJ field object with every field CDXJ 0.1.0 requires.
+pub fn conforming_fields() -> impl Strategy<Value = ConformingFields<'static>> {
+    (
+        json_text(),
+        bare_text(),
+        json_text(),
+        any::<u16>(),
+        any::<u64>(),
+        any::<u64>(),
+        json_text(),
+        proptest::option::of(bare_text()),
+        extra_properties(),
+    )
+        .prop_map(
+            |(url, digest, mime, status, offset, length, filename, record_digest, extra)| {
+                ConformingFields {
+                    url: Cow::Owned(url),
+                    digest: Cow::Owned(digest),
+                    mime: Cow::Owned(mime),
+                    status,
+                    offset,
+                    length,
+                    filename: Cow::Owned(filename),
+                    record_digest: record_digest.map(Cow::Owned),
+                    extra,
+                }
+            },
+        )
+}
+
+/// A CDXJ line model.
+pub fn item() -> impl Strategy<Value = Item<'static>> {
+    (present_text(), timestamp(), fields()).prop_map(|(key, timestamp, fields)| Item {
+        key: Cow::Owned(key),
+        timestamp,
+        fields,
+    })
+}
+
+/// A delimiter used by classic CDX files.
+pub fn delimiter() -> impl Strategy<Value = char> {
+    select(vec![' ', '|', '\t'])
+}
+
+/// A legend marker: a standard classic marker, or a name that is not modeled.
+fn marker() -> impl Strategy<Value = String> {
+    prop_oneof![
+        select(vec![
+            "N",
+            "b",
+            "a",
+            "m",
+            "s",
+            "k",
+            "r",
+            "M",
+            "S",
+            "V",
+            "g",
+            "urlkey",
+            "timestamp",
+            "original",
+            "mimetype",
+            "statuscode",
+        ])
+        .prop_map(str::to_owned),
+        bare_text(),
+    ]
+}
+
+/// A classic header and a record with a matching number of values, which may be empty.
+pub fn legend_and_values() -> impl Strategy<Value = (char, bool, Vec<String>, Vec<String>)> {
+    (delimiter(), any::<bool>(), 1_usize..=6).prop_flat_map(|(delimiter, leading, count)| {
+        (
+            Just(delimiter),
+            Just(leading),
+            proptest::collection::vec(marker(), count),
+            proptest::collection::vec(
+                proptest::option::of(bare_text()).prop_map(Option::unwrap_or_default),
+                count,
+            ),
+        )
+    })
+}
+
+/// The values of a capture as they appear in a delimiter-separated or JSON-array record.
+#[derive(Clone, Debug)]
+pub struct CaptureParts {
+    pub key: String,
+    pub timestamp: Timestamp,
+    pub url: String,
+    pub mime: Option<String>,
+    pub status: Option<u16>,
+    pub digest: Option<String>,
+    pub redirect: Option<String>,
+    pub robot_flags: Option<String>,
+    pub length: Option<u64>,
+    pub offset: Option<u64>,
+    pub filename: Option<String>,
+}
+
+impl CaptureParts {
+    /// These values in the order of the standard 11-field legend (`N b a m s k r M S V g`),
+    /// with `-` for every absent field.
+    pub fn values(&self) -> Vec<Cow<'static, str>> {
+        [
+            self.key.clone(),
+            self.timestamp.to_string(),
+            self.url.clone(),
+            or_absent(self.mime.as_deref()),
+            or_absent(self.status),
+            or_absent(self.digest.as_deref()),
+            or_absent(self.redirect.as_deref()),
+            or_absent(self.robot_flags.as_deref()),
+            or_absent(self.length),
+            or_absent(self.offset),
+            or_absent(self.filename.as_deref()),
+        ]
+        .into_iter()
+        .map(Cow::Owned)
+        .collect()
+    }
+
+    /// These values as a classic CDX record.
+    pub fn record(&self) -> Record<'static> {
+        Record::new(self.values())
+    }
+}
+
+/// The values of a capture, each optional field present or absent.
+pub fn capture_parts() -> impl Strategy<Value = CaptureParts> {
+    (
+        present_text(),
+        timestamp(),
+        present_text(),
+        proptest::option::of(present_text()),
+        proptest::option::of(any::<u16>()),
+        proptest::option::of(present_text()),
+        proptest::option::of(present_text()),
+        proptest::option::of(present_text()),
+        proptest::option::of(any::<u64>()),
+        proptest::option::of(any::<u64>()),
+        proptest::option::of(present_text()),
+    )
+        .prop_map(
+            |(
+                key,
+                timestamp,
+                url,
+                mime,
+                status,
+                digest,
+                redirect,
+                robot_flags,
+                length,
+                offset,
+                filename,
+            )| CaptureParts {
+                key,
+                timestamp,
+                url,
+                mime,
+                status,
+                digest,
+                redirect,
+                robot_flags,
+                length,
+                offset,
+                filename,
+            },
+        )
+}
+
+/// Render a value, or the absent marker when it has none.
+fn or_absent<T: Display>(value: Option<T>) -> String {
+    value.map_or_else(|| ABSENT.to_owned(), |value| value.to_string())
 }
