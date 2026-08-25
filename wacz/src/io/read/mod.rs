@@ -1,17 +1,15 @@
 //! Reading files from an existing WACZ.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use archivindex_warc::io::read::WarcReader;
+use bounded_static::IntoBoundedStatic;
 use flate2::read::MultiGzDecoder;
 use zip::ZipArchive;
 use zip::result::ZipError;
-
-use bounded_static::IntoBoundedStatic;
 
 use crate::cdxj::IndexReader;
 use crate::digest::Sha256Digest;

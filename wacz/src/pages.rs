@@ -13,12 +13,11 @@
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
+use archivindex_cdx::properties::ExtraProperties;
 use archivindex_warc::value::Supported as _;
 use archivindex_warc::value::marker::Sha256;
 use bounded_static::{IntoBoundedStatic, ToStatic};
 use chrono::{DateTime, SecondsFormat, Utc};
-
-use archivindex_cdx::properties::ExtraProperties;
 
 use crate::LineContext;
 use crate::lines::Lines;

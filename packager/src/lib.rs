@@ -30,7 +30,6 @@ use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::record::record_type::RecordType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{Algorithm, LabelledDigest};
-
 use spool::{Annotation, ConversionSpool, PageDraft, SpoolStore};
 
 const INDEX_NAME: &str = "index.cdx";

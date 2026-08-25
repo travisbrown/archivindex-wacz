@@ -6,8 +6,6 @@ use std::thread;
 
 mod support;
 
-use support::{plain, request_header, request_path, serve_with};
-
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Operator, Session};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cdx::cdxj::Fields;
@@ -20,6 +18,7 @@ use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
 use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
+use support::{plain, request_header, request_path, serve_with};
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
 const PNG_PAYLOAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";

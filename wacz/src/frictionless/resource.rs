@@ -8,13 +8,11 @@
 
 use std::borrow::Cow;
 
+use archivindex_cdx::properties::ExtraProperties;
 use bounded_static::ToStatic;
 
-use archivindex_cdx::properties::ExtraProperties;
-
-use crate::digest::Sha256Digest;
-
 use super::{License, Source};
+use crate::digest::Sha256Digest;
 
 /// A file in the WACZ as listed in the manifest.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]

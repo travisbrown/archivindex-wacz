@@ -10,10 +10,8 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 
-use crate::Surt;
-use crate::escape;
-use crate::session;
 use crate::url::{self, Canonicalizer, Url};
+use crate::{Surt, escape, session};
 
 impl Canonicalizer {
     /// The Wayback Machine's rules, shared by pywb, `cdxj-indexer`, and `py-wacz`.

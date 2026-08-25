@@ -12,10 +12,9 @@
 
 use std::borrow::Cow;
 
+use archivindex_cdx::properties::ExtraProperties;
 use bounded_static::ToStatic;
 use chrono::{DateTime, Utc};
-
-use archivindex_cdx::properties::ExtraProperties;
 
 use crate::digest::Sha256Digest;
 
@@ -24,7 +23,6 @@ pub mod resource;
 pub mod signature;
 
 use resource::Resource;
-
 use signature::SignatureData;
 
 /// The Frictionless Data Package profile identifier required by the WACZ specification.

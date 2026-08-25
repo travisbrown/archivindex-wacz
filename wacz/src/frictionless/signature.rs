@@ -2,9 +2,8 @@
 
 use std::borrow::Cow;
 
-use chrono::{DateTime, Utc};
-
 use bounded_static::ToStatic;
+use chrono::{DateTime, Utc};
 
 use crate::digest::Sha256Digest;
 
@@ -143,9 +142,10 @@ pub struct DomainIdentitySignature<'a> {
 
 #[cfg(test)]
 mod tests {
+    use bounded_static::IntoBoundedStatic;
+
     use super::*;
     use crate::frictionless::DataPackageDigest;
-    use bounded_static::IntoBoundedStatic;
 
     /// A digest file with an anonymous signature envelope, shaped as in the signing specification.
     const ANONYMOUS_DIGEST: &str = r#"{

@@ -605,7 +605,6 @@ mod tests {
     use serde_json::json;
 
     use super::{CommentCaptureProcessor, CommentProgress, DateTime, bounds, format_timestamp};
-
     use crate::strategies;
 
     #[test_strategy::proptest]

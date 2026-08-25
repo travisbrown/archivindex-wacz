@@ -3,8 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Seek, Write};
 
-use chrono::SubsecRound as _;
-use chrono::Utc;
+use chrono::{SubsecRound as _, Utc};
 
 use super::resource::options_for;
 use super::{Error, WaczWriter};

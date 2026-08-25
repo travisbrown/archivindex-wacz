@@ -20,13 +20,12 @@ use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::value::LabelledDigest;
 
-use crate::cdxj;
-use crate::digest::Sha256Digest;
-use crate::frictionless;
-use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
-use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, PAGES_PATH, PAGES_PREFIX};
-
 use super::{DigestFile, Error, Fixity, WaczReader};
+use crate::digest::Sha256Digest;
+use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
+use crate::{
+    DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, PAGES_PATH, PAGES_PREFIX, cdxj, frictionless,
+};
 
 /// The layers of [`WaczReader::validate`] that read complete members.
 ///

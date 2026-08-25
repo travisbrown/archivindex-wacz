@@ -153,9 +153,10 @@ impl<'de> serde::de::Deserialize<'de> for Sha256Digest {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::strategies;
-    use proptest::prelude::*;
 
     /// The well-known SHA-256 digest of the empty input.
     const EMPTY: &str = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

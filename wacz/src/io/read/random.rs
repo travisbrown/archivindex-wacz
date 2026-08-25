@@ -15,11 +15,10 @@ use flate2::read::GzDecoder;
 use zip::CompressionMethod;
 
 use super::{Error, WaczReader};
-use crate::cdxj as cdxj_io;
 use crate::digest::Sha256Digest;
 use crate::lines::Lines;
 use crate::zipnum::{FORMAT, SummaryEntry, SummaryHeader};
-use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION, LineContext};
+use crate::{ARCHIVE_PREFIX, GZIP_EXTENSION, LineContext, cdxj as cdxj_io};
 
 /// A capture found in a WACZ index, together with the index that described it.
 #[derive(Clone, Debug, Eq, PartialEq)]

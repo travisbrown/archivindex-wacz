@@ -99,9 +99,10 @@ fn direct_name<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::strategies;
-    use proptest::prelude::*;
 
     #[test]
     fn warc_names_report_their_content_compression() {
