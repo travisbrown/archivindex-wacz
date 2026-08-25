@@ -12,6 +12,7 @@ Tools for capturing web pages and packaging them as web archive collections.
 | Crate | Description |
 | --- | --- |
 | [`archivindex-surt`](surt/) | SURT keys and URL canonicalization for web archive indexes |
+| [`archivindex-cdx`](cdx/) | Data models for classic CDX, CDXJ, and CDX Server JSON |
 | [`archivindex-wacz`](wacz/) | Reading and writing web archive collections in the [WACZ][wacz-spec] format |
 | [`archivindex-packager`](packager/) | Packaging WARC captures as indexed WACZ distributions |
 | [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into WARC files |

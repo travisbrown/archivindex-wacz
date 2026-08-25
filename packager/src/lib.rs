@@ -10,9 +10,10 @@ use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+use archivindex_cdx::cdxj;
+use archivindex_cdx::properties::ExtraProperties;
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
-use archivindex_wacz::ExtraProperties;
-use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::write::{IndexFormat, WaczWriter, WriterConfig};
@@ -523,7 +524,7 @@ fn capture_parts(
     );
     let item = cdxj::Item {
         key: Cow::Owned(Cow::from(canonical.surt()).into_owned()),
-        timestamp: cdxj::Timestamp::with_milliseconds(date),
+        timestamp: Timestamp::with_milliseconds(date),
         fields: cdxj::ConformingFields {
             url: Cow::Owned(url),
             digest: Cow::Owned(digest),
@@ -548,13 +549,14 @@ fn content_type_essence(head: &ResponseMetadata) -> Option<&str> {
         .filter(|essence| !essence.is_empty())
 }
 
-fn stored_digest(written: &Written) -> Option<Sha256Digest> {
+fn stored_digest(written: &Written) -> Option<Cow<'static, str>> {
     written
         .digest
         .as_ref()
         .and_then(LabelledDigest::decoded)
         .and_then(|bytes| bytes.try_into().ok())
         .map(Sha256Digest)
+        .map(|digest| Cow::Owned(digest.to_string()))
 }
 
 fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {

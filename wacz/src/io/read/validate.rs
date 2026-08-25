@@ -12,13 +12,14 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek};
 
+use archivindex_cdx::cdxj::Item;
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::value::LabelledDigest;
 
-use crate::cdxj::{Item, Timestamp};
 use crate::digest::Sha256Digest;
 use crate::frictionless::{DataPackage, PROFILE, WACZ_VERSION};
 use crate::{DATA_PACKAGE_DIGEST_PATH, DATA_PACKAGE_PATH, PAGES_PATH, PAGES_PREFIX};

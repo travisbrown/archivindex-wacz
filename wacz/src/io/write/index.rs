@@ -7,12 +7,14 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 use std::path::PathBuf;
 
+use archivindex_cdx::cdxj;
+use archivindex_cdx::timestamp::Timestamp;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
 use super::resource::options_for;
 use super::{Error, IndexFormat, WaczWriter};
-use crate::cdxj;
+use crate::cdxj::IndexReader;
 use crate::digest::Sha256Digest;
 use crate::zipnum::{FORMAT, SummaryEntry, SummaryHeader};
 use crate::{GZIP_EXTENSION, INDEXES_PREFIX};
@@ -24,9 +26,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         name: &str,
         items: I,
     ) -> Result<(), Error> {
-        self.write_index(name, items, |item| {
-            Ok(crate::cdxj::validate_cdxj_extra(&item.fields.extra)?)
-        })
+        self.write_index(name, items, |item| Ok(item.fields.validate()?))
     }
 
     /// Write an index while explicitly allowing entries that omit normative CDXJ fields.
@@ -57,8 +57,8 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
-        let mut previous: Option<(String, cdxj::Timestamp)> = None;
-        for (index, item) in cdxj::IndexReader::new(&mut reader).enumerate() {
+        let mut previous: Option<(String, Timestamp)> = None;
+        for (index, item) in IndexReader::new(&mut reader).enumerate() {
             let item = item.map_err(Error::InvalidIndex)?;
             // The reader yields owned keys, so `into_owned` moves rather than copies.
             let current = (item.key.into_owned(), item.timestamp);

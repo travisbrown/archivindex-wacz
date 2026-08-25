@@ -3,9 +3,11 @@
 use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
 
+use archivindex_cdx::cdxj;
+use archivindex_cdx::properties::ExtraProperties as CdxExtraProperties;
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_wacz::ExtraProperties;
-use archivindex_wacz::cdxj;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::read::{self as reader, WaczReader, validate};
@@ -56,7 +58,7 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Err
             length: Some(10),
             filename: Some(Cow::Borrowed("data.warc.gz")),
             record_digest: None,
-            extra: ExtraProperties::default(),
+            extra: CdxExtraProperties::default(),
         },
     })
 }
@@ -153,7 +155,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
             length: Some(warc_data.len() as u64),
             filename: Some(Cow::Borrowed(warc_name)),
             record_digest: None,
-            extra: ExtraProperties::default(),
+            extra: CdxExtraProperties::default(),
         },
     };
 
@@ -343,7 +345,7 @@ fn plain_lookup_and_capture_resolution() -> Result<(), Box<dyn std::error::Error
     let warc = warc_bytes()?;
     let wacz = build_wacz("data.warc", &warc)?;
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let timestamp: cdxj::Timestamp = capture_time().into();
+    let timestamp: Timestamp = capture_time().into();
 
     assert!(reader.lookup(URL, ..timestamp)?.is_empty());
 
@@ -358,7 +360,7 @@ fn plain_lookup_and_capture_resolution() -> Result<(), Box<dyn std::error::Error
     assert_eq!(record.body_bytes().as_ref(), BODY);
 
     let mut mismatched = captures[0].item.fields.clone();
-    mismatched.record_digest = Some(Sha256Digest::compute(b"different"));
+    mismatched.record_digest = Some(Sha256Digest::compute(b"different").to_string().into());
     assert!(matches!(
         reader.capture_bytes(&mismatched),
         Err(reader::Error::DigestMismatch { .. })
@@ -621,8 +623,8 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
         item_at(URL, first)?,
         item_at(URL, second)?,
     ];
-    items[1].timestamp = cdxj::Timestamp::new(first);
-    items[2].timestamp = cdxj::Timestamp::with_milliseconds(second);
+    items[1].timestamp = Timestamp::new(first);
+    items[2].timestamp = Timestamp::with_milliseconds(second);
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     let conforming = conforming_items(&items)?;
@@ -632,10 +634,7 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
         .into_inner();
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
 
-    let captures = reader.lookup(
-        URL,
-        cdxj::Timestamp::new(first)..cdxj::Timestamp::new(third),
-    )?;
+    let captures = reader.lookup(URL, Timestamp::new(first)..Timestamp::new(third))?;
     assert_eq!(captures.len(), 2);
     assert!(captures.is_sorted_by_key(|capture| capture.item.timestamp));
     assert_eq!(captures[0].item.timestamp.datetime(), first);
@@ -1224,7 +1223,7 @@ fn normal_index_writing_requires_normative_fields() -> Result<(), Box<dyn std::e
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
         writer.add_index("index.cdx", [&conforming]),
-        Err(writer::Error::ExtraProperty(_))
+        Err(writer::Error::CdxExtraProperty(_))
     ));
 
     item.fields.digest = None;
@@ -1617,7 +1616,7 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
 
     let good = resolvable_item(URL, "data.warc", length)?;
     let mut bad_digest = resolvable_item("https://www.example.com/page1", "data.warc", length)?;
-    bad_digest.fields.record_digest = Some(Sha256Digest::compute(b"wrong"));
+    bad_digest.fields.record_digest = Some(Sha256Digest::compute(b"wrong").to_string().into());
     let out_of_bounds = resolvable_item("https://www.example.com/page2", "data.warc", length + 10)?;
 
     let index = format!("{good}\n{bad_digest}\n{out_of_bounds}\n");
@@ -1662,7 +1661,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
     let warc = warc_bytes()?;
     let length = warc.len() as u64;
     let mut good = resolvable_item(URL, "data.warc", length)?;
-    good.timestamp = cdxj::Timestamp::with_milliseconds(capture_time());
+    good.timestamp = Timestamp::with_milliseconds(capture_time());
     good.fields.digest = Some(Cow::Borrowed(
         "SHA-256:flN+kD31v6nJ3i3FkNJkb4tKpx3RSHe9Pi7O2oKaRhg=",
     ));
@@ -1675,7 +1674,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
 
     let mut bad_timestamp = good.clone();
     bad_timestamp.timestamp =
-        cdxj::Timestamp::with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1));
+        Timestamp::with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1));
 
     let mut bad_status = good.clone();
     bad_status.fields.status = Some(404);

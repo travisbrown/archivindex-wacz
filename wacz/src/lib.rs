@@ -7,7 +7,7 @@
 //!
 //! # Modules
 //!
-//! - [`cdxj`]: CDXJ index lines mapping searchable URL keys to WARC records
+//! - [`cdxj`]: line-oriented CDXJ stream reading with source diagnostics
 //! - [`frictionless`]: The `datapackage.json` manifest and `datapackage-digest.json` formats
 //! - [`digest`]: SHA-256 digests in the `sha256:<hex>` encoding used by WACZ manifests
 //! - [`pages`]: The `pages/pages.jsonl` page list format

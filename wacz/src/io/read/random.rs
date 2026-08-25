@@ -3,18 +3,19 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::{Range, RangeBounds};
 
+use archivindex_cdx::cdxj::{self, Item, ParsedFields};
+use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::parse::raw;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
-use bounded_static::IntoBoundedStatic as _;
 use flate2::read::GzDecoder;
 use zip::CompressionMethod;
 
 use super::{Error, WaczReader};
-use crate::cdxj::{self, Item, ParsedFields, Timestamp};
+use crate::cdxj as cdxj_io;
 use crate::digest::Sha256Digest;
 use crate::lines::Lines;
 use crate::zipnum::{FORMAT, SummaryEntry, SummaryHeader};
@@ -228,7 +229,11 @@ impl<R: Read + Seek> WaczReader<R> {
         let path = archive_path(filename);
         let bytes = self.member_range(&path, offset, length)?;
 
-        if let Some(expected) = fields.record_digest {
+        if let Some(value) = &fields.record_digest {
+            let expected = value.parse().map_err(|source| Error::InvalidRecordDigest {
+                value: value.to_string(),
+                source,
+            })?;
             verify_digest(&path, &bytes, expected)?;
         }
 
@@ -270,7 +275,9 @@ impl<R: Read + Seek> WaczReader<R> {
                     break;
                 }
 
-                let item = Item::parse(line)?.into_static();
+                let item = Item::parse(line)
+                    .map_err(cdxj_io::Error::from)?
+                    .into_owned();
                 if time_range.contains(&item.timestamp) {
                     captures.push(Capture {
                         index_path: path.to_owned(),
@@ -333,7 +340,9 @@ impl<R: Read + Seek> WaczReader<R> {
             for line in text.lines().filter(|line| !line.is_empty()) {
                 if line_key(line).is_some_and(|found| keys.iter().any(|key| key.as_str() == found))
                 {
-                    let item = Item::parse(line)?.into_static();
+                    let item = Item::parse(line)
+                        .map_err(cdxj_io::Error::from)?
+                        .into_owned();
                     if time_range.contains(&item.timestamp) {
                         captures.push(Capture {
                             index_path: summary.path.clone(),
@@ -557,7 +566,7 @@ mod tests {
                 length: 10,
                 filename: Cow::Borrowed("data.warc"),
                 record_digest: None,
-                extra: crate::ExtraProperties::default(),
+                extra: archivindex_cdx::properties::ExtraProperties::default(),
             },
         };
         let mut writer = crate::io::write::WaczWriter::new(Cursor::new(Vec::new()));

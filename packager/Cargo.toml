@@ -12,6 +12,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+archivindex-cdx.workspace = true
 archivindex-surt = { version = "0.1.0", path = "../surt/" }
 archivindex-wacz = { version = "0.1.0", path = "../wacz/" }
 archivindex-warc = { workspace = true, features = ["gzip", "http"] }

@@ -84,6 +84,15 @@ pub enum Error {
     /// A required CDXJ capture field is absent.
     #[error("capture is missing CDXJ field `{0}`")]
     MissingCaptureField(&'static str),
+    /// A CDXJ `recordDigest` is not a valid WACZ SHA-256 digest.
+    #[error("invalid CDXJ recordDigest `{value}`")]
+    InvalidRecordDigest {
+        /// The value in the CDXJ field object.
+        value: String,
+        /// The digest parsing failure.
+        #[source]
+        source: crate::digest::Error,
+    },
     /// Bytes located by an index do not match their declared digest.
     #[error("digest mismatch for {path}: expected {expected}, computed {actual}")]
     DigestMismatch {

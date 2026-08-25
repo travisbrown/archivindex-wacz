@@ -1,0 +1,516 @@
+//! The CDXJ line model.
+
+use std::borrow::Cow;
+use std::fmt;
+use std::str::FromStr;
+
+use crate::capture::{Capture, CaptureError, Location};
+use crate::properties::{ExtraProperties, ExtraPropertyError};
+use crate::timestamp::{Timestamp, TimestampError};
+
+/// A CDXJ line cannot be parsed.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The line does not contain a key, timestamp, and JSON object.
+    #[error("truncated CDXJ line: {0}")]
+    Truncated(String),
+    /// The timestamp is invalid.
+    #[error(transparent)]
+    InvalidTimestamp(#[from] TimestampError),
+    /// The JSON field object is invalid.
+    #[error("invalid CDXJ field block")]
+    InvalidFields(#[source] serde_json::Error),
+}
+
+/// A single CDXJ line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Item<'a, F = ParsedFields<'a>> {
+    /// The searchable URL key.
+    pub key: Cow<'a, str>,
+    /// The capture timestamp.
+    pub timestamp: Timestamp,
+    /// The JSON field object.
+    pub fields: F,
+}
+
+impl<'a> Item<'a, ParsedFields<'a>> {
+    /// Parse a CDXJ line without its trailing newline.
+    pub fn parse(line: &'a str) -> Result<Self, Error> {
+        let (key, rest) = line
+            .split_once(' ')
+            .ok_or_else(|| Error::Truncated(line.to_owned()))?;
+        let (timestamp, fields) = rest
+            .split_once(' ')
+            .ok_or_else(|| Error::Truncated(line.to_owned()))?;
+        if key.is_empty() || timestamp.is_empty() || fields.is_empty() {
+            return Err(Error::Truncated(line.to_owned()));
+        }
+
+        Ok(Self {
+            key: Cow::Borrowed(key),
+            timestamp: timestamp.parse()?,
+            fields: serde_json::from_str(fields).map_err(Error::InvalidFields)?,
+        })
+    }
+
+    /// Detach this item from its input.
+    #[must_use]
+    pub fn into_owned(self) -> Item<'static, ParsedFields<'static>> {
+        Item {
+            key: Cow::Owned(self.key.into_owned()),
+            timestamp: self.timestamp,
+            fields: self.fields.into_owned(),
+        }
+    }
+}
+
+impl FromStr for Item<'static> {
+    type Err = Error;
+
+    fn from_str(line: &str) -> Result<Self, Self::Err> {
+        let item: Item<'_> = Item::parse(line)?;
+        Ok(item.into_owned())
+    }
+}
+
+impl<F: serde::Serialize> fmt::Display for Item<'_, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fields = serde_json::to_string(&self.fields).map_err(|_| fmt::Error)?;
+        write!(formatter, "{} {} {fields}", self.key, self.timestamp)
+    }
+}
+
+/// A CDXJ item whose required fields are present by construction.
+pub type ConformingItem<'a> = Item<'a, ConformingFields<'a>>;
+
+impl<'a> TryFrom<&Item<'a>> for ConformingItem<'a> {
+    type Error = ConformanceError;
+
+    fn try_from(item: &Item<'a>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            key: item.key.clone(),
+            timestamp: item.timestamp,
+            fields: ConformingFields::try_from(&item.fields)?,
+        })
+    }
+}
+
+/// A lenient CDXJ JSON field object.
+///
+/// Numeric fields accept JSON numbers and decimal strings. They are emitted as strings to match
+/// established CDXJ indexers. Unrecognized properties are preserved.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ParsedFields<'a> {
+    /// The original URL.
+    #[serde(borrow)]
+    pub url: Cow<'a, str>,
+    /// The response payload digest.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub digest: Option<Cow<'a, str>>,
+    /// The response media type.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mime: Option<Cow<'a, str>>,
+    /// The HTTP response status.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::optional_integer",
+        serialize_with = "crate::attributes::optional_integer_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status: Option<u16>,
+    /// The WARC record offset.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::optional_integer",
+        serialize_with = "crate::attributes::optional_integer_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub offset: Option<u64>,
+    /// The WARC record length.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::optional_integer",
+        serialize_with = "crate::attributes::optional_integer_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub length: Option<u64>,
+    /// The WARC filename.
+    #[serde(
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub filename: Option<Cow<'a, str>>,
+    /// The digest of the complete stored WARC record.
+    #[serde(
+        rename = "recordDigest",
+        default,
+        deserialize_with = "crate::attributes::borrowed_option_str",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub record_digest: Option<Cow<'a, str>>,
+    /// Additional JSON properties.
+    #[serde(flatten)]
+    pub extra: ExtraProperties,
+}
+
+impl ParsedFields<'_> {
+    /// Detach this field object from its input.
+    #[must_use]
+    pub fn into_owned(self) -> ParsedFields<'static> {
+        ParsedFields {
+            url: owned(self.url),
+            digest: self.digest.map(owned),
+            mime: self.mime.map(owned),
+            status: self.status,
+            offset: self.offset,
+            length: self.length,
+            filename: self.filename.map(owned),
+            record_digest: self.record_digest.map(owned),
+            extra: self.extra,
+        }
+    }
+}
+
+/// A CDXJ field object with all fields required by CDXJ 0.1.0.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct ConformingFields<'a> {
+    /// The original URL.
+    pub url: Cow<'a, str>,
+    /// The response payload digest.
+    pub digest: Cow<'a, str>,
+    /// The response media type.
+    pub mime: Cow<'a, str>,
+    /// The HTTP response status.
+    #[serde(serialize_with = "crate::attributes::integer_str")]
+    pub status: u16,
+    /// The WARC record offset.
+    #[serde(serialize_with = "crate::attributes::integer_str")]
+    pub offset: u64,
+    /// The WARC record length.
+    #[serde(serialize_with = "crate::attributes::integer_str")]
+    pub length: u64,
+    /// The WARC filename.
+    pub filename: Cow<'a, str>,
+    /// The digest of the complete stored WARC record.
+    #[serde(rename = "recordDigest", skip_serializing_if = "Option::is_none")]
+    pub record_digest: Option<Cow<'a, str>>,
+    /// Additional JSON properties.
+    #[serde(flatten)]
+    pub extra: ExtraProperties,
+}
+
+impl ConformingFields<'_> {
+    /// Detach this field object from its input.
+    #[must_use]
+    pub fn into_owned(self) -> ConformingFields<'static> {
+        ConformingFields {
+            url: owned(self.url),
+            digest: owned(self.digest),
+            mime: owned(self.mime),
+            status: self.status,
+            offset: self.offset,
+            length: self.length,
+            filename: owned(self.filename),
+            record_digest: self.record_digest.map(owned),
+            extra: self.extra,
+        }
+    }
+
+    /// Check that extension properties do not duplicate modeled properties.
+    pub fn validate(&self) -> Result<(), ExtraPropertyError> {
+        validate_extra(&self.extra)
+    }
+}
+
+impl<'a> From<ConformingFields<'a>> for ParsedFields<'a> {
+    fn from(fields: ConformingFields<'a>) -> Self {
+        Self {
+            url: fields.url,
+            digest: Some(fields.digest),
+            mime: Some(fields.mime),
+            status: Some(fields.status),
+            offset: Some(fields.offset),
+            length: Some(fields.length),
+            filename: Some(fields.filename),
+            record_digest: fields.record_digest,
+            extra: fields.extra,
+        }
+    }
+}
+
+/// Required fields absent from a lenient CDXJ field object.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("missing required CDXJ fields: {}", .0.join(", "))]
+pub struct MissingFields(pub Vec<&'static str>);
+
+/// A lenient CDXJ field object cannot be emitted as conforming CDXJ.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ConformanceError {
+    /// Required properties are absent.
+    #[error(transparent)]
+    Missing(#[from] MissingFields),
+    /// An extension property duplicates a modeled property.
+    #[error(transparent)]
+    Extra(#[from] ExtraPropertyError),
+}
+
+impl<'a> TryFrom<&ParsedFields<'a>> for ConformingFields<'a> {
+    type Error = ConformanceError;
+
+    fn try_from(fields: &ParsedFields<'a>) -> Result<Self, Self::Error> {
+        let mut missing = Vec::new();
+        if fields.digest.is_none() {
+            missing.push("digest");
+        }
+        if fields.mime.is_none() {
+            missing.push("mime");
+        }
+        if fields.status.is_none() {
+            missing.push("status");
+        }
+        if fields.offset.is_none() {
+            missing.push("offset");
+        }
+        if fields.length.is_none() {
+            missing.push("length");
+        }
+        if fields.filename.is_none() {
+            missing.push("filename");
+        }
+        if !missing.is_empty() {
+            return Err(MissingFields(missing).into());
+        }
+        validate_extra(&fields.extra)?;
+
+        Ok(Self {
+            url: fields.url.clone(),
+            digest: fields.digest.clone().expect("checked above"),
+            mime: fields.mime.clone().expect("checked above"),
+            status: fields.status.expect("checked above"),
+            offset: fields.offset.expect("checked above"),
+            length: fields.length.expect("checked above"),
+            filename: fields.filename.clone().expect("checked above"),
+            record_digest: fields.record_digest.clone(),
+            extra: fields.extra.clone(),
+        })
+    }
+}
+
+impl<'a> TryFrom<Item<'a>> for Capture<'a> {
+    type Error = CaptureError;
+
+    fn try_from(item: Item<'a>) -> Result<Self, Self::Error> {
+        let length = match item.fields.length {
+            Some(value) => Some(i64::try_from(value).map_err(|_| CaptureError::Invalid {
+                field: "length",
+                value: value.to_string(),
+            })?),
+            None => None,
+        };
+        Ok(Self {
+            key: item.key,
+            timestamp: item.timestamp,
+            url: item.fields.url,
+            mime: item.fields.mime,
+            status: item.fields.status,
+            digest: item.fields.digest,
+            redirect: None,
+            robot_flags: None,
+            length,
+            offset: item.fields.offset,
+            filename: item.fields.filename,
+            record_digest: item.fields.record_digest,
+            original: None::<Location<'a>>,
+            extra: item.fields.extra,
+        })
+    }
+}
+
+/// Split a CDXJ line into its key-and-timestamp prefix and JSON object.
+#[must_use]
+pub fn split_prefix(line: &str) -> Option<(&str, &str)> {
+    let (json, _) = line.match_indices(' ').nth(1)?;
+    Some((&line[..json], &line[json + 1..]))
+}
+
+fn validate_extra(extra: &ExtraProperties) -> Result<(), ExtraPropertyError> {
+    extra.validate(
+        "CDXJ fields",
+        &[
+            "url",
+            "digest",
+            "mime",
+            "status",
+            "offset",
+            "length",
+            "filename",
+            "recordDigest",
+        ],
+    )
+}
+
+fn owned(value: Cow<'_, str>) -> Cow<'static, str> {
+    Cow::Owned(value.into_owned())
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::ToBoundedStatic for ParsedFields<'_> {
+    type Static = ParsedFields<'static>;
+
+    fn to_static(&self) -> Self::Static {
+        self.clone().into_owned()
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::IntoBoundedStatic for ParsedFields<'_> {
+    type Static = ParsedFields<'static>;
+
+    fn into_static(self) -> Self::Static {
+        self.into_owned()
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::ToBoundedStatic for ConformingFields<'_> {
+    type Static = ConformingFields<'static>;
+
+    fn to_static(&self) -> Self::Static {
+        self.clone().into_owned()
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::IntoBoundedStatic for ConformingFields<'_> {
+    type Static = ConformingFields<'static>;
+
+    fn into_static(self) -> Self::Static {
+        self.into_owned()
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::ToBoundedStatic for Item<'_, ParsedFields<'_>> {
+    type Static = Item<'static, ParsedFields<'static>>;
+
+    fn to_static(&self) -> Self::Static {
+        self.clone().into_owned()
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::IntoBoundedStatic for Item<'_, ParsedFields<'_>> {
+    type Static = Item<'static, ParsedFields<'static>>;
+
+    fn into_static(self) -> Self::Static {
+        self.into_owned()
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::ToBoundedStatic for Item<'_, ConformingFields<'_>> {
+    type Static = Item<'static, ConformingFields<'static>>;
+
+    fn to_static(&self) -> Self::Static {
+        Item {
+            key: Cow::Owned(self.key.to_string()),
+            timestamp: self.timestamp,
+            fields: self.fields.clone().into_owned(),
+        }
+    }
+}
+
+#[cfg(feature = "bounded-static")]
+impl bounded_static::IntoBoundedStatic for Item<'_, ConformingFields<'_>> {
+    type Static = Item<'static, ConformingFields<'static>>;
+
+    fn into_static(self) -> Self::Static {
+        Item {
+            key: Cow::Owned(self.key.into_owned()),
+            timestamp: self.timestamp,
+            fields: self.fields.into_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EXAMPLE: &str = concat!(
+        "com,example)/ 20201007212236 {\"url\":\"https://example.com/\",",
+        "\"digest\":\"sha256:test\",\"mime\":\"text/html\",\"status\":\"200\",",
+        "\"offset\":\"784\",\"length\":\"1300\",\"filename\":\"data.warc.gz\"}",
+    );
+
+    #[test]
+    fn parses_spec_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let item = Item::parse(EXAMPLE)?;
+        assert_eq!(item.key, "com,example)/");
+        assert_eq!(item.fields.status, Some(200));
+        assert_eq!(item.fields.offset, Some(784));
+        assert_eq!(item.fields.length, Some(1300));
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_numeric_fields_and_extensions() -> Result<(), Box<dyn std::error::Error>> {
+        let item = Item::parse(
+            "com,example)/ 20201007212236 {\"url\":\"https://example.com/\",\"offset\":784,\"custom\":true}",
+        )?;
+        assert_eq!(item.fields.offset, Some(784));
+        assert_eq!(item.fields.extra["custom"], true);
+        assert!(matches!(item.fields.url, Cow::Borrowed(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn display_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let item = Item::parse(EXAMPLE)?;
+        assert_eq!(Item::parse(&item.to_string())?, item);
+        Ok(())
+    }
+
+    #[test]
+    fn conforming_fields_report_all_missing_properties() -> Result<(), Error> {
+        let item = Item::parse("com,example)/ 20201007212236 {\"url\":\"https://example.com/\"}")?;
+        assert_eq!(
+            ConformingFields::try_from(&item.fields),
+            Err(ConformanceError::Missing(MissingFields(vec![
+                "digest", "mime", "status", "offset", "length", "filename"
+            ])))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn conforming_fields_reject_extension_collisions() {
+        let mut fields = ParsedFields {
+            url: "https://example.com/".into(),
+            digest: Some("sha1:test".into()),
+            mime: Some("text/html".into()),
+            status: Some(200),
+            offset: Some(0),
+            length: Some(1),
+            filename: Some("data.warc.gz".into()),
+            record_digest: None,
+            extra: ExtraProperties::default(),
+        };
+        fields.extra.insert("offset".to_owned(), 1.into());
+
+        assert!(matches!(
+            ConformingFields::try_from(&fields),
+            Err(ConformanceError::Extra(ExtraPropertyError { property, .. }))
+                if property == "offset"
+        ));
+    }
+}

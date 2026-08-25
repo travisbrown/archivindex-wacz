@@ -152,7 +152,10 @@ pub enum Error {
     MissingRequiredMembers(Vec<&'static str>),
     /// An index entry omits normative CDXJ fields.
     #[error(transparent)]
-    NonconformingIndex(#[from] crate::cdxj::ConformanceError),
+    NonconformingIndex(#[from] archivindex_cdx::cdxj::ConformanceError),
+    /// A CDXJ extension property duplicates a modeled field.
+    #[error(transparent)]
+    CdxExtraProperty(#[from] archivindex_cdx::properties::ExtraPropertyError),
     /// An extension property duplicates a modeled JSON property.
     #[error(transparent)]
     ExtraProperty(#[from] crate::ExtraPropertyError),

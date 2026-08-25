@@ -7,8 +7,8 @@
 use std::borrow::Cow;
 use std::io::Seek;
 
+use archivindex_cdx::cdxj;
 use archivindex_wacz::ExtraProperties;
-use archivindex_wacz::cdxj;
 use archivindex_wacz::io::write::index::IndexSpool;
 use archivindex_wacz::pages::{Page, PageListHeader, PageListWriter};
 use redb::{ReadableTable as _, Table, TableDefinition, WriteTransaction};

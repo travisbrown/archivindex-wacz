@@ -111,10 +111,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "archivindex-cdx"
+version = "0.1.0"
+dependencies = [
+ "bounded-static",
+ "chrono",
+ "proptest",
+ "serde",
+ "serde_json",
+ "test-strategy",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "archivindex-packager"
 version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
+ "archivindex-cdx",
  "archivindex-surt",
  "archivindex-wacz",
  "archivindex-warc",
@@ -143,6 +157,7 @@ dependencies = [
 name = "archivindex-wacz"
 version = "0.1.0"
 dependencies = [
+ "archivindex-cdx",
  "archivindex-surt",
  "archivindex-warc",
  "bounded-static",

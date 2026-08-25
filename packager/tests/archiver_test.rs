@@ -11,9 +11,9 @@ use support::{plain, request_header, request_path, serve_with};
 use archivindex_archiver::client::Archiver;
 use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Operator, Session};
+use archivindex_cdx::cdxj::ParsedFields;
 use archivindex_packager::WarcToWacz;
 use archivindex_surt::Surt;
-use archivindex_wacz::cdxj::ParsedFields;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::io::read::WaczReader;
 use archivindex_wacz::io::read::validate::ValidationOptions;
@@ -242,7 +242,10 @@ fn assert_frames_one_response(
     let length = usize::try_from(fields.length.expect("length should be indexed"))?;
     let framed = &member[offset..offset + length];
 
-    assert_eq!(fields.record_digest, Some(Sha256Digest::compute(framed)));
+    assert_eq!(
+        fields.record_digest.as_deref(),
+        Some(Sha256Digest::compute(framed).to_string().as_str())
+    );
 
     let mut record = Vec::new();
     if framed.starts_with(&[0x1f, 0x8b]) {
