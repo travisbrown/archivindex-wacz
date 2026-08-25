@@ -23,5 +23,6 @@ tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+archivindex-archiver = { version = "0.1.0", path = "../archiver/" }
 chrono.workspace = true
 flate2.workspace = true

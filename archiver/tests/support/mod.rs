@@ -1,13 +1,37 @@
-//! Shared scripted HTTP server support for integration tests.
+//! Shared support for integration tests: a scripted HTTP server and WARC readback.
 #![allow(
     dead_code,
     reason = "each integration-test crate uses a different subset"
 )]
 
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
+
+use archivindex_warc::io::read::WarcReader;
+use archivindex_warc::record::Record;
+use archivindex_warc::record::extension::NoExtension;
+use archivindex_warc::value::{Algorithm, LabelledDigest};
+use flate2::bufread::MultiGzDecoder;
+
+/// Parse every record of a WARC held in memory, gzip-compressed or plain as its first bytes say.
+pub fn records(bytes: &[u8]) -> Result<Vec<Record>, archivindex_warc::io::read::Error> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        WarcReader::new(BufReader::new(MultiGzDecoder::new(bytes)))
+            .iter_records::<NoExtension>()
+            .collect()
+    } else {
+        WarcReader::new(bytes)
+            .iter_records::<NoExtension>()
+            .collect()
+    }
+}
+
+/// The labelled SHA-256 digest of a payload, as the archiver records it.
+pub fn sha256(payload: &[u8]) -> LabelledDigest {
+    LabelledDigest::compute(Algorithm::Sha256, payload).expect("sha256 is enabled")
+}
 
 /// Build a simple HTTP/1.1 response with a text body.
 pub fn plain(status: &str, headers: &str, body: &str) -> Vec<u8> {

@@ -473,6 +473,32 @@ fn records_are_copied_verbatim() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn a_warc_with_no_captures_becomes_an_empty_collection() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let date = WarcDate::from(Utc::now());
+    write_source(
+        &input,
+        vec![warcinfo(b"title: Nothing captured\r\n", date)],
+        false,
+    )?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+    assert_eq!(summary.records, 1);
+    assert_eq!(summary.captures, 0);
+    assert_eq!(summary.pages, 0);
+    assert!(summary.warnings.is_empty());
+
+    // The collection is still written and internally consistent.
+    let mut reader = WaczReader::open(&output)?;
+    assert!(reader.verify_fixity()?.is_success());
+    assert_eq!(reader.pages()?.count(), 0);
+    assert_eq!(reader.index("indexes/index.cdx")?.count(), 0);
+    Ok(())
+}
+
+#[test]
 fn metadata_annotates_its_page_in_any_order() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");

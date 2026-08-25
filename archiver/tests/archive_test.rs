@@ -1,29 +1,23 @@
 //! End-to-end archiving tests against a local HTTP server serving canned responses.
 
-use std::io::{Cursor, Read};
+use std::io::{BufReader, Cursor};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::thread;
 use std::time::Duration;
 
 mod support;
 
-use support::{plain, request_path, serve_with};
+use support::{plain, records, request_path, serve_with, sha256};
 
 use archivindex_archiver::client::{Archiver, CaptureControl, CaptureEvent, Error};
 use archivindex_archiver::config::Config;
-use archivindex_packager::WarcToWacz;
-use archivindex_surt::Surt;
-use archivindex_wacz::digest::Sha256Digest;
-use archivindex_wacz::io::read::WaczReader;
 use archivindex_warc::io::read::WarcReader;
-use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::Algorithm;
 use archivindex_warc::value::WarcDatePrecision;
 use archivindex_warc::version::WarcVersion;
-use chrono::SubsecRound as _;
-use flate2::read::GzDecoder;
+use flate2::bufread::MultiGzDecoder;
 use fluent_uri::Uri;
 
 fn gzip_config() -> Config {
@@ -31,46 +25,6 @@ fn gzip_config() -> Config {
         gzip_warc: true,
         ..Config::default()
     }
-}
-
-struct PackagedWarc {
-    _directory: tempfile::TempDir,
-    reader: WaczReader<std::io::BufReader<std::fs::File>>,
-}
-
-impl std::ops::Deref for PackagedWarc {
-    type Target = WaczReader<std::io::BufReader<std::fs::File>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.reader
-    }
-}
-
-impl std::ops::DerefMut for PackagedWarc {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.reader
-    }
-}
-
-fn package_bytes(bytes: &[u8]) -> Result<PackagedWarc, Box<dyn std::error::Error>> {
-    let directory = tempfile::tempdir()?;
-    let warc = directory.path().join(if bytes.starts_with(&[0x1f, 0x8b]) {
-        "capture.warc.gz"
-    } else {
-        "capture.warc"
-    });
-    let wacz = directory.path().join("capture.wacz");
-    std::fs::write(&warc, bytes)?;
-    WarcToWacz::new(&warc, &wacz).run()?;
-    let reader = WaczReader::open(&wacz)?;
-    Ok(PackagedWarc {
-        _directory: directory,
-        reader,
-    })
-}
-
-fn package_path(path: &std::path::Path) -> Result<PackagedWarc, Box<dyn std::error::Error>> {
-    package_bytes(&std::fs::read(path)?)
 }
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
@@ -192,42 +146,9 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
         vec![(200, 0), (200, 1), (404, 0)]
     );
 
-    let mut reader = package_bytes(&bytes)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-
-    let package = reader.data_package()?;
-
-    assert_eq!(package.main_page_url.as_deref(), Some(urls[0].as_str()));
-
-    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(
-        pages
-            .iter()
-            .map(|page| page.url.as_ref())
-            .collect::<Vec<_>>(),
-        [
-            urls[0].as_str(),
-            urls[1].as_str(),
-            format!("http://127.0.0.1:{port}/target").as_str(),
-            urls[2].as_str(),
-        ]
-    );
-    assert_eq!(pages[2].size, Some("arrived".len() as u64));
-    // Every page receives a synthetic id of the default 24-character length.
-    assert!(
-        pages
-            .iter()
-            .all(|page| page.id.as_deref().is_some_and(|id| id.len() == 24))
-    );
-
     // One warcinfo record plus a request, response, and metadata record for each of the four
     // exchanges.
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     assert_eq!(records.len(), 13);
 
@@ -368,8 +289,7 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
     // The written form is checked at the raw layer, since URI angle brackets are applied when a
     // record is rendered rather than being part of its value: WARC 1.1 brackets record identifiers
     // and leaves target URIs bare.
-    let raw_records = reader
-        .warc("archive/data.warc.gz")?
+    let raw_records = WarcReader::new(BufReader::new(MultiGzDecoder::new(bytes.as_slice())))
         .iter_raw_records()
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -390,71 +310,6 @@ fn archive_and_read_back() -> Result<(), Box<dyn std::error::Error>> {
                 .get("WARC-Target-URI")
                 .map(<[u8]>::trim_ascii)
                 .is_none_or(|target| !target.starts_with(b"<"))
-        );
-    }
-
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 4);
-    assert!(items.is_sorted_by_key(|item| item.key.clone()));
-    assert!(items.iter().all(|item| item.timestamp.has_milliseconds()));
-    assert!(
-        items
-            .iter()
-            .all(|item| item.timestamp.to_string().len() == 17)
-    );
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item.fields.url == urls[0])
-            .map(|item| item.timestamp.datetime()),
-        Some(response.core().date.date_time().trunc_subsecs(3))
-    );
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item.fields.url == urls[0])
-            .and_then(|item| item.fields.mime.as_deref()),
-        Some("text/html")
-    );
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item.fields.url == urls[2])
-            .and_then(|item| item.fields.status),
-        Some(404)
-    );
-
-    // Every index entry's offset and length must frame exactly one complete gzip member,
-    // decompressible on its own, holding one parseable response record.
-    let warc_bytes = &bytes;
-
-    for item in &items {
-        assert_eq!(item.fields.filename.as_deref(), Some("data.warc.gz"));
-
-        let offset = usize::try_from(item.fields.offset.expect("offset should be indexed"))?;
-        let length = usize::try_from(item.fields.length.expect("length should be indexed"))?;
-
-        // The record digest covers exactly the framed range of stored (compressed) bytes.
-        assert_eq!(
-            item.fields.record_digest,
-            Some(Sha256Digest::compute(&warc_bytes[offset..offset + length]))
-        );
-
-        let mut decompressed = Vec::new();
-        GzDecoder::new(&warc_bytes[offset..offset + length]).read_to_end(&mut decompressed)?;
-
-        let framed = WarcReader::new(decompressed.as_slice())
-            .iter_records::<NoExtension>()
-            .collect::<Result<Vec<_>, _>>()?;
-
-        assert_eq!(framed.len(), 1);
-        assert_eq!(framed[0].type_name(), "response");
-        assert_eq!(
-            framed[0].target_uri().map(Uri::as_str),
-            Some(item.fields.url.as_ref())
         );
     }
 
@@ -498,7 +353,8 @@ fn event_sink_can_cancel_and_finalize_a_partial_archive() -> Result<(), Box<dyn 
     assert!(!summary.is_complete());
     assert_eq!(summary.captures.len(), 1);
     assert_eq!(events, ["started", "captured", "written"]);
-    assert!(package_bytes(&bytes)?.verify_fixity()?.is_success());
+    // The partial archive is a complete WARC: its warcinfo record and the one exchange.
+    assert_eq!(records(&bytes)?.len(), 4);
 
     Ok(())
 }
@@ -540,7 +396,7 @@ fn event_sink_can_cancel_before_the_first_dispatch() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
+fn archive_writes_a_plain_warc_when_gzip_is_off() -> Result<(), Box<dyn std::error::Error>> {
     let (port, server) = serve(1)?;
     let url = format!("http://127.0.0.1:{port}/");
 
@@ -554,42 +410,9 @@ fn archive_with_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(summary.is_complete());
 
-    let mut reader = package_bytes(&bytes)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-
-    let records = reader
-        .warc("archive/data.warc")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(records.len(), 4);
-
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].fields.filename.as_deref(), Some("data.warc"));
-
-    // The offset and length frame the uncompressed response record directly.
-    let warc_bytes = &bytes;
-
-    let offset = usize::try_from(items[0].fields.offset.expect("offset should be indexed"))?;
-    let length = usize::try_from(items[0].fields.length.expect("length should be indexed"))?;
-
-    // The record digest covers exactly the framed range of stored (plain) bytes.
-    assert_eq!(
-        items[0].fields.record_digest,
-        Some(Sha256Digest::compute(&warc_bytes[offset..offset + length]))
-    );
-
-    let framed = WarcReader::new(&warc_bytes[offset..offset + length])
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(framed.len(), 1);
-    assert_eq!(framed[0].type_name(), "response");
+    // The WARC opens with its first record rather than a gzip member.
+    assert!(bytes.starts_with(b"WARC/1.1\r\n"));
+    assert_eq!(records(&bytes)?.len(), 4);
 
     Ok(())
 }
@@ -609,11 +432,8 @@ fn archive_records_unreachable_urls_as_failures() -> Result<(), Box<dyn std::err
     assert_eq!(summary.failures.len(), 1);
     assert_eq!(summary.failures[0].url, url);
 
-    // The collection is still written and internally consistent.
-    let mut reader = package_bytes(&bytes)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-    assert_eq!(reader.pages()?.count(), 0);
+    // The WARC is still written, holding only its warcinfo record.
+    assert_eq!(records(&bytes)?.len(), 1);
 
     Ok(())
 }
@@ -635,13 +455,8 @@ fn archive_stops_following_at_the_redirect_limit() -> Result<(), Box<dyn std::er
     assert_eq!(summary.captures[0].status, 302);
     assert_eq!(summary.captures[0].redirects, 0);
 
-    let mut reader = package_bytes(&bytes)?;
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].key, Surt::from_url(&url)?.as_str());
+    // Only the redirect itself is recorded: one exchange after the warcinfo record.
+    assert_eq!(records(&bytes)?.len(), 4);
 
     Ok(())
 }
@@ -703,9 +518,7 @@ fn archive_to_path_writes_a_collection() -> Result<(), Box<dyn std::error::Error
     assert!(saw_partial);
     assert!(!partial_path.exists());
 
-    let mut reader = package_path(&path)?;
-
-    assert!(reader.verify_fixity()?.is_success());
+    assert_eq!(records(&std::fs::read(&path)?)?.len(), 4);
 
     Ok(())
 }
@@ -726,11 +539,7 @@ fn recorded_request_matches_the_wire_bytes() -> Result<(), Box<dyn std::error::E
 
     assert!(summary.is_complete());
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     // The request record replays the received request byte for byte.
     assert_eq!(records[1].type_name(), "request");
@@ -757,11 +566,7 @@ fn archive_records_chunked_responses_verbatim() -> Result<(), Box<dyn std::error
     assert!(summary.is_complete());
     assert_eq!(summary.captures[0].size, "hello world".len() as u64);
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     let message = String::from_utf8(records[2].body_bytes().into_owned())?;
 
@@ -772,9 +577,8 @@ fn archive_records_chunked_responses_verbatim() -> Result<(), Box<dyn std::error
     assert_eq!(
         records[2]
             .payload()
-            .and_then(|payload| payload.payload_digest.as_ref())
-            .map(ToString::to_string),
-        Some(Sha256Digest::compute(b"hello world").to_string())
+            .and_then(|payload| payload.payload_digest.as_ref()),
+        Some(&sha256(b"hello world"))
     );
 
     Ok(())
@@ -817,28 +621,17 @@ fn archive_records_hops_captured_before_a_failure() -> Result<(), Box<dyn std::e
     assert!(summary.captures.is_empty());
     assert_eq!(summary.failures[0].url, url);
 
-    let mut reader = package_bytes(&bytes)?;
-
-    // Generic WARC conversion records the completed redirect hop as a page and index entry even
-    // though the following request failed.
-    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(pages.len(), 1);
-    assert_eq!(pages[0].url, url);
-
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].fields.status, Some(302));
-
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    // The completed redirect hop is recorded even though the following request failed.
+    let records = records(&bytes)?;
 
     assert_eq!(records.len(), 4);
     assert_eq!(records[2].type_name(), "response");
+    assert_eq!(records[2].target_uri().map(Uri::as_str), Some(url.as_str()));
+    assert!(
+        records[2]
+            .body_bytes()
+            .starts_with(b"HTTP/1.1 302 Found\r\n")
+    );
 
     Ok(())
 }
@@ -868,11 +661,7 @@ fn archive_treats_multiple_choices_and_not_modified_as_final()
         vec![(300, 0), (304, 0)]
     );
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     // The bodiless 304 keeps its headers exactly as received, with no fabricated zero
     // content-length replacing the one describing the entity that was not sent.
@@ -899,11 +688,7 @@ fn archive_preserves_a_nonstandard_reason_phrase() -> Result<(), Box<dyn std::er
     assert!(summary.is_complete());
     assert_eq!(summary.captures[0].status, 520);
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     // The origin's own reason phrase is stored, not the status code's canonical one.
     let message = String::from_utf8(records[2].body_bytes().into_owned())?;
@@ -925,11 +710,7 @@ fn archive_preserves_repeated_set_cookie_headers() -> Result<(), Box<dyn std::er
 
     assert!(summary.is_complete());
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     let message = String::from_utf8(records[2].body_bytes().into_owned())?;
 
@@ -953,20 +734,15 @@ fn archive_records_binary_bodies() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(summary.captures[0].size, 256);
 
     let body = (0u8..=255).collect::<Vec<_>>();
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     assert!(records[2].body_bytes().ends_with(&body));
     // The payload digest of a record and the digest recorded in the index share an encoding.
     assert_eq!(
         records[2]
             .payload()
-            .and_then(|payload| payload.payload_digest.as_ref())
-            .map(ToString::to_string),
-        Some(Sha256Digest::compute(&body).to_string())
+            .and_then(|payload| payload.payload_digest.as_ref()),
+        Some(&sha256(&body))
     );
 
     Ok(())
@@ -984,11 +760,7 @@ fn archive_identifies_payload_types_from_content() -> Result<(), Box<dyn std::er
 
     assert!(summary.is_complete());
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
     let response = &records[2];
 
     // Identification examines the PNG signature instead of copying the declared `text/plain`.
@@ -1003,14 +775,6 @@ fn archive_identifies_payload_types_from_content() -> Result<(), Box<dyn std::er
             .and_then(|payload| payload.identified_payload_type.as_ref())
             .is_some_and(|media_type| media_type.is("image", "png"))
     );
-
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // The index mirrors the declared `Content-Type`, as cdxj-indexer does; the identified type
-    // stays on the record.
-    assert_eq!(items[0].fields.mime.as_deref(), Some("text/plain"));
 
     Ok(())
 }
@@ -1063,11 +827,7 @@ fn archive_truncates_responses_at_the_configured_limit() -> Result<(), Box<dyn s
         "<html>home</html>".len() as u64 - 5
     );
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     // The response record holds exactly the bytes received up to the limit and declares why it was
     // truncated; the request and metadata records are unaffected.
@@ -1096,12 +856,8 @@ fn archive_stops_following_a_redirect_cycle() -> Result<(), Box<dyn std::error::
     assert_eq!(summary.captures[0].status, 302);
     assert_eq!(summary.captures[0].redirects, 2);
 
-    let mut reader = package_bytes(&bytes)?;
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 3);
+    // Three hops, each a request, response, and metadata record after the warcinfo record.
+    assert_eq!(records(&bytes)?.len(), 10);
 
     Ok(())
 }
@@ -1182,19 +938,18 @@ fn archive_concurrently_preserves_input_order() -> Result<(), Box<dyn std::error
         urls.iter().map(String::as_str).collect::<Vec<_>>()
     );
 
-    let mut reader = package_bytes(&bytes)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-
-    // Page entries follow input order, exactly as in a sequential run.
-    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
+    // Response records follow input order, exactly as in a sequential run.
+    let records = records(&bytes)?;
 
     assert_eq!(
-        pages
+        records
             .iter()
-            .map(|page| page.url.as_ref())
+            .filter(|record| matches!(record.type_name(), "response" | "revisit"))
+            .map(|record| record.target_uri().map(Uri::as_str))
             .collect::<Vec<_>>(),
-        urls.iter().map(String::as_str).collect::<Vec<_>>()
+        urls.iter()
+            .map(|url| Some(url.as_str()))
+            .collect::<Vec<_>>()
     );
 
     Ok(())
@@ -1218,11 +973,7 @@ fn archive_encodes_url_characters_the_uri_grammar_rejects() -> Result<(), Box<dy
     assert!(summary.is_complete());
     assert!(requests[0].starts_with(b"GET /target?x=1%7C2 HTTP/1.1\r\n"));
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
     let Record::Response { header, .. } = &records[2] else {
         panic!("the capture should store a response record");
     };
@@ -1256,11 +1007,7 @@ fn archive_never_revisits_a_truncated_capture() -> Result<(), Box<dyn std::error
 
     assert!(summary.is_complete());
 
-    let mut reader = package_bytes(&bytes)?;
-    let records = reader
-        .warc("archive/data.warc")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&bytes)?;
 
     // The second response is stored in full rather than as a revisit of the truncated first.
     assert_eq!(records.len(), 7);

@@ -28,8 +28,4 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-sha2.workspace = true
 flate2.workspace = true
-archivindex-packager = { version = "0.1.0", path = "../packager/" }
-archivindex-surt = { version = "0.1.0", path = "../surt/" }
-archivindex-wacz = { version = "0.1.0", path = "../wacz/" }

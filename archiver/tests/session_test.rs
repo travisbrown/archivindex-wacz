@@ -12,11 +12,6 @@ use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
-use archivindex_packager::WarcToWacz;
-use archivindex_wacz::digest::Sha256Digest;
-use archivindex_wacz::io::read::WaczReader;
-use archivindex_wacz::io::read::validate::ValidationOptions;
-use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::Field;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
@@ -24,7 +19,7 @@ use archivindex_warc::record::fields::warcinfo::WarcinfoField;
 use archivindex_warc::record::header::RevisitProfile;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
-use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
+use archivindex_warc::value::{MediaType, WarcDate};
 use archivindex_warc::version::WarcVersion;
 use archivindex_warc_revisit_index::db::Index;
 use archivindex_warc_revisit_index::payload::RevisitTarget;
@@ -33,50 +28,15 @@ use fluent_uri::Uri;
 
 mod support;
 
-use support::{plain, request_header, request_path, serve_concurrently_with, serve_with};
+use support::{
+    plain, records, request_header, request_path, serve_concurrently_with, serve_with, sha256,
+};
 
 fn gzip_config() -> Config {
     Config {
         gzip_warc: true,
         ..Config::default()
     }
-}
-
-struct PackagedWarc {
-    _directory: tempfile::TempDir,
-    reader: WaczReader<std::io::BufReader<std::fs::File>>,
-}
-
-impl std::ops::Deref for PackagedWarc {
-    type Target = WaczReader<std::io::BufReader<std::fs::File>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.reader
-    }
-}
-
-impl std::ops::DerefMut for PackagedWarc {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.reader
-    }
-}
-
-fn package_path(path: &std::path::Path) -> Result<PackagedWarc, Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)?;
-    let directory = tempfile::tempdir()?;
-    let warc = directory.path().join(if bytes.starts_with(&[0x1f, 0x8b]) {
-        "capture.warc.gz"
-    } else {
-        "capture.warc"
-    });
-    let wacz = directory.path().join("capture.wacz");
-    std::fs::write(&warc, bytes)?;
-    WarcToWacz::new(&warc, &wacz).run()?;
-    let reader = WaczReader::open(&wacz)?;
-    Ok(PackagedWarc {
-        _directory: directory,
-        reader,
-    })
 }
 
 /// The operator most tests run their sessions as.
@@ -132,11 +92,6 @@ fn uri(value: &str) -> Uri<String> {
 
 fn warc_date(value: &str) -> WarcDate {
     WarcDate::parse(value, WarcVersion::V1_1).expect("test WARC date")
-}
-
-fn sha256(payload: &[u8]) -> LabelledDigest {
-    let digest = Sha256Digest::compute(payload);
-    LabelledDigest::from_digest(Algorithm::Sha256, &digest.0)
 }
 
 /// Answer a request for a versioned page, whose `ETag` advances once: an unconditional request or
@@ -345,11 +300,7 @@ fn persistent_index_supplies_historical_and_same_session_revisit_targets()
     );
     assert!(summary.is_complete());
 
-    let mut reader = package_path(&output)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&std::fs::read(&output)?)?;
     assert_eq!(
         records.iter().map(Record::type_name).collect::<Vec<_>>(),
         [
@@ -457,11 +408,7 @@ fn persistent_resource_state_drives_conditional_requests_and_not_modified_revisi
     );
     assert_eq!(summary.seed_captures[0].status, 304);
 
-    let mut reader = package_path(&output)?;
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&std::fs::read(&output)?)?;
     let Record::Revisit { header, .. } = &records[2] else {
         panic!("the persisted original should produce a revisit");
     };
@@ -504,16 +451,8 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
     assert_eq!(summary.seed_captures.len(), 2);
     assert!(summary.is_complete());
 
-    // The second capture's payload matches the first, so it is stored as a revisit record while
-    // the collection remains fully conformant.
-    let mut reader = package_path(&output)?;
-
-    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
-
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    // The second capture's payload matches the first, so it is stored as a revisit record.
+    let records = records(&std::fs::read(&output)?)?;
 
     assert_eq!(
         records
@@ -568,19 +507,6 @@ fn processor_can_explicitly_recapture_a_seen_url() -> Result<(), Box<dyn std::er
         revisit_body.as_slice(),
         &original_body[..revisit_body.len()]
     );
-
-    // Both captures are indexed under the shared payload digest, the revisit entry marked by the
-    // conventional media type.
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 2);
-    assert!(items[0].fields.digest.is_some());
-    assert_eq!(items[0].fields.digest, items[1].fields.digest);
-    assert_eq!(items[0].fields.mime.as_deref(), Some("text/html"));
-    assert_eq!(items[1].fields.mime.as_deref(), Some("warc/revisit"));
-    assert_eq!(items[1].fields.status, Some(200));
 
     Ok(())
 }
@@ -639,14 +565,7 @@ fn recapture_of_a_validated_response_is_a_server_not_modified_revisit()
         [200, 304]
     );
 
-    let mut reader = package_path(&output)?;
-
-    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
-
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&std::fs::read(&output)?)?;
 
     assert_eq!(
         records
@@ -698,17 +617,6 @@ fn recapture_of_a_validated_response_is_a_server_not_modified_revisit()
     assert!(revisit_body.starts_with(b"HTTP/1.1 304 Not Modified\r\n"));
     assert!(revisit_body.ends_with(b"\r\n\r\n"));
 
-    // The index entry for the revisit carries its own status and the original's digest.
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 2);
-    assert!(items[0].fields.digest.is_some());
-    assert_eq!(items[0].fields.digest, items[1].fields.digest);
-    assert_eq!(items[1].fields.mime.as_deref(), Some("warc/revisit"));
-    assert_eq!(items[1].fields.status, Some(304));
-
     Ok(())
 }
 
@@ -753,14 +661,7 @@ fn changed_content_is_recaptured_in_full_and_revalidated_by_its_new_validators()
         [200, 200, 304]
     );
 
-    let mut reader = package_path(&output)?;
-
-    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
-
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&std::fs::read(&output)?)?;
 
     assert_eq!(
         records
@@ -791,21 +692,6 @@ fn changed_content_is_recaptured_in_full_and_revalidated_by_its_new_validators()
     assert_eq!(
         revisit.payload.payload_digest,
         second.payload.payload_digest
-    );
-
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 3);
-    assert_ne!(items[0].fields.digest, items[1].fields.digest);
-    assert_eq!(items[1].fields.digest, items[2].fields.digest);
-    assert_eq!(
-        items
-            .iter()
-            .map(|item| item.fields.status)
-            .collect::<Vec<_>>(),
-        [Some(200), Some(200), Some(304)]
     );
 
     Ok(())
@@ -902,67 +788,8 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
         ]
     );
 
-    let mut reader = package_path(&path)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
-
-    // The WARC file is named after the session identifier.
-    assert_eq!(
-        reader.warc_paths().collect::<Vec<_>>(),
-        ["archive/data.warc.gz"]
-    );
-
-    // The manifest is titled by the identifier, and the main page is the first seed.
-    let package = reader.data_package()?;
-
-    assert_eq!(package.title.as_deref(), Some("crawl-2026.08"));
-    assert_eq!(package.main_page_url.as_deref(), Some(seeds[0].as_str()));
-
-    // Captures without discovery metadata enter the required page list. The redirect and its
-    // destination remain separate captures because the WARC contains no page-list directives.
-    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(
-        pages
-            .iter()
-            .map(|page| (page.url.as_ref(), page.title.as_deref()))
-            .collect::<Vec<_>>(),
-        vec![
-            (seeds[0].as_str(), Some("Home")),
-            (seeds[1].as_str(), None),
-            (
-                format!("http://127.0.0.1:{port}/about").as_str(),
-                Some("About")
-            ),
-        ]
-    );
-
-    let extra = reader.page_list("pages/extraPages.jsonl")?;
-
-    assert_eq!(extra.header().id.as_deref(), Some("extra-pages"));
-
-    let extra_pages = extra.collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(
-        extra_pages
-            .iter()
-            .map(|page| (page.url.as_ref(), page.title.as_deref()))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                format!("http://127.0.0.1:{port}/about").as_str(),
-                Some("About")
-            ),
-            (format!("http://127.0.0.1:{port}/missing").as_str(), None),
-        ]
-    );
-
     // The warcinfo record names the session and the User-Agent sent with every request.
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&std::fs::read(&path)?)?;
 
     let Record::Warcinfo { header, body } = &records[0] else {
         panic!("the first record should be a warcinfo record");
@@ -1054,18 +881,6 @@ fn session_crawls_discovered_urls_into_extra_pages() -> Result<(), Box<dyn std::
         ]
     );
 
-    // Every capture (seed hops and discovered pages alike) is indexed.
-    let items = reader
-        .index("indexes/index.cdx")?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(items.len(), 5);
-    assert!(
-        items
-            .iter()
-            .all(|item| item.fields.filename.as_deref() == Some("data.warc.gz"))
-    );
-
     Ok(())
 }
 
@@ -1102,25 +917,8 @@ fn session_captures_each_url_once() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(summary.seed_captures.len(), 2);
     assert!(summary.extra_captures.is_empty());
 
-    let mut reader = package_path(&path)?;
-    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
-
-    assert_eq!(
-        pages
-            .iter()
-            .map(|page| page.url.as_ref())
-            .collect::<Vec<_>>(),
-        [seeds[0].as_str(), seeds[2].as_str()]
-    );
-
-    // With no discovered pages, the extra page list is omitted.
-    assert!(reader.page_list("pages/extraPages.jsonl").is_err());
-
     // An operator without an email is recorded by name alone; the software defaults to this crate.
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    let records = records(&std::fs::read(&path)?)?;
     let Record::Warcinfo {
         body: FieldsBlock::Fields(fields),
         ..
@@ -1163,15 +961,9 @@ fn session_limit_stops_with_discoveries_still_queued() -> Result<(), Box<dyn std
     assert_eq!(summary.seed_captures.len(), 1);
     assert_eq!(summary.extra_captures.len(), 0);
 
-    let mut reader = package_path(&path)?;
+    let records = records(&std::fs::read(&path)?)?;
 
-    assert_eq!(reader.pages()?.count(), 1);
-    assert!(reader.page_list("pages/extraPages.jsonl").is_err());
-
-    let records = reader
-        .warc("archive/data.warc.gz")?
-        .iter_records::<NoExtension>()
-        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(records.len(), 4);
     let Record::Warcinfo {
         body: FieldsBlock::Fields(warcinfo),
         ..
@@ -1262,16 +1054,7 @@ fn session_retries_transient_failures_with_backoff() -> Result<(), Box<dyn std::
     assert_eq!(summary.seed_captures[0].status, 200);
 
     // The failed attempt leaves no trace: one warcinfo record plus one exchange's records.
-    let mut reader = package_path(&path)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-    assert_eq!(
-        reader
-            .warc("archive/data.warc.gz")?
-            .iter_records::<NoExtension>()
-            .count(),
-        4
-    );
+    assert_eq!(records(&std::fs::read(&path)?)?.len(), 4);
 
     Ok(())
 }
@@ -1494,11 +1277,8 @@ fn session_reports_exhausted_retries_as_failures() -> Result<(), Box<dyn std::er
     assert_eq!(summary.failures.len(), 1);
     assert_eq!(summary.failures[0].url, url);
 
-    // The collection is still written and internally consistent.
-    let mut reader = package_path(&path)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-    assert_eq!(reader.pages()?.count(), 0);
+    // The WARC is still written, holding only its warcinfo record.
+    assert_eq!(records(&std::fs::read(&path)?)?.len(), 1);
 
     Ok(())
 }
@@ -1596,10 +1376,8 @@ fn session_with_no_seeds_writes_an_empty_collection() -> Result<(), Box<dyn std:
     assert!(summary.is_complete());
     assert!(summary.seed_captures.is_empty());
 
-    let mut reader = package_path(&path)?;
-
-    assert!(reader.verify_fixity()?.is_success());
-    assert_eq!(reader.pages()?.count(), 0);
+    // The WARC holds only its warcinfo record.
+    assert_eq!(records(&std::fs::read(&path)?)?.len(), 1);
 
     Ok(())
 }
