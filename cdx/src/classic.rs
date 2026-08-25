@@ -53,13 +53,7 @@ impl<'a> Header<'a> {
                 .iter()
                 .any(|marker| marker.is_empty() || marker.contains(delimiter))
         {
-            return Err(Error::InvalidLegend(
-                markers
-                    .iter()
-                    .map(AsRef::as_ref)
-                    .collect::<Vec<_>>()
-                    .join(&delimiter.to_string()),
-            ));
+            return Err(Error::InvalidLegend(join(delimiter, &markers)));
         }
         Ok(Self {
             delimiter,
@@ -150,13 +144,7 @@ impl<'a> Header<'a> {
     /// Interpret a legend marker as a semantic field.
     #[must_use]
     pub fn field(&self, index: usize) -> Option<Field<'_>> {
-        self.markers.get(index).map(|marker| {
-            if marker.chars().count() == 1 {
-                Field::classic(marker)
-            } else {
-                Field::named(marker)
-            }
-        })
+        self.markers.get(index).map(|marker| marker_field(marker))
     }
 
     /// Parse a record using this header.
@@ -176,14 +164,7 @@ impl<'a> Header<'a> {
             .markers
             .iter()
             .zip(&record.values)
-            .map(|(marker, value)| {
-                let field = if marker.chars().count() == 1 {
-                    Field::classic(marker)
-                } else {
-                    Field::named(marker)
-                };
-                (field, value.clone())
-            })
+            .map(|(marker, value)| (marker_field(marker), value.clone()))
             .collect::<Vec<_>>();
         Ok(crate::capture::from_fields(&fields)?)
     }
@@ -191,12 +172,7 @@ impl<'a> Header<'a> {
     /// Format a record with this header's delimiter.
     pub fn render(&self, record: &Record<'_>) -> Result<String, Error> {
         self.check_count(record.values.len())?;
-        Ok(record
-            .values
-            .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>()
-            .join(&self.delimiter.to_string()))
+        Ok(join(self.delimiter, &record.values))
     }
 
     fn standard(markers: &[&'static str]) -> Header<'static> {
@@ -264,15 +240,7 @@ impl fmt::Display for Header<'_> {
             write!(formatter, "{}", self.delimiter)?;
         }
         write!(formatter, "CDX{}", self.delimiter)?;
-        let delimiter = self.delimiter.to_string();
-        formatter.write_str(
-            &self
-                .markers
-                .iter()
-                .map(AsRef::as_ref)
-                .collect::<Vec<_>>()
-                .join(&delimiter),
-        )
+        formatter.write_str(&join(self.delimiter, &self.markers))
     }
 }
 
@@ -283,6 +251,27 @@ impl FromStr for Header<'static> {
         let header: Header<'_> = Header::parse(line)?;
         Ok(header.into_owned())
     }
+}
+
+/// Interpret a legend marker: single characters are classic markers, anything longer is a name.
+fn marker_field(marker: &str) -> Field<'_> {
+    if marker.chars().count() == 1 {
+        Field::classic(marker)
+    } else {
+        Field::named(marker)
+    }
+}
+
+/// Join values with a delimiter character.
+fn join(delimiter: char, values: &[Cow<'_, str>]) -> String {
+    let mut joined = String::with_capacity(values.iter().map(|value| value.len() + 1).sum());
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            joined.push(delimiter);
+        }
+        joined.push_str(value);
+    }
+    joined
 }
 
 /// The values of a classic CDX record.
