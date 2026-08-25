@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use chrono::{TimeZone as _, Utc};
 use proptest::prelude::*;
 
-use crate::cdxj::{ParsedFields, ParsedItem};
+use crate::cdxj::{Fields, Item};
 use crate::classic::{Header, Record};
 use crate::json::Document;
 use crate::properties::ExtraProperties;
@@ -46,10 +46,10 @@ fn cdxj_text_round_trips(
     #[strategy(proptest::option::of(any::<u64>()))] offset: Option<u64>,
     #[strategy(proptest::option::of(any::<u64>()))] length: Option<u64>,
 ) {
-    let item = ParsedItem {
+    let item = Item {
         key: Cow::Owned(key),
         timestamp: captured_at,
-        fields: ParsedFields {
+        fields: Fields {
             url: Cow::Owned(url),
             digest: None,
             mime: None,
@@ -62,7 +62,7 @@ fn cdxj_text_round_trips(
         },
     };
     let line = item.to_string();
-    let parsed = ParsedItem::parse(&line).unwrap().into_owned();
+    let parsed = Item::parse(&line).unwrap().into_owned();
     prop_assert_eq!(parsed, item);
 }
 

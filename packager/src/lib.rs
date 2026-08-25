@@ -457,7 +457,7 @@ fn capture_parts(
     generator: Option<&mut (dyn PageTitleGenerator + '_)>,
     warc_name: &str,
     written: &Written,
-) -> Result<Option<(cdxj::Item<'static>, PageDraft)>, SkipReason> {
+) -> Result<Option<(cdxj::ConformingItem<'static>, PageDraft)>, SkipReason> {
     let (message, revisit) = match record {
         Record::Response { body, .. } => (body.as_slice(), false),
         Record::Revisit { body, .. } => (body.as_slice(), true),
@@ -525,7 +525,7 @@ fn capture_parts(
     let item = cdxj::Item {
         key: Cow::Owned(Cow::from(canonical.surt()).into_owned()),
         timestamp: Timestamp::with_milliseconds(date),
-        fields: cdxj::Fields {
+        fields: cdxj::ConformingFields {
             url: Cow::Owned(url),
             digest: Cow::Owned(digest),
             mime: Cow::Owned(mime),

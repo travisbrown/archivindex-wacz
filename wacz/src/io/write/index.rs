@@ -21,7 +21,7 @@ use crate::{GZIP_EXTENSION, INDEXES_PREFIX};
 
 impl<W: Write + Seek> WaczWriter<W> {
     /// Write a sorted CDXJ index in the configured plain or `ZipNum` format.
-    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
+    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
         &mut self,
         name: &str,
         items: I,
@@ -30,7 +30,7 @@ impl<W: Write + Seek> WaczWriter<W> {
     }
 
     /// Write an index while allowing entries that omit required CDXJ fields.
-    pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::ParsedItem<'a>>>(
+    pub fn add_index_lenient<'a, I: IntoIterator<Item = &'a cdxj::Item<'a>>>(
         &mut self,
         name: &str,
         items: I,

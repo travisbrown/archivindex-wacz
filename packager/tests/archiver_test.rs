@@ -11,7 +11,7 @@ use support::{plain, request_header, request_path, serve_with};
 use archivindex_archiver::client::Archiver;
 use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Operator, Session};
-use archivindex_cdx::cdxj::ParsedFields;
+use archivindex_cdx::cdxj::Fields;
 use archivindex_packager::WarcToWacz;
 use archivindex_surt::Surt;
 use archivindex_wacz::digest::Sha256Digest;
@@ -236,7 +236,7 @@ fn assert_conformant(reader: &mut Reader) -> Result<(), Box<dyn std::error::Erro
 /// it is the response for the entry's URL, and that the record digest covers the framed bytes.
 fn assert_frames_one_response(
     member: &[u8],
-    fields: &ParsedFields<'_>,
+    fields: &Fields<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let offset = usize::try_from(fields.offset.expect("offset should be indexed"))?;
     let length = usize::try_from(fields.length.expect("length should be indexed"))?;

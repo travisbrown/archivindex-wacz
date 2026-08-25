@@ -45,11 +45,11 @@ fn capture_time() -> chrono::DateTime<Utc> {
 }
 
 /// Build a minimal CDXJ item for a URL captured at [`capture_time`].
-fn item_for(url: &str) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::url::Error> {
-    Ok(cdxj::ParsedItem {
+fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
+    Ok(cdxj::Item {
         key: Surt::from_url(url)?.into(),
         timestamp: capture_time().into(),
-        fields: cdxj::ParsedFields {
+        fields: cdxj::Fields {
             url: Cow::Owned(url.to_owned()),
             digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
             mime: Some(Cow::Borrowed("text/html")),
@@ -64,16 +64,16 @@ fn item_for(url: &str) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::ur
 }
 
 fn required_items(
-    items: &[cdxj::ParsedItem<'static>],
-) -> Result<Vec<cdxj::Item<'static>>, cdxj::FieldsError> {
-    items.iter().map(cdxj::Item::try_from).collect()
+    items: &[cdxj::Item<'static>],
+) -> Result<Vec<cdxj::ConformingItem<'static>>, cdxj::ConformanceError> {
+    items.iter().map(cdxj::ConformingItem::try_from).collect()
 }
 
 /// Build a searchable item at a particular time without requiring a corresponding WARC record.
 fn item_at(
     url: &str,
     timestamp: chrono::DateTime<Utc>,
-) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::url::Error> {
+) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.timestamp = timestamp.into();
     Ok(item)
@@ -84,7 +84,7 @@ fn resolvable_item(
     url: &str,
     filename: &'static str,
     length: u64,
-) -> Result<cdxj::ParsedItem<'static>, archivindex_surt::url::Error> {
+) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.fields.filename = Some(Cow::Borrowed(filename));
     item.fields.length = Some(length);
@@ -143,10 +143,10 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 
     let capture_time = capture_time();
 
-    let item = cdxj::ParsedItem {
+    let item = cdxj::Item {
         key: Surt::from_url(URL)?.into(),
         timestamp: capture_time.into(),
-        fields: cdxj::ParsedFields {
+        fields: cdxj::Fields {
             url: Cow::Borrowed(URL),
             digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
             mime: Some(Cow::Borrowed("text/html")),
@@ -159,7 +159,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
         },
     };
 
-    writer.add_index("index.cdx", [&cdxj::Item::try_from(&item)?])?;
+    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
 
     let page = Page {
         url: Cow::Borrowed(URL),
@@ -857,7 +857,7 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
 /// `ZipNum` blocks are gzip members encoded at the configured gzip compression level.
 #[test]
 fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::Item::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
     for (level, expected_xfl) in [(1, 4), (9, 2)] {
         let config = WriterConfig {
             index_format: IndexFormat::zipnum(),
@@ -884,7 +884,7 @@ fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error
 /// only its `!meta` line.
 #[test]
 fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let no_items = std::iter::empty::<&cdxj::Item<'static>>();
+    let no_items = std::iter::empty::<&cdxj::ConformingItem<'static>>();
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_index("index.cdx", no_items.clone())?;
@@ -944,7 +944,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
         ..WriterConfig::default()
     };
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
-    writer.add_index("index.cdx", [&cdxj::Item::try_from(&item)?])?;
+    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
@@ -1215,7 +1215,7 @@ fn writer_validates_warc_names_not_content() -> Result<(), Box<dyn std::error::E
 #[test]
 fn normal_index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Error>> {
     let mut item = item_for(URL)?;
-    let mut required = cdxj::Item::try_from(&item)?;
+    let mut required = cdxj::ConformingItem::try_from(&item)?;
     required
         .fields
         .extra
@@ -1229,7 +1229,7 @@ fn normal_index_writing_requires_standard_fields() -> Result<(), Box<dyn std::er
     item.fields.digest = None;
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
 
-    assert!(cdxj::Item::try_from(&item).is_err());
+    assert!(cdxj::ConformingItem::try_from(&item).is_err());
     writer.add_index_lenient("index.cdx", [&item])?;
     Ok(())
 }

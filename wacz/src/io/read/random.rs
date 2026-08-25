@@ -3,7 +3,7 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::{Range, RangeBounds};
 
-use archivindex_cdx::cdxj::{self, ParsedFields, ParsedItem};
+use archivindex_cdx::cdxj::{self, Fields, Item};
 use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_surt::url::Canonicalizer;
@@ -27,7 +27,7 @@ pub struct Capture {
     /// The plain CDXJ index or `ZipNum` summary that produced this result.
     pub index_path: String,
     /// The matching CDXJ item.
-    pub item: ParsedItem<'static>,
+    pub item: Item<'static>,
 }
 
 /// One independently compressed block described by a `ZipNum` summary.
@@ -212,14 +212,11 @@ impl<R: Read + Seek> WaczReader<R> {
     ///
     /// For `.warc.gz` members, the returned bytes are the complete compressed gzip member. For
     /// uncompressed WARC members, they are the complete serialized WARC record.
-    pub fn capture_bytes(&mut self, fields: &ParsedFields<'_>) -> Result<Vec<u8>, Error> {
+    pub fn capture_bytes(&mut self, fields: &Fields<'_>) -> Result<Vec<u8>, Error> {
         self.capture_bytes_with_path(fields).map(|(_, bytes)| bytes)
     }
 
-    fn capture_bytes_with_path(
-        &mut self,
-        fields: &ParsedFields<'_>,
-    ) -> Result<(String, Vec<u8>), Error> {
+    fn capture_bytes_with_path(&mut self, fields: &Fields<'_>) -> Result<(String, Vec<u8>), Error> {
         let filename = fields
             .filename
             .as_deref()
@@ -241,16 +238,13 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 
     /// Resolve CDXJ fields to exactly one byte-preserving raw WARC record.
-    pub fn read_capture_raw(&mut self, fields: &ParsedFields<'_>) -> Result<raw::Record, Error> {
+    pub fn read_capture_raw(&mut self, fields: &Fields<'_>) -> Result<raw::Record, Error> {
         let bytes = self.decoded_capture_bytes(fields)?;
         single(WarcReader::new(Cursor::new(bytes)).iter_raw_records())
     }
 
     /// Resolve CDXJ fields to exactly one semantically validated WARC record.
-    pub fn read_capture(
-        &mut self,
-        fields: &ParsedFields<'_>,
-    ) -> Result<Record<NoExtension>, Error> {
+    pub fn read_capture(&mut self, fields: &Fields<'_>) -> Result<Record<NoExtension>, Error> {
         let bytes = self.decoded_capture_bytes(fields)?;
         single(WarcReader::new(Cursor::new(bytes)).iter_records::<NoExtension>())
     }
@@ -275,7 +269,7 @@ impl<R: Read + Seek> WaczReader<R> {
                     break;
                 }
 
-                let item = ParsedItem::parse(line)
+                let item = Item::parse(line)
                     .map_err(cdxj_io::Error::from)?
                     .into_owned();
                 if time_range.contains(&item.timestamp) {
@@ -340,7 +334,7 @@ impl<R: Read + Seek> WaczReader<R> {
             for line in text.lines().filter(|line| !line.is_empty()) {
                 if line_key(line).is_some_and(|found| keys.iter().any(|key| key.as_str() == found))
                 {
-                    let item = ParsedItem::parse(line)
+                    let item = Item::parse(line)
                         .map_err(cdxj_io::Error::from)?
                         .into_owned();
                     if time_range.contains(&item.timestamp) {
@@ -356,7 +350,7 @@ impl<R: Read + Seek> WaczReader<R> {
         Ok(captures)
     }
 
-    fn decoded_capture_bytes(&mut self, fields: &ParsedFields<'_>) -> Result<Vec<u8>, Error> {
+    fn decoded_capture_bytes(&mut self, fields: &Fields<'_>) -> Result<Vec<u8>, Error> {
         let (path, bytes) = self.capture_bytes_with_path(fields)?;
 
         if path.ends_with(GZIP_EXTENSION) {
@@ -557,7 +551,7 @@ mod tests {
                 .single()
                 .unwrap()
                 .into(),
-            fields: cdxj::Fields {
+            fields: cdxj::ConformingFields {
                 url: Cow::Borrowed("https://example.com/"),
                 digest: Cow::Borrowed("sha256:00"),
                 mime: Cow::Borrowed("text/html"),

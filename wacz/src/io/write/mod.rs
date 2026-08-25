@@ -152,7 +152,7 @@ pub enum Error {
     MissingRequiredMembers(Vec<&'static str>),
     /// An index entry omits required CDXJ fields.
     #[error(transparent)]
-    InvalidIndexFields(#[from] archivindex_cdx::cdxj::FieldsError),
+    InvalidIndexFields(#[from] archivindex_cdx::cdxj::ConformanceError),
     /// A CDXJ extension property duplicates a modeled field.
     #[error(transparent)]
     CdxExtraProperty(#[from] archivindex_cdx::properties::Error),

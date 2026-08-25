@@ -5,7 +5,7 @@
 
 use std::io::BufRead;
 
-use archivindex_cdx::cdxj::{Error as ParseError, ParsedItem};
+use archivindex_cdx::cdxj::{Error as ParseError, Item};
 
 use crate::LineContext;
 use crate::lines::Lines;
@@ -60,18 +60,16 @@ impl<R: BufRead> IndexReader<R> {
 }
 
 impl<R: BufRead> Iterator for IndexReader<R> {
-    type Item = Result<ParsedItem<'static>, Error>;
+    type Item = Result<Item<'static>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.lines.next_content() {
-            Ok(Some((context, line))) => Some(
-                ParsedItem::parse(line)
-                    .map(ParsedItem::into_owned)
-                    .map_err(|source| Error::InvalidLine {
-                        context,
-                        source: InvalidLineSource::Item(source),
-                    }),
-            ),
+            Ok(Some((context, line))) => Some(Item::parse(line).map(Item::into_owned).map_err(
+                |source| Error::InvalidLine {
+                    context,
+                    source: InvalidLineSource::Item(source),
+                },
+            )),
             Ok(None) => None,
             Err(error) => Some(Err(Error::InvalidLine {
                 context: error.context,
