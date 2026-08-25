@@ -420,10 +420,51 @@ fn bounds<T: Copy + Ord>(mut items: impl Iterator<Item = T>) -> Option<(T, T)> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use proptest::prelude::*;
     use serde_json::json;
 
-    use super::{CommentCaptureProcessor, CommentProgress};
+    use super::{CommentCaptureProcessor, CommentProgress, DateTime, bounds, format_timestamp};
     use crate::session::{Capture, CaptureProcessor};
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn bounds_agree_with_the_iterator_extremes(items: Vec<i64>) {
+        let expected = items.iter().copied().min().zip(items.iter().copied().max());
+
+        prop_assert_eq!(bounds(items.into_iter()), expected);
+    }
+
+    #[test_strategy::proptest]
+    fn timestamps_are_rendered_at_whole_second_utc_precision(
+        #[strategy(strategies::datetime())] timestamp: DateTime<Utc>,
+    ) {
+        let rendered = format_timestamp(timestamp);
+        let parsed = DateTime::parse_from_rfc3339(&rendered).unwrap();
+
+        prop_assert!(rendered.ends_with('Z'));
+        prop_assert_eq!(parsed.timestamp(), timestamp.timestamp());
+        prop_assert_eq!(parsed.timestamp_subsec_nanos(), 0);
+    }
+
+    #[test_strategy::proptest]
+    fn comment_urls_query_the_endpoint_of_the_site(
+        #[strategy(strategies::url())] base: url::Url,
+        #[strategy(strategies::datetime())] before: DateTime<Utc>,
+        #[strategy(1..=100_usize)] page: usize,
+    ) {
+        let processor = CommentCaptureProcessor::with_before(base.as_str(), before).unwrap();
+        let url = url::Url::parse(&processor.comment_url(page)).unwrap();
+
+        prop_assert!(url.path().ends_with("/wp-json/wp/v2/comments"));
+
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        prop_assert_eq!(query["before"].as_ref(), format_timestamp(before));
+        prop_assert_eq!(query["page"].as_ref(), page.to_string());
+        prop_assert_eq!(query["order"].as_ref(), "asc");
+    }
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
 

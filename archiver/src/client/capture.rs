@@ -326,7 +326,32 @@ fn redact_credentials(url: &Url) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::strategies;
+
+    #[test_strategy::proptest]
+    fn request_targets_are_uris_without_a_fragment(#[strategy(strategies::url())] url: Url) {
+        let target = request_target(&url);
+
+        let path_start = url[..Position::BeforePath].len();
+        let forbidden = target[path_start..].contains(['|', '^', '[', ']', '{', '}', '`']);
+
+        prop_assert!(Uri::parse(target.as_ref()).is_ok());
+        prop_assert!(!target.contains('#'));
+        prop_assert!(!forbidden);
+    }
+
+    #[test_strategy::proptest]
+    fn redacted_urls_keep_no_credentials(#[strategy(strategies::url())] url: Url) {
+        let redacted = redact_credentials(&url);
+        let parsed = Url::parse(&redacted).unwrap();
+
+        prop_assert!(parsed.username().is_empty());
+        prop_assert_eq!(parsed.password(), None);
+        prop_assert!(!redacted.contains("s3cret-token"));
+    }
 
     #[test]
     fn request_targets_are_valid_uris() {
