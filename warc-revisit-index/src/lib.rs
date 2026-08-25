@@ -2,11 +2,12 @@
 //!
 //! This crate maintains two deliberately separate indexes in one SQLite database:
 //!
-//! - The payload index maps a digest to a canonical, payload-bearing WARC record. It primarily
-//!   supports WARC `identical-payload-digest` revisits.
-//! - The resource-state index maps a resource/request identity to HTTP validators and the prior
-//!   representation state. It primarily supports conditional requests and
-//!   `server-not-modified` revisits.
+//! - The payload index maps a digest to the canonical payload-bearing WARC record: the
+//!   `WARC-Refers-To` target of any revisit, whether an `identical-payload-digest` revisit found
+//!   the digest again or a `server-not-modified` revisit confirmed it unchanged.
+//! - The resource-state index maps a resource/request identity to its HTTP validators and the
+//!   digest of its prior representation. The validators drive conditional requests; the digest
+//!   leads, through the payload index, to the record a `server-not-modified` revisit refers to.
 //!
 //! The database is derived, rebuildable state; WARC files remain the source of truth. This crate
 //! is intentionally unaware of WACZ. A caller may ingest records from standalone WARC files,
