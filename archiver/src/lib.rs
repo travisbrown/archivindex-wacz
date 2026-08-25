@@ -28,14 +28,14 @@
 //! session recapturing a URL asks the server to revalidate the earlier response, storing a `304 Not
 //! Modified` answer as a `revisit` record under the `server-not-modified` profile. A session may
 //! use a persistent revisit index to deduplicate against earlier WARC captures and reuse their HTTP
-//! validators across runs.
+//! validators across runs. The `archivindex-wordpress` crate provides one such processor, which
+//! crawls the comments of a `WordPress` site.
 //!
 //! # Modules
 //!
 //! * [`client`]: the archiving client and its outcome types
 //! * [`config`]: client configuration
 //! * [`session`]: queue-driven crawl sessions
-//! * [`wordpress`]: capturing and reading resources from the `WordPress` REST API
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
@@ -44,7 +44,6 @@
 pub mod client;
 pub mod config;
 pub mod session;
-pub mod wordpress;
 
 #[cfg(test)]
 mod strategies;

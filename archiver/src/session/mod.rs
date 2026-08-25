@@ -67,7 +67,32 @@ pub struct Capture<'a> {
     pub(crate) response_metadata: Cow<'a, archivindex_warc::record::http::ResponseMetadata>,
 }
 
-impl Capture<'_> {
+impl<'a> Capture<'a> {
+    /// Build a capture from recorded response bytes, for driving a [`CaptureProcessor`] outside a
+    /// session.
+    ///
+    /// The status and headers are read from `response`, so a processor is shown exactly what a
+    /// session would show it for that recording. Returns `None` if `response` does not begin with
+    /// a complete HTTP response head.
+    #[must_use]
+    pub fn new(
+        url: &'a str,
+        final_url: &'a str,
+        payload: &'a [u8],
+        response: &'a [u8],
+    ) -> Option<Self> {
+        let response_metadata = archivindex_warc::record::http::ResponseMetadata::parse(response)?;
+
+        Some(Self {
+            url,
+            final_url,
+            status: response_metadata.status,
+            payload,
+            response,
+            response_metadata: Cow::Owned(response_metadata),
+        })
+    }
+
     /// Return the first value of a response header as readable text.
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {

@@ -1,5 +1,6 @@
-//! Property-testing strategies for archiving values.
+//! Property-testing strategies for `WordPress` capture values.
 
+use chrono::{DateTime, Utc};
 use proptest::prelude::*;
 use proptest::sample::select;
 use url::Url;
@@ -12,6 +13,14 @@ const TOKENS: &[&str] = &[
 /// Strings of up to eight tokens, which a URL may need to percent-encode.
 fn token_text() -> impl Strategy<Value = String> {
     proptest::collection::vec(select(TOKENS), 0..=8).prop_map(|tokens| tokens.concat())
+}
+
+/// An instant, with sub-second precision.
+pub fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
+    (0..=4_102_444_799_i64, 0..1_000_000_000_u32).prop_map(|(seconds, nanoseconds)| {
+        DateTime::from_timestamp(seconds, nanoseconds)
+            .expect("invariant violation: a generated instant is in range")
+    })
 }
 
 /// An HTTP URL, optionally with credentials, a query, and a fragment.

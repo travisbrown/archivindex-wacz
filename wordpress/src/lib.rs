@@ -1,14 +1,28 @@
 //! Capturing and reading `WordPress` REST API v2 resources.
+//!
+//! The [`CommentCaptureProcessor`] drives a crawl session from the `archivindex-archiver` crate
+//! over a site's comments collection, walking the paginated endpoint and archiving each response
+//! into a WARC file. The [`read`] module reads the comments back out of such an archive.
+//!
+//! # Modules
+//!
+//! * [`read`]: reading archived comments back out of WARC files
+#![deny(missing_docs)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
+#![allow(clippy::missing_errors_doc)]
+#![forbid(unsafe_code)]
 
 pub mod read;
 
+#[cfg(test)]
+mod strategies;
+
 use std::collections::HashSet;
 
+use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use url::Url;
-
-use crate::session::{Capture, CaptureProcessor, Inspection};
 
 /// The maximum number of comments `WordPress` permits one REST API request to return.
 const COMMENTS_PER_PAGE: usize = 100;
@@ -39,7 +53,7 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 /// use archivindex_archiver::client::Archiver;
 /// use archivindex_archiver::config::Config;
 /// use archivindex_archiver::session::{Operator, Session};
-/// use archivindex_archiver::wordpress::CommentCaptureProcessor;
+/// use archivindex_wordpress::CommentCaptureProcessor;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let processor = CommentCaptureProcessor::new("https://example.com/")?;
@@ -419,12 +433,13 @@ fn bounds<T: Copy + Ord>(mut items: impl Iterator<Item = T>) -> Option<(T, T)> {
 
 #[cfg(test)]
 mod tests {
+    use archivindex_archiver::session::{Capture, CaptureProcessor};
     use chrono::Utc;
     use proptest::prelude::*;
     use serde_json::json;
 
     use super::{CommentCaptureProcessor, CommentProgress, DateTime, bounds, format_timestamp};
-    use crate::session::{Capture, CaptureProcessor};
+
     use crate::strategies;
 
     #[test_strategy::proptest]
@@ -485,18 +500,14 @@ mod tests {
     }"#;
     const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
 
-    fn capture<'a>(payload: &'a [u8], status: u16, response: &'a [u8]) -> Capture<'a> {
-        Capture {
-            url: "https://example.com/wp-json/wp/v2/comments",
-            final_url: "https://example.com/wp-json/wp/v2/comments",
-            status,
+    fn capture<'a>(payload: &'a [u8], response: &'a [u8]) -> Capture<'a> {
+        Capture::new(
+            "https://example.com/wp-json/wp/v2/comments",
+            "https://example.com/wp-json/wp/v2/comments",
             payload,
             response,
-            response_metadata: std::borrow::Cow::Owned(
-                archivindex_warc::record::http::ResponseMetadata::parse(response)
-                    .expect("a complete test response"),
-            ),
-        }
+        )
+        .expect("a complete test response")
     }
 
     #[test]
@@ -521,7 +532,7 @@ mod tests {
             {"id": 211420, "date_gmt": "2020-11-30T12:30:00"}
         ]"#;
 
-        let inspection = processor.inspect(&capture(payload, 200, TWO_PAGES));
+        let inspection = processor.inspect(&capture(payload, TWO_PAGES));
 
         assert_eq!(
             inspection.title.as_deref(),
@@ -561,17 +572,13 @@ mod tests {
             serde_json::to_vec(&[json!({"id": 101, "date_gmt": "2020-11-30T12:30:00"})])?;
 
         assert_eq!(
-            processor
-                .inspect(&capture(&page_one, 200, TWO_PAGES))
-                .recaptures,
+            processor.inspect(&capture(&page_one, TWO_PAGES)).recaptures,
             ["https://example.com/wp-json/wp/v2/comments?\
                 before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
         );
         // Stable pagination headers make the first sweep sufficient.
         assert_eq!(
-            processor
-                .inspect(&capture(&page_two, 200, TWO_PAGES))
-                .recaptures,
+            processor.inspect(&capture(&page_two, TWO_PAGES)).recaptures,
             Vec::<String>::new()
         );
         assert_eq!(processor.seen_ids.len(), 101);
@@ -598,7 +605,7 @@ mod tests {
 
         assert_eq!(
             processor
-                .inspect(&capture(&original_page, 200, TWO_PAGES))
+                .inspect(&capture(&original_page, TWO_PAGES))
                 .recaptures
                 .len(),
             1
@@ -606,13 +613,13 @@ mod tests {
         // ID 1 is deleted before page 2 is requested, reducing the collection to one page.
         assert_eq!(
             processor
-                .inspect(&capture(INVALID_PAGE_ERROR, 400, BAD_REQUEST))
+                .inspect(&capture(INVALID_PAGE_ERROR, BAD_REQUEST))
                 .recaptures,
             [processor.first_comment_url()]
         );
         // The repeated first page now exposes ID 101, but the retained deleted ID means the
         // reported total still cannot account for every distinct ID observed.
-        let validation = processor.inspect(&capture(&shifted_page, 200, ONE_PAGE));
+        let validation = processor.inspect(&capture(&shifted_page, ONE_PAGE));
         assert_eq!(processor.seen_ids.len(), 101);
         assert!(validation.error.is_some());
 
@@ -630,10 +637,10 @@ mod tests {
             "data": {"status": 400}
         }"#;
 
-        let first = processor.inspect(&capture(b"[]", 200, TWO_PAGES));
+        let first = processor.inspect(&capture(b"[]", TWO_PAGES));
         assert_eq!(first.recaptures.len(), 1);
 
-        let inspection = processor.inspect(&capture(unrelated, 400, BAD_REQUEST));
+        let inspection = processor.inspect(&capture(unrelated, BAD_REQUEST));
 
         assert_eq!(inspection.recaptures, Vec::<String>::new());
         assert_eq!(
@@ -659,18 +666,16 @@ mod tests {
         let page_two_url = "https://example.com/wp-json/wp/v2/comments?\
             before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100";
 
-        processor.inspect(&capture(&page_one, 200, TWO_PAGES));
-        processor.inspect(&capture(&page_two, 200, TWO_PAGES));
+        processor.inspect(&capture(&page_one, TWO_PAGES));
+        processor.inspect(&capture(&page_two, TWO_PAGES));
 
         // The validation sweep finds both pages unchanged: the first revalidated page still leads
         // to the second, and the second ends the sweep with nothing new to validate.
-        let first = processor.inspect(&capture(b"", 304, NOT_MODIFIED));
+        let first = processor.inspect(&capture(b"", NOT_MODIFIED));
         assert_eq!(first.title, None);
         assert_eq!(first.recaptures, [page_two_url]);
         assert_eq!(
-            processor
-                .inspect(&capture(b"", 304, NOT_MODIFIED))
-                .recaptures,
+            processor.inspect(&capture(b"", NOT_MODIFIED)).recaptures,
             Vec::<String>::new()
         );
         assert_eq!(processor.seen_ids.len(), 101);
@@ -684,11 +689,11 @@ mod tests {
             CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
 
-        let malformed = processor.inspect(&capture(b"not json", 200, ONE_PAGE));
+        let malformed = processor.inspect(&capture(b"not json", ONE_PAGE));
         assert!(malformed.error.is_some());
         assert_eq!(malformed.recaptures, Vec::<String>::new());
 
-        let empty = processor.inspect(&capture(b"[]", 200, EMPTY_PAGE));
+        let empty = processor.inspect(&capture(b"[]", EMPTY_PAGE));
         assert_eq!(empty.error, None);
         assert_eq!(empty.title, None);
         assert_eq!(empty.links, Vec::<String>::new());
@@ -703,7 +708,7 @@ mod tests {
         let payload = br#"[{"id": 1, "date_gmt": "2020-11-30T12:30:00"}]"#;
         let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 2\r\nX-WP-TotalPages: 1\r\n\r\n";
 
-        let inspection = processor.inspect(&capture(payload, 200, response));
+        let inspection = processor.inspect(&capture(payload, response));
         assert_eq!(inspection.recaptures, Vec::<String>::new());
         assert_eq!(inspection.error, None);
 
@@ -728,11 +733,11 @@ mod tests {
         ]"#;
         let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 1\r\nX-WP-TotalPages: 1\r\n\r\n";
 
-        let first = processor.inspect(&capture(payload, 200, response));
+        let first = processor.inspect(&capture(payload, response));
         assert_eq!(first.recaptures, [processor.first_comment_url()]);
         assert_eq!(first.error, None);
 
-        let second = processor.inspect(&capture(payload, 200, response));
+        let second = processor.inspect(&capture(payload, response));
         assert_eq!(second.recaptures, Vec::<String>::new());
         assert!(second.error.is_some());
     }
@@ -744,7 +749,7 @@ mod tests {
                 .expect("a processor");
         let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
 
-        let inspection = processor.inspect(&capture(b"[]", 200, response));
+        let inspection = processor.inspect(&capture(b"[]", response));
 
         assert!(inspection.error.is_some());
         assert_eq!(inspection.recaptures, Vec::<String>::new());
@@ -756,7 +761,7 @@ mod tests {
             CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
                 .expect("a processor");
 
-        let inspection = processor.inspect(&capture(b"{}", 403, b"HTTP/1.1 403 Forbidden\r\n\r\n"));
+        let inspection = processor.inspect(&capture(b"{}", b"HTTP/1.1 403 Forbidden\r\n\r\n"));
 
         assert!(inspection.error.is_some());
         assert_eq!(inspection.recaptures, Vec::<String>::new());

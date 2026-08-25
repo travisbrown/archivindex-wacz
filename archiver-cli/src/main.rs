@@ -16,10 +16,10 @@ use archivindex_archiver::config::Config;
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
-use archivindex_archiver::wordpress::read::read_comments;
-use archivindex_archiver::wordpress::{CommentCaptureProcessor, CommentProgress};
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::io::write::IndexFormat;
+use archivindex_wordpress::read::read_comments;
+use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
 use cli_helpers::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -296,7 +296,7 @@ enum Error {
     #[error("WARC conversion error: {0}")]
     Convert(#[from] archivindex_packager::Error),
     #[error("WordPress comment reading error: {0}")]
-    ReadComments(#[from] archivindex_archiver::wordpress::read::Error),
+    ReadComments(#[from] archivindex_wordpress::read::Error),
     #[error("JSON writing error: {0}")]
     Json(#[from] serde_json::Error),
 }

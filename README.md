@@ -16,6 +16,7 @@ Tools for capturing web pages and packaging them as web archive collections.
 | [`archivindex-wacz`](wacz/) | Reading and writing web archive collections in the [WACZ][wacz-spec] format |
 | [`archivindex-packager`](packager/) | Packaging WARC captures as indexed WACZ distributions |
 | [`archivindex-archiver`](archiver/) | Archiving web pages over HTTP into WARC files |
+| [`archivindex-wordpress`](wordpress/) | Capturing and reading WordPress REST API resources |
 | [`archivindex-archiver-cli`](archiver-cli/) | An `archivindex-archiver` command-line front end |
 | [`archivindex-warc-revisit-index`](warc-revisit-index/) | Persistent WARC payload-revisit and HTTP resource state |
 

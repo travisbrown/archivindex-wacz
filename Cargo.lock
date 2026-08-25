@@ -90,8 +90,6 @@ dependencies = [
  "fluent-uri",
  "http",
  "proptest",
- "serde",
- "serde_json",
  "tempfile",
  "test-strategy",
  "thiserror 2.0.20",
@@ -105,6 +103,7 @@ dependencies = [
  "archivindex-archiver",
  "archivindex-packager",
  "archivindex-wacz",
+ "archivindex-wordpress",
  "cli-helpers",
  "indicatif",
  "serde_json",
@@ -222,6 +221,22 @@ dependencies = [
  "tempfile",
  "test-strategy",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "archivindex-wordpress"
+version = "0.1.0"
+dependencies = [
+ "archivindex-archiver",
+ "archivindex-warc",
+ "chrono",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-strategy",
+ "thiserror 2.0.20",
+ "url",
 ]
 
 [[package]]
