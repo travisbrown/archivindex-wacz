@@ -31,9 +31,9 @@ through the binary that owns it.
 Capture output is uncompressed by default. Pass `--gzip` and use a `.warc.gz` output name to
 compress each WARC record as an independent gzip member.
 
-Capture commands exit with status 0 only when the requested capture is complete. Status 2 means
-that a usable but partial archive was published; operational failures that prevent publication use
-status 1.
+Commands exit with status 0 when they complete without reportable problems. Status 1 means the
+command completed with problems to report about its input, including when a usable but partial
+archive was published. Operational failures use status 2.
 
 ### WordPress comments
 

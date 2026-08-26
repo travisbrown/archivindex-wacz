@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use archivindex_cli_support::{OPERATIONAL_ERROR, REPORTED_PROBLEMS, SUCCESS, Verbosity, plural};
+use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code, plural};
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::io::write::IndexFormat;
 use clap::Parser;
@@ -13,16 +13,10 @@ fn main() -> ExitCode {
     let opts = Opts::parse();
     opts.verbosity.init_logging();
 
-    match run(opts) {
-        Ok(code) => ExitCode::from(code),
-        Err(error) => {
-            log::error!("{error}");
-            ExitCode::from(OPERATIONAL_ERROR)
-        }
-    }
+    exit_code(run(opts))
 }
 
-fn run(opts: Opts) -> Result<u8, archivindex_packager::Error> {
+fn run(opts: Opts) -> Result<CommandOutcome, archivindex_packager::Error> {
     let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
@@ -37,7 +31,7 @@ fn run(opts: Opts) -> Result<u8, archivindex_packager::Error> {
 fn warc_to_wacz(
     options: &WarcToWaczOptions,
     quiet: bool,
-) -> Result<u8, archivindex_packager::Error> {
+) -> Result<CommandOutcome, archivindex_packager::Error> {
     let index_format = if options.compressed_index {
         IndexFormat::zipnum()
     } else {
@@ -63,11 +57,9 @@ fn warc_to_wacz(
         );
     }
 
-    Ok(if summary.warnings.is_empty() {
-        SUCCESS
-    } else {
-        REPORTED_PROBLEMS
-    })
+    Ok(CommandOutcome::from_reported_problems(
+        !summary.warnings.is_empty(),
+    ))
 }
 
 #[derive(Debug, Parser)]

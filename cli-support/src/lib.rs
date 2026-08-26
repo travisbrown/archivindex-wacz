@@ -6,15 +6,48 @@
 //! way.
 
 use std::fmt::Display;
+use std::process::ExitCode;
 
-/// The exit code of a command that did what it was asked.
-pub const SUCCESS: u8 = 0;
+/// The process-level outcome of a command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CommandOutcome {
+    /// The command did what it was asked without reportable input problems.
+    Success = 0,
+    /// The command finished but found problems worth reporting about its input.
+    ReportedProblems = 1,
+    /// The command could not do what it was asked.
+    OperationalError = 2,
+}
 
-/// The exit code of a command that finished with problems to report about its input.
-pub const REPORTED_PROBLEMS: u8 = 1;
+impl CommandOutcome {
+    /// Select success or reported problems from whether any problems were found.
+    #[must_use]
+    pub const fn from_reported_problems(found: bool) -> Self {
+        if found {
+            Self::ReportedProblems
+        } else {
+            Self::Success
+        }
+    }
+}
 
-/// The exit code of a command that could not do what it was asked.
-pub const OPERATIONAL_ERROR: u8 = 2;
+impl From<CommandOutcome> for ExitCode {
+    fn from(outcome: CommandOutcome) -> Self {
+        Self::from(outcome as u8)
+    }
+}
+
+/// Convert a command result to its process exit code, logging operational errors.
+pub fn exit_code<E: Display>(result: Result<CommandOutcome, E>) -> ExitCode {
+    match result {
+        Ok(outcome) => outcome.into(),
+        Err(error) => {
+            log::error!("{error}");
+            CommandOutcome::OperationalError.into()
+        }
+    }
+}
 
 /// A count and the noun it counts, pluralized by the count.
 #[must_use]
@@ -88,9 +121,11 @@ impl Verbosity {
 
 #[cfg(test)]
 mod tests {
+    use std::process::ExitCode;
+
     use clap::Parser;
 
-    use super::Verbosity;
+    use super::{CommandOutcome, Verbosity};
 
     #[derive(Debug, Parser)]
     struct Cli {
@@ -135,5 +170,12 @@ mod tests {
         assert_eq!(super::plural(0_usize, "record"), "0 records");
         assert_eq!(super::plural(1_usize, "record"), "1 record");
         assert_eq!(super::plural(2_u64, "byte"), "2 bytes");
+    }
+
+    #[test]
+    fn command_outcomes_have_the_documented_exit_codes() {
+        assert_eq!(ExitCode::from(0), CommandOutcome::Success.into());
+        assert_eq!(ExitCode::from(1), CommandOutcome::ReportedProblems.into());
+        assert_eq!(ExitCode::from(2), CommandOutcome::OperationalError.into());
     }
 }

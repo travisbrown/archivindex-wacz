@@ -13,7 +13,7 @@ use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
 use archivindex_archiver::{Archiver, Config};
-use archivindex_cli_support::{OPERATIONAL_ERROR, REPORTED_PROBLEMS, SUCCESS, Verbosity};
+use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
 use archivindex_wordpress::read::read_comments;
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
 use clap::Parser;
@@ -23,16 +23,10 @@ fn main() -> ExitCode {
     let opts = Opts::parse();
     opts.verbosity.init_logging();
 
-    match run(opts) {
-        Ok(code) => ExitCode::from(code),
-        Err(error) => {
-            log::error!("{error}");
-            ExitCode::from(OPERATIONAL_ERROR)
-        }
-    }
+    exit_code(run(opts))
 }
 
-fn run(opts: Opts) -> Result<u8, Error> {
+fn run(opts: Opts) -> Result<CommandOutcome, Error> {
     let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
@@ -45,7 +39,7 @@ fn run(opts: Opts) -> Result<u8, Error> {
 ///
 /// Captures that fail or a session that ends early leave a partial archive behind, which is
 /// reported through the exit status rather than treated as an error.
-fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<u8, Error> {
+fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
     let titles = options.titles;
     let mut processor = CommentCaptureProcessor::new(&options.base_url)?;
     if let Some(resume_after) = &options.resume_after {
@@ -136,14 +130,14 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<u8, 
     }
 
     if summary.is_complete() {
-        Ok(SUCCESS)
+        Ok(CommandOutcome::Success)
     } else {
         log::warn!(
             "a partial archive was published at {}",
             options.output.display()
         );
 
-        Ok(REPORTED_PROBLEMS)
+        Ok(CommandOutcome::ReportedProblems)
     }
 }
 
@@ -164,7 +158,7 @@ impl CaptureProcessor for ProgressingCommentProcessor {
 ///
 /// Comments captured with conflicting contents are logged as warnings, and the exit status
 /// reflects that some were found.
-fn read_wp_comments(options: ReadCommentsOptions) -> Result<u8, Error> {
+fn read_wp_comments(options: ReadCommentsOptions) -> Result<CommandOutcome, Error> {
     let result = read_comments(options.warc)?;
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
@@ -183,11 +177,9 @@ fn read_wp_comments(options: ReadCommentsOptions) -> Result<u8, Error> {
         );
     }
 
-    Ok(if result.warnings.is_empty() {
-        SUCCESS
-    } else {
-        REPORTED_PROBLEMS
-    })
+    Ok(CommandOutcome::from_reported_problems(
+        !result.warnings.is_empty(),
+    ))
 }
 
 fn message_spinner(message: &'static str) -> ProgressBar {
