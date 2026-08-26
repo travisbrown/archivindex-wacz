@@ -1,0 +1,15 @@
+[package]
+name = "archivindex-cli-support"
+description = "Command-line behavior shared by this repository's applications"
+authors.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+clap.workspace = true
+log.workspace = true
+simplelog = "0.12"

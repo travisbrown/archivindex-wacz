@@ -94,7 +94,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror",
  "url",
 ]
 
@@ -108,7 +108,16 @@ dependencies = [
  "serde",
  "serde_json",
  "test-strategy",
- "thiserror 2.0.20",
+ "thiserror",
+]
+
+[[package]]
+name = "archivindex-cli-support"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "log",
+ "simplelog",
 ]
 
 [[package]]
@@ -128,17 +137,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-strategy",
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
 name = "archivindex-packager-cli"
 version = "0.1.0"
 dependencies = [
+ "archivindex-cli-support",
  "archivindex-packager",
  "archivindex-wacz",
- "cli-helpers",
- "thiserror 2.0.20",
+ "clap",
+ "log",
 ]
 
 [[package]]
@@ -151,7 +161,7 @@ dependencies = [
  "serde",
  "serde_json",
  "test-strategy",
- "thiserror 2.0.20",
+ "thiserror",
  "url",
 ]
 
@@ -172,7 +182,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-strategy",
- "thiserror 2.0.20",
+ "thiserror",
  "zip",
 ]
 
@@ -190,7 +200,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror",
  "uuid",
  "webpki-roots",
 ]
@@ -204,7 +214,7 @@ dependencies = [
  "md-5",
  "sha1",
  "sha2",
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
@@ -215,7 +225,7 @@ dependencies = [
  "archivindex-warc",
  "fluent-uri",
  "rusqlite",
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
@@ -230,7 +240,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-strategy",
- "thiserror 2.0.20",
+ "thiserror",
  "url",
 ]
 
@@ -239,11 +249,13 @@ name = "archivindex-wordpress-cli"
 version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
+ "archivindex-cli-support",
  "archivindex-wordpress",
- "cli-helpers",
+ "clap",
  "indicatif",
+ "log",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror",
  "url",
 ]
 
@@ -417,19 +429,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "cli-helpers"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4270f8a84b9d4ee83699eb27458d6661d063665adba906859aa4480c89d25fde"
-dependencies = [
- "chrono",
- "clap",
- "log",
- "simplelog",
- "thiserror 1.0.69",
-]
 
 [[package]]
 name = "cmake"
@@ -1237,7 +1236,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
 dependencies = [
  "hashbrown 0.16.1",
- "thiserror 2.0.20",
+ "thiserror",
 ]
 
 [[package]]
@@ -1546,31 +1545,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl 2.0.20",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]

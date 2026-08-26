@@ -8,31 +8,40 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use archivindex_cli_support::{OPERATIONAL_ERROR, REPORTED_PROBLEMS, SUCCESS, Verbosity, plural};
 use archivindex_packager::WarcToWacz;
 use archivindex_wacz::io::write::IndexFormat;
-use cli_helpers::prelude::*;
+use clap::Parser;
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
+    let opts = Opts::parse();
+    opts.verbosity.init_logging();
+
+    match run(opts) {
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("Error: {error}");
-            ExitCode::FAILURE
+            log::error!("{error}");
+            ExitCode::from(OPERATIONAL_ERROR)
         }
     }
 }
 
-fn run() -> Result<(), Error> {
-    let opts: Opts = Opts::parse();
-    opts.verbose.init_logging()?;
+fn run(opts: Opts) -> Result<u8, archivindex_packager::Error> {
+    let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
-        Command::WarcToWacz(options) => warc_to_wacz(&options),
+        Command::WarcToWacz(options) => warc_to_wacz(&options, quiet),
     }
 }
 
 /// Convert an existing WARC file into an indexed WACZ package.
-fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
+///
+/// Conditions in the source WARC that are worth reporting but do not stop the conversion are
+/// logged as warnings, and the exit status reflects that some were found.
+fn warc_to_wacz(
+    options: &WarcToWaczOptions,
+    quiet: bool,
+) -> Result<u8, archivindex_packager::Error> {
     let index_format = if options.compressed_index {
         IndexFormat::zipnum()
     } else {
@@ -48,29 +57,28 @@ fn warc_to_wacz(options: &WarcToWaczOptions) -> Result<(), Error> {
     for warning in &summary.warnings {
         log::warn!("{warning}");
     }
-    println!(
-        "Converted {} records and {} captures from {} to {}",
-        summary.records,
-        summary.captures,
-        options.warc.display(),
-        options.output.display()
-    );
-    Ok(())
-}
+    if !quiet {
+        println!(
+            "Converted {} and {} from {} to {}",
+            plural(summary.records, "record"),
+            plural(summary.captures, "capture"),
+            options.warc.display(),
+            options.output.display()
+        );
+    }
 
-#[derive(Debug, thiserror::Error)]
-enum Error {
-    #[error("CLI argument reading error: {0}")]
-    Args(#[from] cli_helpers::Error),
-    #[error("WARC conversion error: {0}")]
-    Convert(#[from] archivindex_packager::Error),
+    Ok(if summary.warnings.is_empty() {
+        SUCCESS
+    } else {
+        REPORTED_PROBLEMS
+    })
 }
 
 #[derive(Debug, Parser)]
 #[clap(name = "archivindex-packager", version, author)]
 struct Opts {
     #[clap(flatten)]
-    verbose: Verbosity,
+    verbosity: Verbosity,
     #[clap(subcommand)]
     command: Command,
 }
@@ -108,7 +116,7 @@ struct WarcToWaczOptions {
 mod tests {
     use std::path::PathBuf;
 
-    use cli_helpers::prelude::Parser;
+    use clap::Parser;
 
     use super::{Command, Opts};
 

@@ -20,9 +20,11 @@ bundled = ["archivindex-archiver/bundled"]
 
 [dependencies]
 archivindex-archiver.workspace = true
+archivindex-cli-support.workspace = true
 archivindex-wordpress = { version = "0.1.0", path = "../wordpress/" }
-cli-helpers.workspace = true
+clap.workspace = true
 indicatif = "0.18"
+log.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true

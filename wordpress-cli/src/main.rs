@@ -17,33 +17,39 @@ use archivindex_archiver::session::{
     Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
 };
 use archivindex_archiver::{Archiver, Config};
+use archivindex_cli_support::{OPERATIONAL_ERROR, REPORTED_PROBLEMS, SUCCESS, Verbosity};
 use archivindex_wordpress::read::read_comments;
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
-use cli_helpers::prelude::*;
+use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
+    let opts = Opts::parse();
+    opts.verbosity.init_logging();
+
+    match run(opts) {
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("Error: {error}");
-            error.exit_code()
+            log::error!("{error}");
+            ExitCode::from(OPERATIONAL_ERROR)
         }
     }
 }
 
-fn run() -> Result<(), Error> {
-    let opts: Opts = Opts::parse();
-    opts.verbose.init_logging()?;
+fn run(opts: Opts) -> Result<u8, Error> {
+    let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
-        Command::ArchiveComments(options) => archive_comments(options),
+        Command::ArchiveComments(options) => archive_comments(options, quiet),
         Command::ReadComments(options) => read_wp_comments(options),
     }
 }
 
 /// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
-fn archive_comments(options: ArchiveCommentsOptions) -> Result<(), Error> {
+///
+/// Captures that fail or a session that ends early leave a partial archive behind, which is
+/// reported through the exit status rather than treated as an error.
+fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<u8, Error> {
     let titles = options.titles;
     let mut processor = CommentCaptureProcessor::new(&options.base_url)?;
     if let Some(resume_after) = &options.resume_after {
@@ -126,15 +132,22 @@ fn archive_comments(options: ArchiveCommentsOptions) -> Result<(), Error> {
                 snapshot.downloaded
             );
         }
-        println!("{snapshot} to {}", options.output.display());
-    } else {
+        if !quiet {
+            println!("{snapshot} to {}", options.output.display());
+        }
+    } else if !quiet {
         println!("Downloaded no comments to {}", options.output.display());
     }
 
     if summary.is_complete() {
-        Ok(())
+        Ok(SUCCESS)
     } else {
-        Err(Error::PartialArchive(options.output))
+        log::warn!(
+            "a partial archive was published at {}",
+            options.output.display()
+        );
+
+        Ok(REPORTED_PROBLEMS)
     }
 }
 
@@ -152,7 +165,10 @@ impl CaptureProcessor for ProgressingCommentProcessor {
 }
 
 /// Read, sort, and deduplicate `WordPress` comments captured in a WARC file.
-fn read_wp_comments(options: ReadCommentsOptions) -> Result<(), Error> {
+///
+/// Comments captured with conflicting contents are logged as warnings, and the exit status
+/// reflects that some were found.
+fn read_wp_comments(options: ReadCommentsOptions) -> Result<u8, Error> {
     let result = read_comments(options.warc)?;
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
@@ -162,7 +178,7 @@ fn read_wp_comments(options: ReadCommentsOptions) -> Result<(), Error> {
         writeln!(output)?;
     }
 
-    for warning in result.warnings {
+    for warning in &result.warnings {
         log::warn!(
             "Conflicting objects for WordPress comment {}: {} != {}",
             warning.id,
@@ -171,7 +187,11 @@ fn read_wp_comments(options: ReadCommentsOptions) -> Result<(), Error> {
         );
     }
 
-    Ok(())
+    Ok(if result.warnings.is_empty() {
+        SUCCESS
+    } else {
+        REPORTED_PROBLEMS
+    })
 }
 
 fn message_spinner(message: &'static str) -> ProgressBar {
@@ -185,12 +205,8 @@ fn message_spinner(message: &'static str) -> ProgressBar {
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    #[error("a partial archive was published at {}", .0.display())]
-    PartialArchive(PathBuf),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("CLI argument reading error: {0}")]
-    Args(#[from] cli_helpers::Error),
     #[error("invalid WordPress base URL: {0}")]
     Url(#[from] url::ParseError),
     #[error("invalid WordPress resume URI: {0}")]
@@ -209,20 +225,11 @@ enum Error {
     Json(#[from] serde_json::Error),
 }
 
-impl Error {
-    fn exit_code(&self) -> ExitCode {
-        match self {
-            Self::PartialArchive(_) => ExitCode::from(2),
-            _ => ExitCode::FAILURE,
-        }
-    }
-}
-
 #[derive(Debug, Parser)]
 #[clap(name = "archivindex-wordpress", version, author)]
 struct Opts {
     #[clap(flatten)]
-    verbose: Verbosity,
+    verbosity: Verbosity,
     #[clap(subcommand)]
     command: Command,
 }
@@ -343,23 +350,10 @@ impl ConfigOptions {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::process::ExitCode;
 
-    use cli_helpers::prelude::Parser;
+    use clap::Parser;
 
-    use super::{Command, Error, Opts};
-
-    #[test]
-    fn partial_archives_have_a_distinct_exit_status() {
-        assert_eq!(
-            Error::PartialArchive("partial.warc".into()).exit_code(),
-            ExitCode::from(2)
-        );
-        assert_eq!(
-            Error::Io(std::io::Error::other("failed")).exit_code(),
-            ExitCode::FAILURE
-        );
-    }
+    use super::{Command, Opts};
 
     #[test]
     fn archive_command_reads_required_options_and_limit() {
