@@ -118,7 +118,7 @@ impl<W: Write + Seek> WaczWriter<W> {
             // Each block is one gzip member encoded into a reused buffer, digested and written
             // from memory; the line buffer is reused across the whole stream.
             while reader.read_line(&mut line)? != 0 {
-                let (first_prefix, _) = cdxj::split_prefix(&line)
+                let (first_prefix, _) = crate::cdxj::split_prefix(&line)
                     .expect("validated CDXJ lines have a key and timestamp");
                 prefix.clear();
                 prefix.push_str(first_prefix);

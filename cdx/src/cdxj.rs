@@ -437,13 +437,6 @@ impl<'a> From<Item<'a>> for Capture<'a> {
     }
 }
 
-/// Split a CDXJ line into its key-and-timestamp prefix and JSON object.
-#[must_use]
-pub fn split_prefix(line: &str) -> Option<(&str, &str)> {
-    let (json, _) = line.match_indices(' ').nth(1)?;
-    Some((&line[..json], &line[json + 1..]))
-}
-
 fn validate_extra(extra: &ExtraProperties) -> Result<(), properties::Error> {
     extra.validate(
         "CDXJ fields",

@@ -11,10 +11,13 @@ use crate::PAGES_PREFIX;
 use crate::frictionless::resource::Resource;
 use crate::pages::{self, Page, PageListHeader};
 
-pub mod index;
+mod index;
 mod manifest;
 mod resource;
-pub mod warc;
+mod warc;
+
+pub use index::IndexSpool;
+pub use warc::WarcSink;
 
 use resource::options_for;
 const DEFAULT_PAGE_ID_LENGTH: NonZeroUsize = NonZeroUsize::new(24).unwrap();

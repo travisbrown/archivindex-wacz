@@ -20,8 +20,10 @@ use crate::{
     PAGES_PATH,
 };
 
-pub mod random;
+mod random;
 pub mod validate;
+
+pub use random::{Capture, ZipNumBlock, ZipNumSummary};
 
 /// An error type for WACZ reading.
 #[derive(Debug, thiserror::Error)]

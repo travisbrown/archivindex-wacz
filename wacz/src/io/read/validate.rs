@@ -366,7 +366,7 @@ impl<R: Read + Seek> WaczReader<R> {
         // non-conforming form is reported as exactly that, rather than collapsing every other
         // manifest check into a single parse failure.
         let package = manifest_bytes.as_deref().and_then(|bytes| {
-            match frictionless::compat::parse_data_package(bytes) {
+            match frictionless::parse_data_package(bytes) {
                 Ok((package, non_conforming)) => {
                     manifest.extend(non_conforming.into_iter().map(|date| {
                         ManifestProblem::NonConformingDate {

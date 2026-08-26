@@ -90,6 +90,12 @@ impl<R: BufRead> Iterator for IndexReader<R> {
     }
 }
 
+/// Split a CDXJ or `ZipNum` summary line into its two-field prefix and JSON object.
+pub(crate) fn split_prefix(line: &str) -> Option<(&str, &str)> {
+    let (json, _) = line.match_indices(' ').nth(1)?;
+    Some((&line[..json], &line[json + 1..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

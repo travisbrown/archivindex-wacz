@@ -7,8 +7,8 @@
 //! [data-package]: https://specs.frictionlessdata.io/data-package/
 //!
 //! Unmodeled properties are preserved in [`DataPackage::extra`] and [`Resource::extra`]. Modeled
-//! properties are parsed strictly; [`compat`] handles nonstandard date-time forms found in the
-//! wild.
+//! properties are parsed strictly; the WACZ reader handles nonstandard date-time forms found in
+//! the wild and reports them as validation problems.
 
 use std::borrow::Cow;
 
@@ -18,9 +18,11 @@ use chrono::{DateTime, Utc};
 
 use crate::digest::Sha256Digest;
 
-pub mod compat;
+mod compat;
 pub mod resource;
 pub mod signature;
+
+pub(crate) use compat::parse_data_package;
 
 use resource::Resource;
 use signature::SignatureData;

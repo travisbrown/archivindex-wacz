@@ -3,7 +3,9 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::ops::{Range, RangeBounds};
 
-use archivindex_cdx::cdxj::{self, Fields, Item};
+#[cfg(test)]
+use archivindex_cdx::cdxj;
+use archivindex_cdx::cdxj::{Fields, Item};
 use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::Surt;
 use archivindex_surt::url::Canonicalizer;
@@ -419,7 +421,7 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
                     "missing !meta header",
                 )
             })?;
-    let (header_key, header_json) = cdxj::split_prefix(header_line)
+    let (header_key, header_json) = crate::cdxj::split_prefix(header_line)
         .ok_or_else(|| zipnum_error(header_context.clone(), "malformed !meta header"))?;
 
     if header_key != "!meta 0" {
@@ -442,7 +444,7 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
     let mut blocks: Vec<ZipNumBlock> = Vec::new();
 
     while let Some((context, line)) = lines.next_content().map_err(zipnum_io_error)? {
-        let (prefix, json) = cdxj::split_prefix(line)
+        let (prefix, json) = crate::cdxj::split_prefix(line)
             .ok_or_else(|| zipnum_error(context.clone(), "malformed line"))?;
         let (key, timestamp) = prefix
             .rsplit_once(' ')
@@ -560,8 +562,12 @@ mod tests {
         };
         let mut writer = crate::io::write::WaczWriter::new(Cursor::new(Vec::new()));
         writer.add_index("index.cdx", [&item]).unwrap();
+        writer.add_warc("fixture.warc", &[][..]).unwrap();
+        writer
+            .add_pages(&crate::pages::PageListHeader::default(), [])
+            .unwrap();
         let wacz = writer
-            .finish_unchecked(crate::frictionless::DataPackageBuilder::default())
+            .finish(crate::frictionless::DataPackageBuilder::default())
             .unwrap()
             .into_inner();
         let mut reader = WaczReader::new(Cursor::new(wacz)).unwrap();

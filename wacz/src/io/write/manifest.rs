@@ -44,18 +44,6 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !missing.is_empty() {
             return Err(Error::MissingRequiredMembers(missing));
         }
-        self.finish_unchecked(metadata)
-    }
-
-    /// Finish a package without checking the required WACZ member classes.
-    ///
-    /// This is intended for malformed-archive fixtures and compatibility tooling. Normal package
-    /// construction should use [`Self::finish`]. Member paths and resource names are still checked
-    /// when they are inserted.
-    pub fn finish_unchecked(self, metadata: DataPackageBuilder) -> Result<W, Error> {
-        if self.poisoned {
-            return Err(Error::Poisoned);
-        }
         let Self {
             mut zip,
             resources,
