@@ -43,12 +43,12 @@ fn warc_to_wacz(
     } else {
         IndexFormat::Plain
     };
-    let summary = WarcToWacz::new(&options.warc, &options.output)
+    let conversion = WarcToWacz::new(&options.warc, &options.output)
         .index_format(index_format)
         .gzip_warc(options.gzip_warc)
-        .gzip_compression_level(options.gzip_compression_level)
-        .zip_compression_level(options.zip_compression_level)
-        .run()?;
+        .gzip_compression_level(options.gzip_compression_level)?
+        .zip_compression_level(options.zip_compression_level)?;
+    let summary = conversion.run()?;
 
     for warning in &summary.warnings {
         log::warn!("{warning}");

@@ -16,7 +16,7 @@ use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
 use archivindex_wacz::io::write::{IndexFormat, WaczWriter, WriterConfig};
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
-use archivindex_warc::io::write::{DEFAULT_GZIP_COMPRESSION_LEVEL, Written};
+use archivindex_warc::io::write::Written;
 use archivindex_warc::parse::{raw, untyped};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
@@ -174,10 +174,8 @@ pub struct WarcToWacz<'a> {
     input: PathBuf,
     output: PathBuf,
     title_generator: Option<Box<dyn PageTitleGenerator + 'a>>,
-    index_format: IndexFormat,
+    writer_config: WriterConfig,
     gzip_warc: bool,
-    gzip_compression_level: u32,
-    zip_compression_level: Option<u32>,
 }
 
 impl<'a> WarcToWacz<'a> {
@@ -188,10 +186,8 @@ impl<'a> WarcToWacz<'a> {
             input: input.into(),
             output: output.into(),
             title_generator: None,
-            index_format: IndexFormat::Plain,
+            writer_config: WriterConfig::default(),
             gzip_warc: false,
-            gzip_compression_level: DEFAULT_GZIP_COMPRESSION_LEVEL,
-            zip_compression_level: None,
         }
     }
 
@@ -207,7 +203,7 @@ impl<'a> WarcToWacz<'a> {
     /// Select the plain or compressed CDXJ representation.
     #[must_use]
     pub const fn index_format(mut self, index_format: IndexFormat) -> Self {
-        self.index_format = index_format;
+        self.writer_config = self.writer_config.index_format(index_format);
         self
     }
 
@@ -226,20 +222,18 @@ impl<'a> WarcToWacz<'a> {
     /// Levels range from 0 (no compression) through 9 (best compression), and default to 6. This
     /// setting applies whenever the output WARC is gzip-compressed, including when the input is
     /// already gzip-compressed.
-    #[must_use]
-    pub const fn gzip_compression_level(mut self, level: u32) -> Self {
-        self.gzip_compression_level = level;
-        self
+    pub fn gzip_compression_level(mut self, level: u32) -> Result<Self, Error> {
+        self.writer_config = self.writer_config.gzip_compression_level(level)?;
+        Ok(self)
     }
 
     /// Set the ZIP DEFLATE compression level used for compressible WACZ members.
     ///
     /// Levels range from 1 through 264. Levels up to 9 use `miniz_oxide`, while higher levels use
     /// Zopfli. WARC and gzip-compressed members use ZIP `STORE` and are not affected.
-    #[must_use]
-    pub const fn zip_compression_level(mut self, level: u32) -> Self {
-        self.zip_compression_level = Some(level);
-        self
+    pub fn zip_compression_level(mut self, level: u32) -> Result<Self, Error> {
+        self.writer_config = self.writer_config.zip_compression_level(level)?;
+        Ok(self)
     }
 
     /// Parse the WARC and write the completed WACZ, refusing to overwrite `output`.
@@ -266,13 +260,7 @@ impl<'a> WarcToWacz<'a> {
         reader: WarcReader<R>,
         warc_name: &str,
     ) -> Result<ConversionSummary, Error> {
-        let writer_config = WriterConfig {
-            index_format: self.index_format,
-            zip_compression_level: self.zip_compression_level,
-            gzip_compression_level: self.gzip_compression_level,
-            ..WriterConfig::default()
-        };
-        let mut wacz = WaczWriter::create_with_config(&self.output, writer_config)?;
+        let mut wacz = WaczWriter::create_with_config(&self.output, self.writer_config.clone())?;
         let mut warc = wacz.start_warc(warc_name)?;
         let store = SpoolStore::new()?;
         let transaction = store.begin()?;

@@ -81,7 +81,7 @@ impl<W: Write + Seek> WaczWriter<W> {
                 let path = format!("{INDEXES_PREFIX}{name}");
                 self.add_typed_resource(&path, reader)
             }
-            IndexFormat::ZipNum { lines } => self.add_zipnum_stream(name, reader, lines),
+            IndexFormat::ZipNum { lines } => self.add_zipnum_stream(name, reader, lines.get()),
         }
     }
 
@@ -110,7 +110,6 @@ impl<W: Write + Seek> WaczWriter<W> {
         writeln!(summary, "!meta 0 {header}")?;
         let data_options = options_for(&data_path, self.config.zip_compression_level);
         let compression = Compression::new(self.config.gzip_compression_level);
-        let lines_per_block = lines_per_block.max(1);
         self.add_member(&data_path, data_options, |writer| {
             let mut offset = 0_u64;
             let mut line = String::new();

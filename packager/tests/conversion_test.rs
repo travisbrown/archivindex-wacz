@@ -134,7 +134,7 @@ fn conversion_fixture(
         .title_generator(PayloadTitle)
         .gzip_warc(gzip_warc);
     if let Some(level) = gzip_compression_level {
-        conversion = conversion.gzip_compression_level(level);
+        conversion = conversion.gzip_compression_level(level)?;
     }
     let summary = conversion.run()?;
     assert_eq!(summary.records, 7);
@@ -264,8 +264,8 @@ fn rejects_an_invalid_gzip_compression_level() -> Result<(), Box<dyn std::error:
     let error = WarcToWacz::new(&input, &output)
         .gzip_warc(true)
         .gzip_compression_level(10)
-        .run()
-        .expect_err("level 10 must be rejected");
+        .err()
+        .expect("level 10 must be rejected");
 
     assert!(matches!(
         error,
@@ -288,8 +288,8 @@ fn rejects_an_invalid_zip_compression_level() -> Result<(), Box<dyn std::error::
 
     let error = WarcToWacz::new(&input, &output)
         .zip_compression_level(265)
-        .run()
-        .expect_err("level 265 must be rejected");
+        .err()
+        .expect("level 265 must be rejected");
 
     assert!(matches!(
         error,

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
+use std::num::NonZeroUsize;
 
 use archivindex_cdx::cdxj;
 use archivindex_cdx::properties::ExtraProperties;
@@ -23,6 +24,10 @@ use flate2::write::{DeflateEncoder, GzEncoder};
 use fluent_uri::Uri;
 
 const URL: &str = "https://www.example.com/page";
+
+const fn nonzero(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("test values are nonzero")
+}
 const BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>hello</html>";
 const PAYLOAD_DIGEST: &str =
     "sha256:7e537e903df5bfa9c9de2dc590d2646f8b4aa71dd14877bd3e2eceda829a4618";
@@ -413,15 +418,9 @@ fn synthetic_page_ids() -> Result<(), Box<dyn std::error::Error>> {
 
     for (length, config) in [
         (24, WriterConfig::default()),
-        (
-            16,
-            WriterConfig {
-                page_id_length: 16,
-                ..WriterConfig::default()
-            },
-        ),
+        (16, WriterConfig::default().page_id_length(nonzero(16))),
     ] {
-        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         writer.add_pages(&PageListHeader::default(), [&with_id, &without_id])?;
         let wacz = writer
             .finish_unchecked(DataPackageBuilder::default())?
@@ -447,11 +446,8 @@ fn zip_compression_level_controls_deflated_members() -> Result<(), Box<dyn std::
     let contents = [b'a'; 8192];
 
     for level in [1, 6, 9] {
-        let config = WriterConfig {
-            zip_compression_level: Some(level),
-            ..WriterConfig::default()
-        };
-        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+        let config = WriterConfig::default().zip_compression_level(level)?;
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         writer.add_resource("extras/content.txt", contents.as_slice())?;
         let wacz = writer
             .finish_unchecked(DataPackageBuilder::default())?
@@ -467,11 +463,8 @@ fn zip_compression_level_controls_deflated_members() -> Result<(), Box<dyn std::
         assert_eq!(compressed, encoder.finish()?);
     }
 
-    let config = WriterConfig {
-        zip_compression_level: Some(10),
-        ..WriterConfig::default()
-    };
-    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    let config = WriterConfig::default().zip_compression_level(10)?;
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     writer.add_resource("extras/content.txt", contents.as_slice())?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
@@ -485,12 +478,8 @@ fn zip_compression_level_controls_deflated_members() -> Result<(), Box<dyn std::
 #[test]
 fn invalid_zip_compression_level_is_rejected() {
     for level in [0, 265] {
-        let config = WriterConfig {
-            zip_compression_level: Some(level),
-            ..WriterConfig::default()
-        };
         assert!(matches!(
-            WaczWriter::with_config(Cursor::new(Vec::new()), config),
+            WriterConfig::default().zip_compression_level(level),
             Err(writer::Error::InvalidZipCompressionLevel(actual)) if actual == level
         ));
     }
@@ -506,11 +495,8 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| item_for(&format!("https://www.example.com/page{i}")))
         .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 
-    let config = WriterConfig {
-        index_format: IndexFormat::ZipNum { lines: 2 },
-        ..WriterConfig::default()
-    };
-    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    let config = WriterConfig::default().index_format(IndexFormat::zipnum_with_lines(nonzero(2)));
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     let required = required_items(&items)?;
     let mut lines = required
         .iter()
@@ -831,12 +817,12 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
         .map(|item| format!("{item}\n"))
         .collect::<Vec<_>>();
 
-    for index_format in [IndexFormat::Plain, IndexFormat::ZipNum { lines: 2 }] {
-        let config = WriterConfig {
-            index_format,
-            ..WriterConfig::default()
-        };
-        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    for index_format in [
+        IndexFormat::Plain,
+        IndexFormat::zipnum_with_lines(nonzero(2)),
+    ] {
+        let config = WriterConfig::default().index_format(index_format);
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         assert!(matches!(
             writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat())),
             Err(writer::Error::UnsortedIndex { line: 2 })
@@ -858,12 +844,10 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
 fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
     let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
     for (level, expected_xfl) in [(1, 4), (9, 2)] {
-        let config = WriterConfig {
-            index_format: IndexFormat::zipnum(),
-            gzip_compression_level: level,
-            ..WriterConfig::default()
-        };
-        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+        let config = WriterConfig::default()
+            .index_format(IndexFormat::zipnum())
+            .gzip_compression_level(level)?;
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         writer.add_index("index.cdx", [&item])?;
         let wacz = writer
             .finish_unchecked(DataPackageBuilder::default())?
@@ -900,11 +884,8 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(reader.verify_fixity()?.is_success());
 
-    let config = WriterConfig {
-        index_format: IndexFormat::ZipNum { lines: 2 },
-        ..WriterConfig::default()
-    };
-    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    let config = WriterConfig::default().index_format(IndexFormat::zipnum_with_lines(nonzero(2)));
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     writer.add_index("index.cdx", no_items)?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
@@ -938,11 +919,8 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::error::Error>> {
     let item = item_for("https://example.com/?a={b}")?;
 
-    let config = WriterConfig {
-        index_format: IndexFormat::zipnum(),
-        ..WriterConfig::default()
-    };
-    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    let config = WriterConfig::default().index_format(IndexFormat::zipnum());
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
     let wacz = writer
         .finish_unchecked(DataPackageBuilder::default())?
@@ -971,7 +949,10 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
 /// The convenience constructor uses the `py-wacz` standard block size.
 #[test]
 fn zipnum_default_block_size() {
-    assert_eq!(IndexFormat::zipnum(), IndexFormat::ZipNum { lines: 1024 });
+    assert_eq!(
+        IndexFormat::zipnum(),
+        IndexFormat::zipnum_with_lines(nonzero(1024))
+    );
 }
 
 /// A page list written under a custom name round trips through `page_list`, including its header
@@ -1270,10 +1251,7 @@ fn writer_validates_warc_names_not_content() -> Result<(), Box<dyn std::error::E
         .finish_unchecked(DataPackageBuilder::default())?
         .into_inner();
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(validate::ValidationOptions {
-        content: true,
-        ..validate::ValidationOptions::default()
-    })?;
+    let report = reader.validate(validate::ValidationOptions::default().check_content())?;
 
     assert!(
         report
@@ -1486,10 +1464,7 @@ fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error:
     // declared digests to check.
     let bytes = zip_of(&[])?;
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(validate::ValidationOptions {
-        fixity: true,
-        ..validate::ValidationOptions::default()
-    })?;
+    let report = reader.validate(validate::ValidationOptions::default().check_fixity())?;
 
     assert_eq!(
         report.layout.first(),
@@ -1687,10 +1662,7 @@ fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>>
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(validate::ValidationOptions {
-        content: true,
-        ..validate::ValidationOptions::default()
-    })?;
+    let report = reader.validate(validate::ValidationOptions::default().check_content())?;
     let content = report.content.expect("content layer should run");
 
     assert_eq!(content.len(), 9);
@@ -1735,10 +1707,7 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(validate::ValidationOptions {
-        index: true,
-        ..validate::ValidationOptions::default()
-    })?;
+    let report = reader.validate(validate::ValidationOptions::default().check_index())?;
 
     // The index layer implies the content layer, which finds nothing wrong here.
     assert_eq!(report.content, Some(Vec::new()));
@@ -1820,10 +1789,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
     ])?;
 
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(validate::ValidationOptions {
-        index: true,
-        ..validate::ValidationOptions::default()
-    })?;
+    let report = reader.validate(validate::ValidationOptions::default().check_index())?;
     let problems = report.index.expect("index layer should run");
     let messages = problems
         .iter()
@@ -1867,11 +1833,8 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
         })
         .collect::<Result<Vec<_>, archivindex_surt::url::Error>>()?;
 
-    let config = WriterConfig {
-        index_format: IndexFormat::ZipNum { lines: 2 },
-        ..WriterConfig::default()
-    };
-    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    let config = WriterConfig::default().index_format(IndexFormat::zipnum_with_lines(nonzero(2)));
+    let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
     let required = required_items(&items)?;
     writer.add_index("index.cdx", &required)?;
     writer.add_warc("data.warc", warc.as_slice())?;
@@ -1895,10 +1858,7 @@ fn validate_reports_corrupt_zipnum_blocks() -> Result<(), Box<dyn std::error::Er
     wacz[position + 9] ^= 0xff;
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let report = reader.validate(validate::ValidationOptions {
-        index: true,
-        ..validate::ValidationOptions::default()
-    })?;
+    let report = reader.validate(validate::ValidationOptions::default().check_index())?;
     let problems = report.index.expect("index layer should run");
 
     assert_eq!(problems.len(), 1);
@@ -1931,12 +1891,12 @@ fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>>
         .collect::<Vec<_>>();
     lines.sort_unstable();
 
-    for index_format in [IndexFormat::Plain, IndexFormat::ZipNum { lines: 1 }] {
-        let config = WriterConfig {
-            index_format,
-            ..WriterConfig::default()
-        };
-        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config)?;
+    for index_format in [
+        IndexFormat::Plain,
+        IndexFormat::zipnum_with_lines(nonzero(1)),
+    ] {
+        let config = WriterConfig::default().index_format(index_format);
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
         writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat()))?;
         let wacz = writer
             .finish_unchecked(DataPackageBuilder::default())?

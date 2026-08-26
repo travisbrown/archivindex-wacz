@@ -33,16 +33,16 @@ use crate::{
 /// directory and the two metadata files. The default selects none of the expensive layers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ValidationOptions {
-    /// Check every manifest resource against its declared size and SHA-256 digest, as
-    /// [`WaczReader::verify_fixity`] does.
-    pub fixity: bool,
-    /// Parse every page list, index, and WARC member, reporting the first problem in each.
-    pub content: bool,
-    /// Check every index entry against its WARC record and verify every `ZipNum` block digest.
-    ///
-    /// Selecting this layer also runs the content layer, since an index entry that does not
-    /// resolve is only meaningful for an index that parses.
-    pub index: bool,
+    fixity: bool,
+    depth: ValidationDepth,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+enum ValidationDepth {
+    #[default]
+    Metadata,
+    Content,
+    Index,
 }
 
 impl ValidationOptions {
@@ -51,9 +51,35 @@ impl ValidationOptions {
     pub const fn all() -> Self {
         Self {
             fixity: true,
-            content: true,
-            index: true,
+            depth: ValidationDepth::Index,
         }
+    }
+
+    /// Check every manifest resource against its declared size and SHA-256 digest, as
+    /// [`WaczReader::verify_fixity`] does.
+    #[must_use]
+    pub const fn check_fixity(mut self) -> Self {
+        self.fixity = true;
+        self
+    }
+
+    /// Parse every page list, index, and WARC member, reporting the first problem in each.
+    #[must_use]
+    pub const fn check_content(mut self) -> Self {
+        if matches!(self.depth, ValidationDepth::Metadata) {
+            self.depth = ValidationDepth::Content;
+        }
+        self
+    }
+
+    /// Check every index entry against its WARC record and verify every `ZipNum` block digest.
+    ///
+    /// This also selects content checking, since record resolution is meaningful only for an index
+    /// that parses.
+    #[must_use]
+    pub const fn check_index(mut self) -> Self {
+        self.depth = ValidationDepth::Index;
+        self
     }
 }
 
@@ -375,13 +401,13 @@ impl<R: Read + Seek> WaczReader<R> {
             None
         };
 
-        let content = if options.content || options.index {
+        let content = if options.depth >= ValidationDepth::Content {
             Some(self.content_problems())
         } else {
             None
         };
 
-        let index = if options.index {
+        let index = if options.depth >= ValidationDepth::Index {
             Some(self.capture_problems())
         } else {
             None
@@ -924,21 +950,23 @@ mod tests {
 
     #[test]
     fn default_options_select_no_expensive_layers() {
+        assert!(!ValidationOptions::default().fixity);
         assert_eq!(
-            ValidationOptions::default(),
-            ValidationOptions {
-                fixity: false,
-                content: false,
-                index: false,
-            }
+            ValidationOptions::default().depth,
+            ValidationDepth::Metadata
         );
+        assert!(ValidationOptions::all().fixity);
+        assert_eq!(ValidationOptions::all().depth, ValidationDepth::Index);
+    }
+
+    #[test]
+    fn index_checking_always_includes_content() {
         assert_eq!(
-            ValidationOptions::all(),
-            ValidationOptions {
-                fixity: true,
-                content: true,
-                index: true,
-            }
+            ValidationOptions::default()
+                .check_index()
+                .check_content()
+                .depth,
+            ValidationDepth::Index
         );
     }
 }

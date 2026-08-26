@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use zip::ZipWriter;
@@ -16,8 +17,8 @@ mod resource;
 pub mod warc;
 
 use resource::options_for;
-const DEFAULT_PAGE_ID_LENGTH: usize = 24;
-const DEFAULT_ZIPNUM_LINES: usize = 1024;
+const DEFAULT_PAGE_ID_LENGTH: NonZeroUsize = NonZeroUsize::new(24).unwrap();
+const DEFAULT_ZIPNUM_LINES: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 /// Least ZIP DEFLATE compression level supported by the enabled encoders.
 pub const MIN_ZIP_COMPRESSION_LEVEL: u32 = 1;
 /// Greatest ZIP DEFLATE compression level supported by the enabled encoders.
@@ -31,7 +32,7 @@ pub enum IndexFormat {
     /// Independently compressed CDXJ blocks plus a searchable `.idx` summary.
     ZipNum {
         /// Maximum CDX lines per gzip block.
-        lines: usize,
+        lines: NonZeroUsize,
     },
 }
 
@@ -43,24 +44,30 @@ impl IndexFormat {
             lines: DEFAULT_ZIPNUM_LINES,
         }
     }
+
+    /// Create a `ZipNum` configuration with an explicit nonzero block size.
+    #[must_use]
+    pub const fn zipnum_with_lines(lines: NonZeroUsize) -> Self {
+        Self::ZipNum { lines }
+    }
 }
 
 /// Configuration for WACZ creation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterConfig {
     /// Length of synthetic page identifiers.
-    pub page_id_length: usize,
+    page_id_length: NonZeroUsize,
     /// CDXJ index representation.
-    pub index_format: IndexFormat,
+    index_format: IndexFormat,
     /// ZIP DEFLATE compression level, or `None` for the encoder default (currently 6).
     ///
     /// Levels 1 through 9 use `miniz_oxide`; levels 10 through 264 use Zopfli. This setting does
     /// not affect members stored with ZIP `STORE`, including WARC and gzip-compressed members.
-    pub zip_compression_level: Option<u32>,
+    zip_compression_level: Option<u32>,
     /// Gzip compression level used by streaming `.warc.gz` members.
     ///
     /// Levels range from 0 (no compression) through 9 (best compression).
-    pub gzip_compression_level: u32,
+    gzip_compression_level: u32,
 }
 
 impl Default for WriterConfig {
@@ -75,18 +82,36 @@ impl Default for WriterConfig {
 }
 
 impl WriterConfig {
-    fn validate(&self) -> Result<(), Error> {
-        if let Some(level) = self.zip_compression_level
-            && !(MIN_ZIP_COMPRESSION_LEVEL..=MAX_ZIP_COMPRESSION_LEVEL).contains(&level)
-        {
+    /// Set the length of generated page identifiers.
+    #[must_use]
+    pub const fn page_id_length(mut self, length: NonZeroUsize) -> Self {
+        self.page_id_length = length;
+        self
+    }
+
+    /// Select the plain or compressed CDXJ representation.
+    #[must_use]
+    pub const fn index_format(mut self, format: IndexFormat) -> Self {
+        self.index_format = format;
+        self
+    }
+
+    /// Set the ZIP DEFLATE compression level for compressible members.
+    pub fn zip_compression_level(mut self, level: u32) -> Result<Self, Error> {
+        if !(MIN_ZIP_COMPRESSION_LEVEL..=MAX_ZIP_COMPRESSION_LEVEL).contains(&level) {
             return Err(Error::InvalidZipCompressionLevel(level));
         }
-        if self.gzip_compression_level > archivindex_warc::io::write::MAX_GZIP_COMPRESSION_LEVEL {
-            return Err(Error::InvalidGzipCompressionLevel(
-                self.gzip_compression_level,
-            ));
+        self.zip_compression_level = Some(level);
+        Ok(self)
+    }
+
+    /// Set the gzip compression level for streaming WARC and `ZipNum` members.
+    pub const fn gzip_compression_level(mut self, level: u32) -> Result<Self, Error> {
+        if level > archivindex_warc::io::write::MAX_GZIP_COMPRESSION_LEVEL {
+            return Err(Error::InvalidGzipCompressionLevel(level));
         }
-        Ok(())
+        self.gzip_compression_level = level;
+        Ok(self)
     }
 }
 
@@ -189,7 +214,6 @@ impl WaczWriter<BufWriter<File>> {
         path: P,
         config: WriterConfig,
     ) -> Result<Self, Error> {
-        config.validate()?;
         let path = path.as_ref();
         if path.extension().and_then(|extension| extension.to_str()) != Some("wacz") {
             return Err(Error::InvalidWaczExtension(path.to_owned()));
@@ -224,9 +248,9 @@ impl<W: Write + Seek> WaczWriter<W> {
     }
 
     /// Create a writer with explicit configuration.
-    pub fn with_config(writer: W, config: WriterConfig) -> Result<Self, Error> {
-        config.validate()?;
-        Ok(Self::from_config(writer, config))
+    #[must_use]
+    pub fn with_config(writer: W, config: WriterConfig) -> Self {
+        Self::from_config(writer, config)
     }
 
     fn from_config(writer: W, config: WriterConfig) -> Self {
@@ -276,7 +300,7 @@ impl<W: Write + Seek> WaczWriter<W> {
         header: &PageListHeader<'_>,
         pages: I,
     ) -> Result<(), Error> {
-        let id_length = self.config.page_id_length;
+        let id_length = self.config.page_id_length.get();
         let compression_level = self.config.zip_compression_level;
         let path = format!("{PAGES_PREFIX}{name}");
         self.add_member(&path, options_for(&path, compression_level), |writer| {
