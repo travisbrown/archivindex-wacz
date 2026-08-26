@@ -56,10 +56,6 @@ impl<W: Write + Seek> WaczWriter<W> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
-        metadata.validate()?;
-        for resource in &self.resources {
-            resource.validate()?;
-        }
         let Self {
             mut zip,
             resources,

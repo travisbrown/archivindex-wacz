@@ -1306,12 +1306,9 @@ fn index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Er
 /// when validating.
 #[test]
 fn manifest_metadata_constraints_are_enforced() -> Result<(), Box<dyn std::error::Error>> {
-    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-    writer.add_warc("data.warc", &warc_bytes()?[..])?;
-
     assert!(matches!(
-        writer.finish_unchecked(DataPackageBuilder::new().name("Example Collection")),
-        Err(writer::Error::InvalidMetadata(ConstraintError::Name(name))) if name == "Example Collection"
+        DataPackageBuilder::new().name("Example Collection"),
+        Err(ConstraintError::Name(name)) if name == "Example Collection"
     ));
 
     let manifest = r#"{"profile": "data-package", "wacz_version": "1.1.1", "resources": [],

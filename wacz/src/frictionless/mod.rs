@@ -31,8 +31,7 @@ pub const PROFILE: &str = "data-package";
 /// The WACZ specification version targeted by this crate.
 pub const WACZ_VERSION: &str = "1.1.1";
 
-/// The contributor roles the Data Package specification allows.
-pub const CONTRIBUTOR_ROLES: [&str; 5] = [
+const CONTRIBUTOR_ROLES: [&str; 5] = [
     "author",
     "publisher",
     "maintainer",
@@ -61,6 +60,227 @@ pub enum ConstraintError {
     /// An extension property duplicates a modeled property.
     #[error(transparent)]
     Extra(#[from] archivindex_cdx::properties::Error),
+}
+
+macro_rules! optional_string_setter {
+    ($name:ident, $field:ident, $docs:literal) => {
+        #[doc = $docs]
+        #[must_use]
+        pub fn $name(mut self, value: impl Into<Cow<'static, str>>) -> Self {
+            self.$field = Some(value.into());
+            self
+        }
+    };
+}
+
+/// A valid source for authored package metadata.
+///
+/// Unlike [`Source`], which faithfully represents possibly-invalid input, this type requires the
+/// title mandated by the Data Package specification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceMetadata {
+    title: Cow<'static, str>,
+    path: Option<Cow<'static, str>>,
+    email: Option<Cow<'static, str>>,
+    extra: ExtraProperties,
+}
+
+impl SourceMetadata {
+    /// Create a source with its required human-readable title.
+    #[must_use]
+    pub fn new(title: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            title: title.into(),
+            path: None,
+            email: None,
+            extra: ExtraProperties::default(),
+        }
+    }
+
+    optional_string_setter!(path, path, "Set the source URL or relative path.");
+    optional_string_setter!(email, email, "Set the source contact email address.");
+
+    /// Set extension properties, replacing any previously configured properties.
+    pub fn extra(
+        mut self,
+        value: ExtraProperties,
+    ) -> Result<Self, archivindex_cdx::properties::Error> {
+        value.validate("Source", SOURCE_PROPERTIES)?;
+        self.extra = value;
+        Ok(self)
+    }
+}
+
+impl From<SourceMetadata> for Source<'static> {
+    fn from(value: SourceMetadata) -> Self {
+        Self {
+            title: Some(value.title),
+            path: value.path,
+            email: value.email,
+            extra: value.extra,
+        }
+    }
+}
+
+/// A valid license for authored package metadata.
+///
+/// Construction requires either the license's standard name or a path to its text, so the identity
+/// required by the Data Package specification cannot be omitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LicenseMetadata {
+    name: Option<Cow<'static, str>>,
+    path: Option<Cow<'static, str>>,
+    title: Option<Cow<'static, str>>,
+    extra: ExtraProperties,
+}
+
+impl LicenseMetadata {
+    /// Create a license identified by its Open Definition name.
+    #[must_use]
+    pub fn named(name: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            name: Some(name.into()),
+            path: None,
+            title: None,
+            extra: ExtraProperties::default(),
+        }
+    }
+
+    /// Create a license identified by the URL or relative path to its text.
+    #[must_use]
+    pub fn at_path(path: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            name: None,
+            path: Some(path.into()),
+            title: None,
+            extra: ExtraProperties::default(),
+        }
+    }
+
+    optional_string_setter!(name, name, "Set the Open Definition license name.");
+    optional_string_setter!(
+        path,
+        path,
+        "Set the URL or relative path to the license text."
+    );
+    optional_string_setter!(title, title, "Set the human-readable license title.");
+
+    /// Set extension properties, replacing any previously configured properties.
+    pub fn extra(
+        mut self,
+        value: ExtraProperties,
+    ) -> Result<Self, archivindex_cdx::properties::Error> {
+        value.validate("License", LICENSE_PROPERTIES)?;
+        self.extra = value;
+        Ok(self)
+    }
+}
+
+impl From<LicenseMetadata> for License<'static> {
+    fn from(value: LicenseMetadata) -> Self {
+        Self {
+            name: value.name,
+            path: value.path,
+            title: value.title,
+            extra: value.extra,
+        }
+    }
+}
+
+/// The contribution roles allowed by the Data Package specification.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ContributorRole {
+    /// Created the package's contents.
+    Author,
+    /// Published the package.
+    Publisher,
+    /// Maintains the package.
+    Maintainer,
+    /// Prepared or transformed the data.
+    Wrangler,
+    /// Made another kind of contribution.
+    #[default]
+    Contributor,
+}
+
+impl ContributorRole {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Author => "author",
+            Self::Publisher => "publisher",
+            Self::Maintainer => "maintainer",
+            Self::Wrangler => "wrangler",
+            Self::Contributor => "contributor",
+        }
+    }
+}
+
+/// A valid contributor for authored package metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContributorMetadata {
+    title: Cow<'static, str>,
+    path: Option<Cow<'static, str>>,
+    email: Option<Cow<'static, str>>,
+    role: Option<ContributorRole>,
+    organization: Option<Cow<'static, str>>,
+    extra: ExtraProperties,
+}
+
+impl ContributorMetadata {
+    /// Create a contributor with the required display name.
+    #[must_use]
+    pub fn new(title: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            title: title.into(),
+            path: None,
+            email: None,
+            role: None,
+            organization: None,
+            extra: ExtraProperties::default(),
+        }
+    }
+
+    optional_string_setter!(
+        path,
+        path,
+        "Set a URL or relative path for the contributor."
+    );
+    optional_string_setter!(email, email, "Set the contributor's contact email address.");
+    optional_string_setter!(
+        organization,
+        organization,
+        "Set the contributor's organization."
+    );
+
+    /// Set the nature of the contribution.
+    #[must_use]
+    pub const fn role(mut self, value: ContributorRole) -> Self {
+        self.role = Some(value);
+        self
+    }
+
+    /// Set extension properties, replacing any previously configured properties.
+    pub fn extra(
+        mut self,
+        value: ExtraProperties,
+    ) -> Result<Self, archivindex_cdx::properties::Error> {
+        value.validate("Contributor", CONTRIBUTOR_PROPERTIES)?;
+        self.extra = value;
+        Ok(self)
+    }
+}
+
+impl From<ContributorMetadata> for Contributor<'static> {
+    fn from(value: ContributorMetadata) -> Self {
+        Self {
+            title: Some(value.title),
+            path: value.path,
+            email: value.email,
+            role: value.role.map(|role| Cow::Borrowed(role.as_str())),
+            organization: value.organization,
+            extra: value.extra,
+        }
+    }
 }
 
 /// Collect every violation of the specification's metadata constraints.
@@ -253,26 +473,15 @@ pub struct DataPackageBuilder {
     homepage: Option<Cow<'static, str>>,
     image: Option<Cow<'static, str>>,
     version: Option<Cow<'static, str>>,
-    sources: Vec<Source<'static>>,
-    licenses: Vec<License<'static>>,
-    contributors: Vec<Contributor<'static>>,
+    sources: Vec<SourceMetadata>,
+    licenses: Vec<LicenseMetadata>,
+    contributors: Vec<ContributorMetadata>,
     created: Option<DateTime<Utc>>,
     modified: Option<DateTime<Utc>>,
     software: Option<Cow<'static, str>>,
     main_page_url: Option<Cow<'static, str>>,
     main_page_date: Option<DateTime<Utc>>,
     extra: ExtraProperties,
-}
-
-macro_rules! string_setter {
-    ($name:ident, $field:ident, $docs:literal) => {
-        #[doc = $docs]
-        #[must_use]
-        pub fn $name(mut self, value: impl Into<Cow<'static, str>>) -> Self {
-            self.$field = Some(value.into());
-            self
-        }
-    };
 }
 
 impl DataPackageBuilder {
@@ -282,19 +491,31 @@ impl DataPackageBuilder {
         Self::default()
     }
 
-    string_setter!(name, name, "Set the short, URL-usable package identifier.");
-    string_setter!(id, id, "Set the globally unique package identifier.");
-    string_setter!(title, title, "Set the short collection description.");
-    string_setter!(
+    /// Set the short, URL-usable package identifier.
+    ///
+    /// The Data Package specification restricts names to lowercase characters from
+    /// `a-z0-9._-`.
+    pub fn name(mut self, value: impl Into<Cow<'static, str>>) -> Result<Self, ConstraintError> {
+        let value = value.into();
+        if !crate::paths::valid_name(&value) {
+            return Err(ConstraintError::Name(value.into_owned()));
+        }
+        self.name = Some(value);
+        Ok(self)
+    }
+
+    optional_string_setter!(id, id, "Set the globally unique package identifier.");
+    optional_string_setter!(title, title, "Set the short collection description.");
+    optional_string_setter!(
         description,
         description,
         "Set the longer, optionally Markdown-formatted description."
     );
-    string_setter!(homepage, homepage, "Set the package homepage URL.");
-    string_setter!(image, image, "Set the package image URL or relative path.");
-    string_setter!(version, version, "Set the package version.");
-    string_setter!(software, software, "Set the creating software description.");
-    string_setter!(main_page_url, main_page_url, "Set the primary replay URL.");
+    optional_string_setter!(homepage, homepage, "Set the package homepage URL.");
+    optional_string_setter!(image, image, "Set the package image URL or relative path.");
+    optional_string_setter!(version, version, "Set the package version.");
+    optional_string_setter!(software, software, "Set the creating software description.");
+    optional_string_setter!(main_page_url, main_page_url, "Set the primary replay URL.");
 
     /// Set all package keywords, replacing any previously configured keywords.
     #[must_use]
@@ -309,22 +530,31 @@ impl DataPackageBuilder {
 
     /// Set all package sources, replacing any previously configured sources.
     #[must_use]
-    pub fn sources(mut self, values: Vec<Source<'static>>) -> Self {
-        self.sources = values;
+    pub fn sources<I>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = SourceMetadata>,
+    {
+        self.sources = values.into_iter().collect();
         self
     }
 
     /// Set all package licenses, replacing any previously configured licenses.
     #[must_use]
-    pub fn licenses(mut self, values: Vec<License<'static>>) -> Self {
-        self.licenses = values;
+    pub fn licenses<I>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = LicenseMetadata>,
+    {
+        self.licenses = values.into_iter().collect();
         self
     }
 
     /// Set all package contributors, replacing any previously configured contributors.
     #[must_use]
-    pub fn contributors(mut self, values: Vec<Contributor<'static>>) -> Self {
-        self.contributors = values;
+    pub fn contributors<I>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = ContributorMetadata>,
+    {
+        self.contributors = values.into_iter().collect();
         self
     }
 
@@ -375,9 +605,9 @@ impl DataPackageBuilder {
             homepage: self.homepage,
             image: self.image,
             version: self.version,
-            sources: self.sources,
-            licenses: self.licenses,
-            contributors: self.contributors,
+            sources: self.sources.into_iter().map(Into::into).collect(),
+            licenses: self.licenses.into_iter().map(Into::into).collect(),
+            contributors: self.contributors.into_iter().map(Into::into).collect(),
             created: self.created,
             modified: self.modified,
             software: self.software,
@@ -385,19 +615,6 @@ impl DataPackageBuilder {
             main_page_date: self.main_page_date,
             extra: self.extra,
         }
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), ConstraintError> {
-        constraint_errors(
-            self.name.as_deref(),
-            &self.sources,
-            &self.licenses,
-            &self.contributors,
-            &self.extra,
-        )
-        .into_iter()
-        .next()
-        .map_or(Ok(()), Err)
     }
 }
 
@@ -422,6 +639,10 @@ const DATA_PACKAGE_PROPERTIES: &[&str] = &[
     "mainPageUrl",
     "mainPageDate",
 ];
+
+const SOURCE_PROPERTIES: &[&str] = &["title", "path", "email"];
+const LICENSE_PROPERTIES: &[&str] = &["name", "path", "title"];
+const CONTRIBUTOR_PROPERTIES: &[&str] = &["title", "path", "email", "role", "organization"];
 
 /// A WACZ `datapackage-digest.json` file.
 #[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
@@ -477,7 +698,7 @@ pub struct Source<'a> {
 
 impl Source<'_> {
     pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<ConstraintError>) {
-        if let Err(error) = self.extra.validate("Source", &["title", "path", "email"]) {
+        if let Err(error) = self.extra.validate("Source", SOURCE_PROPERTIES) {
             errors.push(error.into());
         }
         if self.title.is_none() {
@@ -523,7 +744,7 @@ pub struct License<'a> {
 
 impl License<'_> {
     pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<ConstraintError>) {
-        if let Err(error) = self.extra.validate("License", &["name", "path", "title"]) {
+        if let Err(error) = self.extra.validate("License", LICENSE_PROPERTIES) {
             errors.push(error.into());
         }
         if self.name.is_none() && self.path.is_none() {
@@ -583,10 +804,7 @@ pub struct Contributor<'a> {
 
 impl Contributor<'_> {
     pub(crate) fn push_constraint_errors(&self, errors: &mut Vec<ConstraintError>) {
-        if let Err(error) = self.extra.validate(
-            "Contributor",
-            &["title", "path", "email", "role", "organization"],
-        ) {
+        if let Err(error) = self.extra.validate("Contributor", CONTRIBUTOR_PROPERTIES) {
             errors.push(error.into());
         }
         if self.title.is_none() {
@@ -654,6 +872,17 @@ mod tests {
     #[test]
     fn modeled_extension_properties_are_rejected_at_every_manifest_level() {
         assert!(DataPackageBuilder::new().extra(extra("resources")).is_err());
+        assert!(SourceMetadata::new("source").extra(extra("path")).is_err());
+        assert!(
+            LicenseMetadata::named("CC0-1.0")
+                .extra(extra("name"))
+                .is_err()
+        );
+        assert!(
+            ContributorMetadata::new("Archivist")
+                .extra(extra("role"))
+                .is_err()
+        );
         for errors in [
             errors_of(|errors| {
                 Source {
@@ -808,6 +1037,7 @@ mod tests {
 
         let package = DataPackageBuilder::new()
             .name("example-collection")
+            .expect("valid package name")
             .id("urn:uuid:735c0f4b-b054-4bb2-a5b6-2b4c27ba0bc7")
             .title("Example collection")
             .description("An example archive")
@@ -815,18 +1045,9 @@ mod tests {
             .homepage("https://example.com/collection")
             .image("images/collection.png")
             .version("1.0.0")
-            .sources(vec![Source {
-                title: Some("example.com".into()),
-                ..Source::default()
-            }])
-            .licenses(vec![License {
-                name: Some("CC-BY-4.0".into()),
-                ..License::default()
-            }])
-            .contributors(vec![Contributor {
-                title: Some("An Archivist".into()),
-                ..Contributor::default()
-            }])
+            .sources([SourceMetadata::new("example.com")])
+            .licenses([LicenseMetadata::named("CC-BY-4.0")])
+            .contributors([ContributorMetadata::new("An Archivist").role(ContributorRole::Author)])
             .created(created)
             .modified(modified)
             .software("example-archiver/1.0")
@@ -855,6 +1076,7 @@ mod tests {
         assert_eq!(package.sources.len(), 1);
         assert_eq!(package.licenses.len(), 1);
         assert_eq!(package.contributors.len(), 1);
+        assert_eq!(package.contributors[0].role.as_deref(), Some("author"));
         assert_eq!(package.created, Some(created));
         assert_eq!(package.modified, Some(modified));
         assert_eq!(package.software.as_deref(), Some("example-archiver/1.0"));

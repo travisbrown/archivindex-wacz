@@ -159,9 +159,6 @@ pub enum Error {
         #[source]
         source: archivindex_cdx::cdxj::ConformanceError,
     },
-    /// The manifest metadata violates a Data Package constraint.
-    #[error(transparent)]
-    InvalidMetadata(#[from] crate::frictionless::ConstraintError),
     /// A previous member write failed after mutating the ZIP stream.
     #[error("WACZ writer is unusable after a member write failure")]
     Poisoned,

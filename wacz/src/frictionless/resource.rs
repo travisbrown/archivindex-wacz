@@ -140,7 +140,8 @@ impl<'a> Resource<'a> {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), super::ConstraintError> {
+    #[cfg(test)]
+    fn validate(&self) -> Result<(), super::ConstraintError> {
         let mut errors = Vec::new();
         self.push_constraint_errors(&mut errors);
 
