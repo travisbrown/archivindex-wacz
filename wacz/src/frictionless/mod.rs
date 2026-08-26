@@ -757,8 +757,8 @@ impl License<'_> {
 
 /// A person or organization who contributed to a package.
 ///
-/// The Data Package specification requires `title` and restricts `role` to
-/// [`CONTRIBUTOR_ROLES`] (`contributor` by default).
+/// The Data Package specification requires `title` and restricts `role` to the vocabulary modeled
+/// by [`ContributorRole`] (`contributor` by default).
 #[derive(Clone, Debug, Default, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
 // Every field is optional, so no `#[serde(borrow)]` field ties the deserializer's input lifetime to
 // `'a`; state the bound explicitly to allow borrowing from the input.
