@@ -8,6 +8,9 @@ license.workspace = true
 version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "archivindex-packager"
 path = "src/main.rs"

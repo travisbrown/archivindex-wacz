@@ -7,10 +7,6 @@
 //! # Modules
 //!
 //! * [`read`]: reading archived comments back out of WARC files
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
-#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
-#![allow(clippy::missing_errors_doc)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod read;

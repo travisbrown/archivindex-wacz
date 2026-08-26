@@ -11,6 +11,9 @@ readme.workspace = true
 license.workspace = true
 version.workspace = true
 
+[lints]
+workspace = true
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -30,5 +33,7 @@ thiserror.workspace = true
 [dev-dependencies]
 archivindex-archiver.workspace = true
 flate2.workspace = true
+# Integration tests inspect WARC records, whose target URIs are `fluent_uri::Uri<String>` values.
+fluent-uri.workspace = true
 proptest.workspace = true
 test-strategy.workspace = true

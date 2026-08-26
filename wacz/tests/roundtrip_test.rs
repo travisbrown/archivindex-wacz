@@ -1532,7 +1532,7 @@ fn validate_reports_duplicate_zip_member_names() -> Result<(), Box<dyn std::erro
         bytes[position..position + first.len()].copy_from_slice(first);
     }
     let mut reader = WaczReader::new(Cursor::new(bytes))?;
-    let report = reader.validate(Default::default())?;
+    let report = reader.validate(validate::ValidationOptions::default())?;
 
     assert!(
         report

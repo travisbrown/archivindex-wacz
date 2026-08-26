@@ -18,6 +18,7 @@ use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
 use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
+use fluent_uri::Uri;
 use support::{plain, request_header, request_path, serve_with};
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
@@ -259,7 +260,7 @@ fn assert_frames_one_response(
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].type_name(), "response");
     assert_eq!(
-        records[0].target_uri().map(|uri| uri.as_str()),
+        records[0].target_uri().map(Uri::as_str),
         Some(fields.url.as_ref())
     );
     Ok(())

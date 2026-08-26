@@ -16,10 +16,6 @@
 //! [CDXJ 0.1.0 specification]: https://specs.webrecorder.net/cdxj/0.1.0/
 //! [Wayback CDX Server]: https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server
 
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
-#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
-#![allow(clippy::missing_errors_doc)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod attributes;

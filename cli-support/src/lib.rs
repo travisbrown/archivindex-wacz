@@ -1,7 +1,3 @@
-#![forbid(unsafe_code)]
-#![deny(missing_docs)]
-#![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
-#![allow(clippy::missing_errors_doc)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //! Command-line behavior shared by this repository's applications.
 //!

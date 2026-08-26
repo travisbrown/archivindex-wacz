@@ -131,6 +131,7 @@ dependencies = [
  "archivindex-warc",
  "chrono",
  "flate2",
+ "fluent-uri",
  "proptest",
  "redb",
  "serde",
