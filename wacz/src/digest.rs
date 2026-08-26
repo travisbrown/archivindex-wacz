@@ -68,9 +68,10 @@ impl Sha256Digest {
 
     /// Finish a SHA-256 hasher created with [`Sha256::hasher`].
     pub(crate) fn from_hasher(hasher: Hasher) -> Self {
+        let digest = hasher.finalize();
         Self(
-            hasher
-                .finalize()
+            digest
+                .as_ref()
                 .try_into()
                 .expect("invariant violation: a SHA-256 digest is 32 bytes"),
         )

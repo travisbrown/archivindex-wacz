@@ -907,7 +907,7 @@ fn capture_digest_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Resu
             .payload()
             .and_then(|payload| payload.payload_digest.as_ref());
         if let Some(actual) = declared {
-            if !expected.matches(actual) {
+            if expected != *actual {
                 return Err(format!(
                     "digest `{expected}` does not match WARC-Payload-Digest `{actual}`"
                 ));
@@ -933,7 +933,7 @@ fn capture_digest_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Resu
                     expected.algorithm_as_read()
                 )
             })?;
-            if !expected.matches(&actual) {
+            if expected != actual {
                 return Err(format!(
                     "digest `{expected}` does not match computed payload digest `{actual}`"
                 ));

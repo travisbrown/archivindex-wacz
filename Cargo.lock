@@ -82,7 +82,7 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
+source = "git+https://github.com/travisbrown/archivindex-warc#964fe5fb5a1e1663c69f31051f1e228c8a470ed1"
 dependencies = [
  "archivindex-warc",
  "archivindex-warc-revisit-index",
@@ -90,12 +90,14 @@ dependencies = [
  "data-encoding",
  "fluent-uri",
  "http",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -190,7 +192,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
+source = "git+https://github.com/travisbrown/archivindex-warc#964fe5fb5a1e1663c69f31051f1e228c8a470ed1"
 dependencies = [
  "archivindex-warc-digest",
  "chrono",
@@ -198,18 +200,17 @@ dependencies = [
  "flate2",
  "fluent-uri",
  "http",
- "rustls",
+ "memchr",
  "serde",
  "serde_json",
  "thiserror",
  "uuid",
- "webpki-roots",
 ]
 
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
+source = "git+https://github.com/travisbrown/archivindex-warc#964fe5fb5a1e1663c69f31051f1e228c8a470ed1"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -221,7 +222,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#37469f1af3e30014d203d18e3582e637bcc41f69"
+source = "git+https://github.com/travisbrown/archivindex-warc#964fe5fb5a1e1663c69f31051f1e228c8a470ed1"
 dependencies = [
  "archivindex-warc",
  "fluent-uri",
@@ -1517,7 +1518,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

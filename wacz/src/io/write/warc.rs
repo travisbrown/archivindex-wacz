@@ -2,7 +2,7 @@
 
 use std::io::{Seek, Write};
 
-use archivindex_warc::io::write::{WarcWriter, Written};
+use archivindex_warc::io::write::{Compression, WarcWriter, Written};
 use archivindex_warc::parse::raw;
 use zip::ZipWriter;
 
@@ -22,8 +22,7 @@ pub struct WarcSink<'a, W: Write + Seek> {
     resources: &'a mut Vec<Resource<'static>>,
     poisoned: &'a mut bool,
     path: String,
-    gzip: bool,
-    gzip_compression_level: u32,
+    compression: Compression,
 }
 
 impl<W: Write + Seek> WaczWriter<W> {
@@ -41,13 +40,17 @@ impl<W: Write + Seek> WaczWriter<W> {
         self.zip
             .start_file(&path, options_for(&path, self.config.zip_compression_level))?;
         let writer = HashingWriter::new(&mut self.zip);
+        let compression = if gzip {
+            Compression::gzip_with_level(self.config.gzip_compression_level)?
+        } else {
+            Compression::NONE
+        };
         Ok(WarcSink {
             writer,
             resources: &mut self.resources,
             poisoned: &mut self.poisoned,
             path,
-            gzip,
-            gzip_compression_level: self.config.gzip_compression_level,
+            compression,
         })
     }
 }
@@ -56,12 +59,10 @@ impl<W: Write + Seek> WarcSink<'_, W> {
     /// Write one validated raw WARC record and return its member-relative frame.
     pub fn write_record(&mut self, record: &raw::Record) -> Result<Written, Error> {
         let offset = self.writer.bytes();
-        let mut writer = WarcWriter::new(&mut self.writer).with_digests();
-        let mut written = if self.gzip {
-            writer.write_gzip_with_level(record, self.gzip_compression_level)?
-        } else {
-            writer.write(record)?
-        };
+        let mut written = WarcWriter::new(&mut self.writer)
+            .with_compression(self.compression)
+            .with_digests()
+            .write(record)?;
         written.offset = offset;
         Ok(written)
     }
