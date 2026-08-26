@@ -24,9 +24,8 @@ impl<W: Write + Seek> WaczWriter<W> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidIndexFields`] if an entry's extension properties duplicate a
-    /// modeled CDXJ property, [`Error::InvalidIndexName`] if the name is not a direct `.cdx` member
-    /// name, and [`Error::Io`] if the index cannot be written.
+    /// Returns [`Error::InvalidIndexName`] if the name is not a direct `.cdx` member name, and
+    /// [`Error::Io`] if the index cannot be written.
     pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
         &mut self,
         name: &str,
@@ -63,12 +62,12 @@ impl<W: Write + Seek> WaczWriter<W> {
         let mut previous: Option<(String, Timestamp)> = None;
         for (index, item) in IndexReader::new(&mut reader).enumerate() {
             let item = item.map_err(Error::InvalidIndex)?;
-            item.fields
-                .check_conformance()
-                .map_err(|source| Error::NonConformingIndex {
+            cdxj::ConformingFields::try_from(&item.fields).map_err(|source| {
+                Error::NonConformingIndex {
                     line: index + 1,
                     source,
-                })?;
+                }
+            })?;
             // The reader yields owned keys, so `into_owned` moves rather than copies.
             let current = (item.key.into_owned(), item.timestamp);
             if previous.is_some_and(|previous| previous > current) {
@@ -208,11 +207,8 @@ impl IndexSpool {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidIndexFields`] if the item's extension properties duplicate a
-    /// modeled CDXJ property, or [`Error::Io`] if a run cannot be written.
+    /// Returns [`Error::Io`] if a run cannot be written.
     pub fn push(&mut self, item: &cdxj::ConformingItem<'_>) -> Result<(), Error> {
-        item.fields.validate()?;
-
         Ok(self.push_line(format!("{item}\n"))?)
     }
 

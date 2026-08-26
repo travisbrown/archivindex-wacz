@@ -10,7 +10,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use archivindex_cdx::cdxj;
-use archivindex_cdx::properties::ExtraProperties;
 use archivindex_cdx::timestamp::Timestamp;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_wacz::digest::Sha256Digest;
@@ -523,16 +522,20 @@ fn capture_parts(
     let item = cdxj::Item {
         key: Cow::Owned(Cow::from(canonical.surt()).into_owned()),
         timestamp: Timestamp::with_milliseconds(date),
-        fields: cdxj::ConformingFields {
-            url: Cow::Owned(url),
-            digest: Cow::Owned(digest),
-            mime: Cow::Owned(mime),
-            status: head.status,
-            offset: written.offset,
-            length: written.length,
-            filename: Cow::Owned(warc_name.to_owned()),
-            record_digest: stored_digest(written),
-            extra: ExtraProperties::default(),
+        fields: {
+            let fields = cdxj::ConformingFields::new(
+                url,
+                digest,
+                mime,
+                head.status,
+                written.offset,
+                written.length,
+                warc_name.to_owned(),
+            );
+            match stored_digest(written) {
+                Some(digest) => fields.with_record_digest(digest),
+                None => fields,
+            }
         },
     };
     Ok(Some((item, page)))

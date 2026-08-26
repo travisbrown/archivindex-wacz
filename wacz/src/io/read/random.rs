@@ -548,17 +548,15 @@ mod tests {
             timestamp: archivindex_cdx::timestamp::Timestamp::new(
                 Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
             ),
-            fields: cdxj::ConformingFields {
-                url: Cow::Borrowed("https://example.com/"),
-                digest: Cow::Borrowed("sha256:00"),
-                mime: Cow::Borrowed("text/html"),
-                status: 200,
-                offset: 0,
-                length: 10,
-                filename: Cow::Borrowed("data.warc"),
-                record_digest: None,
-                extra: archivindex_cdx::properties::ExtraProperties::default(),
-            },
+            fields: cdxj::ConformingFields::new(
+                "https://example.com/",
+                "sha256:00",
+                "text/html",
+                200,
+                0,
+                10,
+                "data.warc",
+            ),
         };
         let mut writer = crate::io::write::WaczWriter::new(Cursor::new(Vec::new()));
         writer.add_index("index.cdx", [&item]).unwrap();

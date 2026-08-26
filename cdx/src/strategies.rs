@@ -141,17 +141,15 @@ pub fn conforming_fields() -> impl Strategy<Value = ConformingFields<'static>> {
     )
         .prop_map(
             |(url, digest, mime, status, offset, length, filename, record_digest, extra)| {
-                ConformingFields {
-                    url: Cow::Owned(url),
-                    digest: Cow::Owned(digest),
-                    mime: Cow::Owned(mime),
-                    status,
-                    offset,
-                    length,
-                    filename: Cow::Owned(filename),
-                    record_digest: record_digest.map(Cow::Owned),
-                    extra,
-                }
+                let fields =
+                    ConformingFields::new(url, digest, mime, status, offset, length, filename);
+                let fields = match record_digest {
+                    Some(record_digest) => fields.with_record_digest(record_digest),
+                    None => fields,
+                };
+                fields
+                    .with_extra(extra)
+                    .expect("generated extensions do not collide")
             },
         )
 }

@@ -1289,18 +1289,7 @@ fn writer_validates_warc_names_not_content() -> Result<(), Box<dyn std::error::E
 #[test]
 fn index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Error>> {
     let mut item = item_for(URL)?;
-    let mut required = cdxj::ConformingItem::try_from(&item)?;
-    required
-        .fields
-        .extra
-        .insert("offset".to_owned(), serde_json::Value::from(1));
-    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
-    assert!(matches!(
-        writer.add_index("index.cdx", [&required]),
-        Err(writer::Error::ExtraProperty(_))
-    ));
-
-    // An index file is held to the same requirements as items written from memory.
+    // Pre-rendered index files are held to the same requirements as typed items.
     item.fields.digest = None;
     assert!(cdxj::ConformingItem::try_from(&item).is_err());
 

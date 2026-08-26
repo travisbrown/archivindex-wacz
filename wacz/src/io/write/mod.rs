@@ -150,9 +150,6 @@ pub enum Error {
     /// The package is missing one or more member classes required by WACZ.
     #[error("missing required WACZ members: {}", .0.join(", "))]
     MissingRequiredMembers(Vec<&'static str>),
-    /// An index entry has missing or colliding CDXJ properties.
-    #[error(transparent)]
-    InvalidIndexFields(#[from] archivindex_cdx::cdxj::ConformanceError),
     /// A pre-rendered CDXJ line has missing or colliding properties.
     #[error("CDXJ index line {line} does not conform")]
     NonConformingIndex {
@@ -165,9 +162,6 @@ pub enum Error {
     /// The manifest metadata violates a Data Package constraint.
     #[error(transparent)]
     InvalidMetadata(#[from] crate::frictionless::ConstraintError),
-    /// An extension property duplicates a modeled JSON property.
-    #[error(transparent)]
-    ExtraProperty(#[from] archivindex_cdx::properties::Error),
     /// A previous member write failed after mutating the ZIP stream.
     #[error("WACZ writer is unusable after a member write failure")]
     Poisoned,

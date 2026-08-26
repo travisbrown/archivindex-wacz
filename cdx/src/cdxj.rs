@@ -186,31 +186,123 @@ impl Fields<'_> {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct ConformingFields<'a> {
     /// The original URL.
-    pub url: Cow<'a, str>,
+    url: Cow<'a, str>,
     /// The response payload digest.
-    pub digest: Cow<'a, str>,
+    digest: Cow<'a, str>,
     /// The response media type.
-    pub mime: Cow<'a, str>,
+    mime: Cow<'a, str>,
     /// The HTTP response status.
     #[serde(serialize_with = "crate::attributes::integer_str")]
-    pub status: u16,
+    status: u16,
     /// The WARC record offset.
     #[serde(serialize_with = "crate::attributes::integer_str")]
-    pub offset: u64,
+    offset: u64,
     /// The WARC record length.
     #[serde(serialize_with = "crate::attributes::integer_str")]
-    pub length: u64,
+    length: u64,
     /// The WARC filename.
-    pub filename: Cow<'a, str>,
+    filename: Cow<'a, str>,
     /// The digest of the complete stored WARC record.
     #[serde(rename = "recordDigest", skip_serializing_if = "Option::is_none")]
-    pub record_digest: Option<Cow<'a, str>>,
+    record_digest: Option<Cow<'a, str>>,
     /// Additional JSON properties.
     #[serde(flatten)]
-    pub extra: ExtraProperties,
+    extra: ExtraProperties,
 }
 
-impl ConformingFields<'_> {
+impl<'a> ConformingFields<'a> {
+    /// Construct a conforming field object with no record digest or extension properties.
+    #[must_use]
+    pub fn new(
+        url: impl Into<Cow<'a, str>>,
+        digest: impl Into<Cow<'a, str>>,
+        mime: impl Into<Cow<'a, str>>,
+        status: u16,
+        offset: u64,
+        length: u64,
+        filename: impl Into<Cow<'a, str>>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            digest: digest.into(),
+            mime: mime.into(),
+            status,
+            offset,
+            length,
+            filename: filename.into(),
+            record_digest: None,
+            extra: ExtraProperties::default(),
+        }
+    }
+
+    /// Set the digest of the complete stored WARC record.
+    #[must_use]
+    pub fn with_record_digest(mut self, value: impl Into<Cow<'a, str>>) -> Self {
+        self.record_digest = Some(value.into());
+        self
+    }
+
+    /// Set extension properties after checking that they do not collide with modeled properties.
+    pub fn with_extra(mut self, value: ExtraProperties) -> Result<Self, properties::Error> {
+        validate_extra(&value)?;
+        self.extra = value;
+        Ok(self)
+    }
+
+    /// The original URL.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The response payload digest.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// The response media type.
+    #[must_use]
+    pub fn mime(&self) -> &str {
+        &self.mime
+    }
+
+    /// The HTTP response status.
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// The WARC record offset.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// The WARC record length.
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// The WARC filename.
+    #[must_use]
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    /// The digest of the complete stored WARC record.
+    #[must_use]
+    pub fn record_digest(&self) -> Option<&str> {
+        self.record_digest.as_deref()
+    }
+
+    /// Additional JSON properties.
+    #[must_use]
+    pub const fn extra(&self) -> &ExtraProperties {
+        &self.extra
+    }
+
     /// Detach this field object from its input.
     #[must_use]
     pub fn into_owned(self) -> ConformingFields<'static> {
@@ -225,11 +317,6 @@ impl ConformingFields<'_> {
             record_digest: self.record_digest.map(owned),
             extra: self.extra,
         }
-    }
-
-    /// Check that extension properties do not duplicate modeled properties.
-    pub fn validate(&self) -> Result<(), properties::Error> {
-        validate_extra(&self.extra)
     }
 }
 
@@ -261,11 +348,7 @@ pub enum ConformanceError {
 }
 
 impl Fields<'_> {
-    /// Check that all required properties are present and no extension property duplicates one.
-    ///
-    /// This is the check the conversion to [`ConformingFields`] applies, for callers that only need
-    /// the verdict.
-    pub fn check_conformance(&self) -> Result<(), ConformanceError> {
+    fn check_conformance(&self) -> Result<(), ConformanceError> {
         let mut missing = Vec::new();
         if self.digest.is_none() {
             missing.push("digest");
@@ -290,6 +373,26 @@ impl Fields<'_> {
         }
 
         Ok(validate_extra(&self.extra)?)
+    }
+}
+
+impl<'a> TryFrom<Fields<'a>> for ConformingFields<'a> {
+    type Error = ConformanceError;
+
+    fn try_from(fields: Fields<'a>) -> Result<Self, Self::Error> {
+        fields.check_conformance()?;
+
+        Ok(Self {
+            url: fields.url,
+            digest: fields.digest.expect("checked above"),
+            mime: fields.mime.expect("checked above"),
+            status: fields.status.expect("checked above"),
+            offset: fields.offset.expect("checked above"),
+            length: fields.length.expect("checked above"),
+            filename: fields.filename.expect("checked above"),
+            record_digest: fields.record_digest,
+            extra: fields.extra,
+        })
     }
 }
 
