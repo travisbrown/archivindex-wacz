@@ -17,6 +17,7 @@ use archivindex_wacz::pages::{Page, PageListHeader};
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
+use archivindex_warc::value::marker::Sha256;
 use chrono::{TimeZone, Utc};
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -38,7 +39,7 @@ fn warc_bytes() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
     let mut bytes = Vec::new();
     let mut writer = WarcWriter::new(&mut bytes);
-    writer.write(&record.into_raw()?)?;
+    writer.write(&record.into_raw_with_digests(Sha256)?)?;
 
     Ok(bytes)
 }

@@ -9,9 +9,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
-use archivindex_archiver::session::{
-    Capture, CaptureProcessor, Inspection, Operator, RetryConfig, Session,
-};
+use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, RetryConfig, Session};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
 use archivindex_wordpress::read::read_comments;
@@ -70,17 +68,13 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<Comm
     let progress = message_spinner("Downloading comments");
     let event_progress = progress.clone();
     let event_comment_progress = Rc::clone(&comment_progress);
-    let operator = Operator {
-        name: options.operator,
-        email: options.operator_email,
-    };
     let mut session = Session::new(
         archiver,
         &options.session_name,
-        operator,
         [first_url],
         &options.output,
     )?
+    .operator(options.operator, options.operator_email)
     .processor(processor)
     .events(move |event: CaptureEvent<'_>| {
         if matches!(event, CaptureEvent::Written { .. })
@@ -203,6 +197,8 @@ enum Error {
     Cookie(#[from] archivindex_archiver::CookieError),
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::Error),
+    #[error("invalid archiver configuration: {0}")]
+    Config(#[from] archivindex_archiver::ConfigError),
     #[error(transparent)]
     UserAgent(#[from] archivindex_archiver::UserAgentError),
     #[error(transparent)]
@@ -331,6 +327,7 @@ impl ConfigOptions {
             concurrency: defaults.concurrency,
             max_response_length: self.max_response_length,
             gzip_warc: self.gzip,
+            ..defaults
         }
     }
 }

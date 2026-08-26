@@ -81,6 +81,7 @@ fn archive(config: Config, urls: &[String]) -> Result<Vec<u8>, Box<dyn std::erro
 fn gzip_config() -> Config {
     Config {
         gzip_warc: true,
+        operator: Some(operator()),
         ..Config::default()
     }
 }
@@ -452,7 +453,6 @@ fn packages_a_crawl_session_with_extra_pages() -> Result<(), Box<dyn std::error:
     let summary = Session::new(
         Archiver::new(gzip_config())?,
         "crawl-2026.08",
-        operator(),
         &seeds,
         &path,
     )?
@@ -531,15 +531,9 @@ fn packages_an_identical_payload_revisit() -> Result<(), Box<dyn std::error::Err
     let url = format!("http://127.0.0.1:{port}/about");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("recapture.warc.gz");
-    let summary = Session::new(
-        Archiver::new(gzip_config())?,
-        "recapture",
-        operator(),
-        [&url],
-        &path,
-    )?
-    .processor(RecaptureProcessor { remaining: 1 })
-    .run()?;
+    let summary = Session::new(Archiver::new(gzip_config())?, "recapture", [&url], &path)?
+        .processor(RecaptureProcessor { remaining: 1 })
+        .run()?;
     server.join().expect("server thread should not panic");
     assert!(summary.is_complete());
 
@@ -571,15 +565,9 @@ fn packages_server_not_modified_revisits() -> Result<(), Box<dyn std::error::Err
     let url = format!("http://127.0.0.1:{port}/page");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("revalidate.warc.gz");
-    let summary = Session::new(
-        Archiver::new(gzip_config())?,
-        "revalidate",
-        operator(),
-        [&url],
-        &path,
-    )?
-    .processor(RecaptureProcessor { remaining: 2 })
-    .run()?;
+    let summary = Session::new(Archiver::new(gzip_config())?, "revalidate", [&url], &path)?
+        .processor(RecaptureProcessor { remaining: 2 })
+        .run()?;
     server.join().expect("server thread should not panic");
     assert!(summary.is_complete());
 

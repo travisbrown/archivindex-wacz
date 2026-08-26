@@ -48,7 +48,7 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 ///
 /// ```no_run
 /// use archivindex_archiver::{Archiver, Config};
-/// use archivindex_archiver::session::{Operator, Session};
+/// use archivindex_archiver::session::Session;
 /// use archivindex_wordpress::CommentCaptureProcessor;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,13 +58,10 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 /// let summary = Session::new(
 ///     Archiver::new(Config::default())?,
 ///     "wordpress-comments",
-///     Operator {
-///         name: "A. Archivist".to_owned(),
-///         email: None,
-///     },
 ///     [first],
 ///     "wordpress-comments.warc",
 /// )?
+/// .operator("A. Archivist", None)
 /// .processor(processor)
 /// .run()?;
 ///

@@ -465,7 +465,7 @@ fn records_are_copied_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WarcWriter::new(&mut source);
     writer.write(&warcinfo(b"title: Verbatim\r\n", date).into_raw()?)?;
     writer.write(&request)?;
-    writer.write(&response("https://example.com/", "raw", date).into_raw_without_digests()?)?;
+    writer.write(&response("https://example.com/", "raw", date).into_raw()?)?;
     writer.flush()?;
     std::fs::write(&input, &source)?;
 

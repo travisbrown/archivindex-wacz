@@ -23,7 +23,6 @@ pub mod resource;
 pub mod signature;
 
 pub(crate) use compat::parse_data_package;
-
 use resource::Resource;
 use signature::SignatureData;
 
