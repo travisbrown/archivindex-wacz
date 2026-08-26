@@ -79,20 +79,56 @@ pub struct CommentCaptureProcessor {
     seen_ids: HashSet<u64>,
     first_date: Option<NaiveDate>,
     last_date: Option<NaiveDate>,
-    sweep: Sweep,
+    traversal: Traversal,
     /// Page after which this processor resumed, when [`resume_after`](Self::resume_after) was used.
     resumed_after_page: Option<usize>,
     force_second_sweep: bool,
-    complete: bool,
 }
 
+#[derive(Clone)]
+enum Traversal {
+    Active(Sweep),
+    Complete(Sweep),
+}
+
+impl Traversal {
+    const fn sweep(&self) -> &Sweep {
+        match self {
+            Self::Active(sweep) | Self::Complete(sweep) => sweep,
+        }
+    }
+
+    const fn active_sweep_mut(&mut self) -> Option<&mut Sweep> {
+        match self {
+            Self::Active(sweep) => Some(sweep),
+            Self::Complete(_) => None,
+        }
+    }
+
+    const fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete(_))
+    }
+
+    fn complete(&mut self) {
+        if let Self::Active(sweep) = self {
+            *self = Self::Complete(sweep.clone());
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Sweep {
-    number: usize,
+    phase: SweepPhase,
     page: usize,
     total: Option<usize>,
-    previous_total: Option<usize>,
     headers_consistent: bool,
     total_pages: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum SweepPhase {
+    Primary,
+    Validation { previous_total: Option<usize> },
 }
 
 impl Sweep {
@@ -103,29 +139,49 @@ impl Sweep {
     /// Begin a first sweep partway through the snapshot, resuming an earlier run.
     const fn starting_at(page: usize) -> Self {
         Self {
-            number: 1,
+            phase: SweepPhase::Primary,
             page,
             total: None,
-            previous_total: None,
             headers_consistent: true,
             total_pages: None,
         }
     }
 
     /// Begin a validation sweep, which re-traverses the same pages this sweep covered.
-    fn next(&self, page: usize) -> Self {
+    const fn validation(&self, page: usize) -> Self {
         Self {
-            number: self.number + 1,
+            phase: SweepPhase::Validation {
+                previous_total: self.effective_total(),
+            },
             page,
             total: None,
-            previous_total: self.total.or(self.previous_total),
             headers_consistent: true,
             total_pages: self.total_pages,
         }
     }
 
-    fn effective_total(&self) -> Option<usize> {
-        self.total.or(self.previous_total)
+    const fn effective_total(&self) -> Option<usize> {
+        match (self.total, self.phase) {
+            (Some(total), _)
+            | (
+                None,
+                SweepPhase::Validation {
+                    previous_total: Some(total),
+                },
+            ) => Some(total),
+            (None, _) => None,
+        }
+    }
+
+    const fn is_primary(&self) -> bool {
+        matches!(self.phase, SweepPhase::Primary)
+    }
+
+    const fn number(&self) -> usize {
+        match self.phase {
+            SweepPhase::Primary => 1,
+            SweepPhase::Validation { .. } => 2,
+        }
     }
 }
 
@@ -145,7 +201,7 @@ impl CommentCaptureProcessor {
     /// [`resume_after`](Self::resume_after), it asks for the page following the supplied URI.
     #[must_use]
     pub fn first_comment_url(&self) -> String {
-        self.comment_url(self.sweep.page)
+        self.comment_url(self.sweep().page)
     }
 
     /// Resume after the last successfully captured comments URI from an earlier session.
@@ -174,12 +230,12 @@ impl CommentCaptureProcessor {
 
         self.before = parameters.before;
         self.resumed_after_page = Some(parameters.page);
-        self.sweep = Sweep::starting_at(
+        self.traversal = Traversal::Active(Sweep::starting_at(
             parameters
                 .page
                 .checked_add(1)
                 .ok_or(CommentResumeError::PageOverflow)?,
-        );
+        ));
 
         Ok(self)
     }
@@ -203,10 +259,9 @@ impl CommentCaptureProcessor {
             seen_ids: HashSet::new(),
             first_date: None,
             last_date: None,
-            sweep: Sweep::first(),
+            traversal: Traversal::Active(Sweep::first()),
             resumed_after_page: None,
             force_second_sweep: false,
-            complete: false,
         })
     }
 
@@ -222,12 +277,22 @@ impl CommentCaptureProcessor {
     pub fn progress(&self) -> Option<CommentProgress> {
         Some(CommentProgress {
             downloaded: self.seen_ids.len(),
-            total: self.sweep.effective_total()?,
+            total: self.sweep().effective_total()?,
             first_date: self.first_date,
             last_date: self.last_date,
-            complete: self.complete,
+            complete: self.traversal.is_complete(),
             resumed_after_page: self.resumed_after_page,
         })
+    }
+
+    const fn sweep(&self) -> &Sweep {
+        self.traversal.sweep()
+    }
+
+    const fn active_sweep_mut(&mut self) -> &mut Sweep {
+        self.traversal
+            .active_sweep_mut()
+            .expect("completed traversals are not inspected")
     }
 
     /// The first page of a sweep: page one, or the page following a resume point.
@@ -253,13 +318,13 @@ impl CommentCaptureProcessor {
 
     /// Finish a sweep, optionally scheduling one validation sweep.
     fn finish_sweep(&mut self) -> Inspection {
-        let total = self.sweep.effective_total();
+        let total = self.sweep().effective_total();
         let count_is_plausible = total.is_some_and(|total| self.seen_ids.len() <= total);
-        let snapshot_is_consistent = self.sweep.headers_consistent && count_is_plausible;
-        if self.sweep.number == 1 && (self.force_second_sweep || !snapshot_is_consistent) {
+        let snapshot_is_consistent = self.sweep().headers_consistent && count_is_plausible;
+        if self.sweep().is_primary() && (self.force_second_sweep || !snapshot_is_consistent) {
             // A resumed run validates the pages it actually covered, not the whole snapshot.
             let start = self.start_page();
-            self.sweep = self.sweep.next(start);
+            self.traversal = Traversal::Active(self.sweep().validation(start));
             return Inspection::recapture(self.comment_url(start));
         }
 
@@ -267,9 +332,9 @@ impl CommentCaptureProcessor {
             return Inspection::error(format!(
                 "WordPress reported {} comments after sweep {}, but {} distinct IDs were captured{}",
                 total.map_or_else(|| "no total".to_owned(), |value| value.to_string()),
-                self.sweep.number,
+                self.sweep().number(),
                 self.seen_ids.len(),
-                if self.sweep.headers_consistent {
+                if self.sweep().headers_consistent {
                     ""
                 } else {
                     " and pagination headers changed during validation"
@@ -277,7 +342,7 @@ impl CommentCaptureProcessor {
             ));
         }
 
-        self.complete = true;
+        self.traversal.complete();
         Inspection::default()
     }
 
@@ -384,6 +449,12 @@ impl ResumeParameters {
 
 impl CaptureProcessor for CommentCaptureProcessor {
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        if self.traversal.is_complete() {
+            return Inspection::default();
+        }
+
+        let page = self.sweep().page;
+
         // Cloudflare's managed challenge cannot be answered without a browser, and every further
         // request would meet it too, so the traversal ends rather than failing page by page.
         if capture.status == 403 && capture.header("cf-mitigated") == Some("challenge") {
@@ -397,18 +468,18 @@ impl CaptureProcessor for CommentCaptureProcessor {
         // WordPress endpoints report that condition with this posts-controller error code; only
         // that specific 400 ends the sweep, while unrelated client errors fail the traversal.
         let invalid_page = capture.status == 400
-            && self.sweep.page > 1
+            && page > 1
             && serde_json::from_slice::<WordPressError>(capture.payload)
                 .is_ok_and(|error| error.code == INVALID_PAGE_ERROR_CODE);
         if invalid_page {
-            self.sweep.headers_consistent = false;
+            self.active_sweep_mut().headers_consistent = false;
             return self.finish_sweep();
         }
 
         if !matches!(capture.status, 200 | 304) {
             return Inspection::error(format!(
                 "unexpected WordPress comments response status {} on page {}",
-                capture.status, self.sweep.page
+                capture.status, page
             ));
         }
 
@@ -420,8 +491,7 @@ impl CaptureProcessor for CommentCaptureProcessor {
         } else {
             let Ok(comments) = serde_json::from_slice::<Vec<Comment>>(capture.payload) else {
                 return Inspection::error(format!(
-                    "invalid WordPress comments response on page {}",
-                    self.sweep.page
+                    "invalid WordPress comments response on page {page}"
                 ));
             };
             let Some(total_comments) = capture
@@ -429,30 +499,28 @@ impl CaptureProcessor for CommentCaptureProcessor {
                 .and_then(|value| value.parse::<usize>().ok())
             else {
                 return Inspection::error(format!(
-                    "missing or invalid X-WP-Total on WordPress comments page {}",
-                    self.sweep.page
+                    "missing or invalid X-WP-Total on WordPress comments page {page}"
                 ));
             };
-            if self
-                .sweep
-                .effective_total()
-                .is_some_and(|total| total != total_comments)
-            {
-                self.sweep.headers_consistent = false;
-            }
-            self.sweep.total = Some(total_comments);
             let total_pages = capture
                 .header("x-wp-totalpages")
                 .and_then(|value| value.parse::<usize>().ok());
-            if self
-                .sweep
+            let sweep = self.active_sweep_mut();
+            if sweep
+                .effective_total()
+                .is_some_and(|total| total != total_comments)
+            {
+                sweep.headers_consistent = false;
+            }
+            sweep.total = Some(total_comments);
+            if sweep
                 .total_pages
                 .zip(total_pages)
                 .is_some_and(|(previous, current)| previous != current)
             {
-                self.sweep.headers_consistent = false;
+                sweep.headers_consistent = false;
             }
-            self.sweep.total_pages = total_pages;
+            sweep.total_pages = total_pages;
             comments
         };
 
@@ -467,14 +535,13 @@ impl CaptureProcessor for CommentCaptureProcessor {
         }
 
         let has_next = self
-            .sweep
+            .sweep()
             .total_pages
-            .map_or(comments.len() == COMMENTS_PER_PAGE, |total| {
-                self.sweep.page < total
-            });
+            .map_or(comments.len() == COMMENTS_PER_PAGE, |total| page < total);
         let mut inspection = if has_next {
-            self.sweep.page += 1;
-            Inspection::recapture(self.comment_url(self.sweep.page))
+            let next_page = page + 1;
+            self.active_sweep_mut().page = next_page;
+            Inspection::recapture(self.comment_url(next_page))
         } else {
             self.finish_sweep()
         };
