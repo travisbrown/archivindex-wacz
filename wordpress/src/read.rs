@@ -1,7 +1,7 @@
 //! Reading comments captured from the `WordPress` REST API v2 from WARC files.
 
 use std::collections::BTreeMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::Path;
 
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
@@ -91,11 +91,7 @@ pub fn read_comments(path: impl AsRef<Path>) -> Result<CommentReadResult, Error>
     let display_path = path.display().to_string();
     let mut comments = CommentCollector::default();
 
-    if path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
-    {
+    if is_gzip_file(path)? {
         collect_records(
             WarcReader::from_path_gzip(path)?,
             &display_path,
@@ -106,6 +102,12 @@ pub fn read_comments(path: impl AsRef<Path>) -> Result<CommentReadResult, Error>
     }
 
     Ok(comments.finish())
+}
+
+fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {
+    let mut file = std::fs::File::open(path)?;
+    let mut magic = [0; 2];
+    Ok(file.read(&mut magic)? == magic.len() && magic == [0x1f, 0x8b])
 }
 
 fn collect_records<R: BufRead>(
@@ -215,6 +217,8 @@ mod tests {
     use archivindex_warc::io::write::WarcWriter;
     use archivindex_warc::record::Record;
     use chrono::Utc;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use serde_json::json;
 
     use super::{CommentConflict, read_comments};
@@ -287,6 +291,30 @@ mod tests {
                 },
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn compression_is_detected_from_content_not_the_extension()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (directory, path) = fixture(&[(
+            "https://example.com/wp-json/wp/v2/comments",
+            "200 OK",
+            r#"[{"id":1}]"#,
+        )])?;
+
+        let gzip_path = directory.path().join("comments.data");
+        let mut encoder =
+            GzEncoder::new(std::fs::File::create(&gzip_path)?, Compression::default());
+        std::io::copy(&mut std::fs::File::open(&path)?, &mut encoder)?;
+        encoder.finish()?;
+
+        let plain_gz_path = directory.path().join("comments.warc.gz");
+        std::fs::copy(&path, &plain_gz_path)?;
+
+        assert_eq!(read_comments(gzip_path)?.comments, [json!({"id": 1})]);
+        assert_eq!(read_comments(plain_gz_path)?.comments, [json!({"id": 1})]);
 
         Ok(())
     }
