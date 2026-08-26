@@ -11,6 +11,10 @@ readme.workspace = true
 license.workspace = true
 version.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 ## `bounded_static` implementations for borrowed CDX models.
 bounded-static = ["dep:bounded-static"]

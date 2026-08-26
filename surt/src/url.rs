@@ -328,6 +328,7 @@ impl fmt::Display for Url<'_> {
 /// Borrows the URI's text; unlike [`crate::Surt`], this type does not canonicalize, so the
 /// result is the same URL, only indexed.
 #[cfg(feature = "fluent-uri")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fluent-uri")))]
 impl<'a> TryFrom<&'a fluent_uri::Uri<String>> for Url<'a> {
     type Error = Error;
 
@@ -338,6 +339,7 @@ impl<'a> TryFrom<&'a fluent_uri::Uri<String>> for Url<'a> {
 
 /// See the implementation for [`fluent_uri::Uri<String>`].
 #[cfg(feature = "fluent-uri")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fluent-uri")))]
 impl<'a> TryFrom<fluent_uri::Uri<&'a str>> for Url<'a> {
     type Error = Error;
 
@@ -349,6 +351,7 @@ impl<'a> TryFrom<fluent_uri::Uri<&'a str>> for Url<'a> {
 /// Fails when the URL is not a URI: escape normalization leaves characters like `{` or `|` that
 /// RFC 3986 does not allow, and a URL that was never canonicalized may contain anything.
 #[cfg(feature = "fluent-uri")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fluent-uri")))]
 impl TryFrom<&Url<'_>> for fluent_uri::Uri<String> {
     type Error = fluent_uri::ParseError;
 
@@ -360,6 +363,7 @@ impl TryFrom<&Url<'_>> for fluent_uri::Uri<String> {
 
 /// Borrows the URL's text, which the WHATWG parser has already normalized in its own way.
 #[cfg(feature = "url")]
+#[cfg_attr(docsrs, doc(cfg(feature = "url")))]
 impl<'a> TryFrom<&'a ::url::Url> for Url<'a> {
     type Error = Error;
 
@@ -371,6 +375,7 @@ impl<'a> TryFrom<&'a ::url::Url> for Url<'a> {
 /// Re-parses under the WHATWG rules, which are more forgiving than the ones here, but which also
 /// re-encode: the result may not be the same text.
 #[cfg(feature = "url")]
+#[cfg_attr(docsrs, doc(cfg(feature = "url")))]
 impl TryFrom<&Url<'_>> for ::url::Url {
     type Error = ::url::ParseError;
 

@@ -30,10 +30,11 @@
 //! [heritrix]: http://crawler.archive.org/articles/user_manual/glossary.html#surt
 //! [ssurt]: https://github.com/iipc/urlcanon/blob/master/ssurt.rst
 
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
-#![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod canonicalize;
 mod escape;
@@ -244,6 +245,7 @@ impl<'a> Surt<'a> {
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
     #[cfg(feature = "fluent-uri")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "fluent-uri")))]
     pub fn to_uri(&self, scheme: &str) -> Result<fluent_uri::Uri<String>, fluent_uri::ParseError> {
         // The owned parse returns the input alongside the error, which the caller still holds.
         fluent_uri::Uri::parse(self.url(scheme).to_string()).map_err(|(error, _)| error)
@@ -260,6 +262,7 @@ impl<'a> Surt<'a> {
     /// Fails when the canonical URL is not a URL, which for a well-formed key means a host the
     /// WHATWG parser rejects.
     #[cfg(feature = "url")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "url")))]
     pub fn to_url(&self, scheme: &str) -> Result<::url::Url, ::url::ParseError> {
         ::url::Url::parse(&self.url(scheme).to_string())
     }
@@ -303,6 +306,7 @@ impl AsRef<str> for Surt<'_> {
 /// Canonicalizes with the Wayback Machine's rules, as [`Surt::from_url`] does; another convention
 /// is applied by passing [`Uri::as_str`](fluent_uri::Uri::as_str) to [`url::Canonicalizer::surt`].
 #[cfg(feature = "fluent-uri")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fluent-uri")))]
 impl TryFrom<&fluent_uri::Uri<String>> for Surt<'static> {
     type Error = url::Error;
 
@@ -313,6 +317,7 @@ impl TryFrom<&fluent_uri::Uri<String>> for Surt<'static> {
 
 /// See the implementation for [`fluent_uri::Uri<String>`].
 #[cfg(feature = "fluent-uri")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fluent-uri")))]
 impl TryFrom<fluent_uri::Uri<&str>> for Surt<'static> {
     type Error = url::Error;
 
@@ -324,6 +329,7 @@ impl TryFrom<fluent_uri::Uri<&str>> for Surt<'static> {
 /// Canonicalizes with the Wayback Machine's rules, as [`Surt::from_url`] does. The URL has already
 /// been through the WHATWG parser, which normalizes some of the same things in its own way.
 #[cfg(feature = "url")]
+#[cfg_attr(docsrs, doc(cfg(feature = "url")))]
 impl TryFrom<&::url::Url> for Surt<'static> {
     type Error = url::Error;
 
@@ -333,6 +339,7 @@ impl TryFrom<&::url::Url> for Surt<'static> {
 }
 
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 impl serde::Serialize for Surt<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.key)
@@ -340,6 +347,7 @@ impl serde::Serialize for Surt<'_> {
 }
 
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 impl<'de: 'a, 'a> serde::Deserialize<'de> for Surt<'a> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct SurtVisitor;
@@ -378,6 +386,7 @@ impl<'de: 'a, 'a> serde::Deserialize<'de> for Surt<'a> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Surt<'_> {
     type Static = Surt<'static>;
 
@@ -387,6 +396,7 @@ impl bounded_static::ToBoundedStatic for Surt<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Surt<'_> {
     type Static = Surt<'static>;
 

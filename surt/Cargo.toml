@@ -11,6 +11,10 @@ readme.workspace = true
 license.workspace = true
 version.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["bounded-static", "fluent-uri", "serde"]
 ## Borrowing `serde::Deserialize` and `serde::Serialize` implementations for `Surt`.

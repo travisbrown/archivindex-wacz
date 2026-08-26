@@ -1,8 +1,9 @@
 //! A command-line front end for capturing and reading `WordPress` REST API resources.
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
-#![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::cell::RefCell;
 use std::io::Write;

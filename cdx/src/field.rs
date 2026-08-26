@@ -141,6 +141,7 @@ impl fmt::Display for Field<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Field<'_> {
     type Static = Field<'static>;
 
@@ -150,6 +151,7 @@ impl bounded_static::ToBoundedStatic for Field<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Field<'_> {
     type Static = Field<'static>;
 

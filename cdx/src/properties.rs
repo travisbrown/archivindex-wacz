@@ -57,6 +57,7 @@ impl std::ops::DerefMut for ExtraProperties {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for ExtraProperties {
     type Static = Self;
 
@@ -66,6 +67,7 @@ impl bounded_static::ToBoundedStatic for ExtraProperties {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for ExtraProperties {
     type Static = Self;
 

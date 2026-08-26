@@ -11,6 +11,10 @@ readme.workspace = true
 license.workspace = true
 version.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 archivindex-cdx = { workspace = true, features = ["bounded-static"] }
 archivindex-surt.workspace = true

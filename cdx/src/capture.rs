@@ -109,6 +109,7 @@ impl Location<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Capture<'_> {
     type Static = Capture<'static>;
 
@@ -118,6 +119,7 @@ impl bounded_static::ToBoundedStatic for Capture<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Capture<'_> {
     type Static = Capture<'static>;
 
@@ -127,6 +129,7 @@ impl bounded_static::IntoBoundedStatic for Capture<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Location<'_> {
     type Static = Location<'static>;
 
@@ -136,6 +139,7 @@ impl bounded_static::ToBoundedStatic for Location<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Location<'_> {
     type Static = Location<'static>;
 

@@ -263,6 +263,7 @@ fn own_row(values: Vec<Cow<'_, str>>) -> Vec<Cow<'static, str>> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Document<'_> {
     type Static = Document<'static>;
 
@@ -272,6 +273,7 @@ impl bounded_static::ToBoundedStatic for Document<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Document<'_> {
     type Static = Document<'static>;
 
@@ -281,6 +283,7 @@ impl bounded_static::IntoBoundedStatic for Document<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for CaptureList<'_> {
     type Static = CaptureList<'static>;
 
@@ -290,6 +293,7 @@ impl bounded_static::ToBoundedStatic for CaptureList<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for CaptureList<'_> {
     type Static = CaptureList<'static>;
 

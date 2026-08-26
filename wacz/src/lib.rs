@@ -13,10 +13,11 @@
 //! - [`pages`]: The `pages/pages.jsonl` page list format
 //! - [`io::read`]: Reading the files in an existing WACZ
 //! - [`io::write`]: Assembling a new WACZ file
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 #![allow(clippy::missing_errors_doc)]
-#![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod attributes;
 pub mod cdxj;

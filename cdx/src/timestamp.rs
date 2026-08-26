@@ -142,6 +142,7 @@ impl<'de> serde::Deserialize<'de> for Timestamp {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Timestamp {
     type Static = Self;
 
@@ -151,6 +152,7 @@ impl bounded_static::ToBoundedStatic for Timestamp {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Timestamp {
     type Static = Self;
 

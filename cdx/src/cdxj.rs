@@ -362,6 +362,7 @@ fn owned(value: Cow<'_, str>) -> Cow<'static, str> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Fields<'_> {
     type Static = Fields<'static>;
 
@@ -371,6 +372,7 @@ impl bounded_static::ToBoundedStatic for Fields<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Fields<'_> {
     type Static = Fields<'static>;
 
@@ -380,6 +382,7 @@ impl bounded_static::IntoBoundedStatic for Fields<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for ConformingFields<'_> {
     type Static = ConformingFields<'static>;
 
@@ -389,6 +392,7 @@ impl bounded_static::ToBoundedStatic for ConformingFields<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for ConformingFields<'_> {
     type Static = ConformingFields<'static>;
 
@@ -398,6 +402,7 @@ impl bounded_static::IntoBoundedStatic for ConformingFields<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Item<'_> {
     type Static = Item<'static>;
 
@@ -407,6 +412,7 @@ impl bounded_static::ToBoundedStatic for Item<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Item<'_> {
     type Static = Item<'static>;
 
@@ -416,6 +422,7 @@ impl bounded_static::IntoBoundedStatic for Item<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for ConformingItem<'_> {
     type Static = ConformingItem<'static>;
 
@@ -429,6 +436,7 @@ impl bounded_static::ToBoundedStatic for ConformingItem<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for ConformingItem<'_> {
     type Static = ConformingItem<'static>;
 

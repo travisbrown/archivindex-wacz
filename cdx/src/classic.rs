@@ -198,6 +198,7 @@ impl<'a> Header<'a> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Header<'_> {
     type Static = Header<'static>;
 
@@ -207,6 +208,7 @@ impl bounded_static::ToBoundedStatic for Header<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Header<'_> {
     type Static = Header<'static>;
 
@@ -216,6 +218,7 @@ impl bounded_static::IntoBoundedStatic for Header<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::ToBoundedStatic for Record<'_> {
     type Static = Record<'static>;
 
@@ -225,6 +228,7 @@ impl bounded_static::ToBoundedStatic for Record<'_> {
 }
 
 #[cfg(feature = "bounded-static")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bounded-static")))]
 impl bounded_static::IntoBoundedStatic for Record<'_> {
     type Static = Record<'static>;
 
