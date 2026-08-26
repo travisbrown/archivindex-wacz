@@ -21,11 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
 
   build:
     name: Build, test, lint, and document
@@ -58,6 +58,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check archivindex-surt and archivindex-wacz in isolation
         run: cargo check --locked -p archivindex-surt -p archivindex-wacz
+      - name: Test archivindex-surt without default features
+        run: cargo test --locked -p archivindex-surt --no-default-features
+
+  package:
+    name: Package the publishable crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Verification is skipped because it resolves the workspace's own packages against the
+      # registry, which has not seen them yet.
+      - name: Package the crates whose dependencies are published
+        run: cargo package --locked --no-verify -p archivindex-cdx -p archivindex-surt
+      # These depend on the WARC library from its repository, and a package cannot be prepared
+      # until that dependency is on the registry; until then only their contents are checked.
+      - name: Inspect the contents of the crates that depend on unpublished packages
+        run: >-
+          cargo package --locked --list
+          -p archivindex-wacz -p archivindex-packager -p archivindex-wordpress
+
+  deny:
+    name: Check the dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - name: Check the workspace
+        run: cargo deny --workspace check
 
   platforms:
     name: Test on ${{ matrix.os }}
@@ -74,19 +104,14 @@ jobs:
         run: cargo test --locked --workspace --all-features
 
   msrv:
-    name: MSRV and package contents
+    name: Rust 1.97 compatibility
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
-      - name: Build at the declared MSRV
-        run: cargo check --locked --workspace --all-features
-      - name: Inspect publishable package contents
-        run: |
-          cargo package --allow-dirty --list -p archivindex-surt
-          cargo package --allow-dirty --list -p archivindex-wacz
-          cargo package --allow-dirty --list -p archivindex-packager
+      - name: Check workspace
+        run: cargo check --locked --workspace --all-targets --all-features
 
   coverage:
     name: Coverage
