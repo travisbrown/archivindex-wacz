@@ -76,6 +76,27 @@ order. Conflicting captures of the same comment are reported through the warning
 cargo run --bin archivindex-wordpress -- read-comments comments.warc > comments.jsonl
 ```
 
+The `check-comments` command verifies that the WARC has an HTTP 200 response record inferred as
+`application/json` for every page from one through the greatest valid `X-WP-TotalPages` value it
+contains. It accepts plain or gzip-compressed WARCs and exits with status 1 when coverage is
+incomplete. A changing `X-WP-TotalPages` value is also reported with the signed differences between
+successive values and produces status 1:
+
+```bash
+cargo run --bin archivindex-wordpress -- check-comments comments.warc.gz
+```
+
+The `complete-comments` command requests only the missing pages, preserving the source archive's
+paging URL byte-for-byte except for the decimal `page` value. It writes the new request and
+response records to a separate WARC whose first record is the source WARC's original `warcinfo`.
+The output uses the source archive's compression and is never overwritten:
+
+```bash
+cargo run --bin archivindex-wordpress -- complete-comments \
+  comments.warc.gz comments-completion.warc.gz \
+  --config comments.toml
+```
+
 ### WACZ packaging
 
 The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A

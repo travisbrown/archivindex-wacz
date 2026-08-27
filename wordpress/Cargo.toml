@@ -24,11 +24,11 @@ archivindex-warc = { workspace = true, features = ["gzip", "http"] }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true
 proptest.workspace = true
-tempfile.workspace = true
 test-strategy.workspace = true

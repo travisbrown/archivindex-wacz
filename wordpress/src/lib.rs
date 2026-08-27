@@ -2,13 +2,15 @@
 //!
 //! [`CommentCaptureProcessor`] archives a site's paginated comments collection through an
 //! `archivindex-archiver` crawl session. The [`read`] module reads comments from the resulting
-//! WARC file.
+//! WARC file and checks its page coverage.
 //!
 //! # Modules
 //!
-//! * [`read`]: reading archived comments back out of WARC files
+//! * [`complete`]: capturing pages missing from an archived comment collection
+//! * [`read`]: reading archived comments and checking page coverage
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod complete;
 pub mod read;
 
 #[cfg(test)]

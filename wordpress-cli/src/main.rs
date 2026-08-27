@@ -12,7 +12,8 @@ use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Session};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
-use archivindex_wordpress::read::read_comments;
+use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments};
+use archivindex_wordpress::read::{CommentCompleteness, check_comment_completeness, read_comments};
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -28,8 +29,10 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
     let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
-        Command::ArchiveComments(options) => archive_comments(options, quiet),
-        Command::ReadComments(options) => read_wp_comments(options),
+        Command::Archive(options) => archive_comments(options, quiet),
+        Command::Check(options) => check_wp_comments(&options, quiet),
+        Command::Complete(options) => complete_wp_comments(&options, quiet),
+        Command::Read(options) => read_wp_comments(options),
     }
 }
 
@@ -209,6 +212,156 @@ fn read_wp_comments(options: ReadCommentsOptions) -> Result<CommandOutcome, Erro
     ))
 }
 
+/// Check that every page advertised in a comments WARC has a qualifying response record.
+fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let coverage = check_comment_completeness(&options.warc)?;
+    let complete = coverage.is_complete();
+    let total_changed = coverage.advertised_total_changed();
+
+    if let Some(warning) = page_total_change_warning(&coverage) {
+        log::warn!("{warning}");
+    }
+
+    if complete {
+        if !quiet {
+            println!(
+                "{} is complete: all {} advertised comment pages were captured",
+                options.warc.display(),
+                coverage
+                    .total_pages
+                    .expect("complete coverage has an advertised page count")
+            );
+        }
+    } else {
+        match coverage.total_pages {
+            None => log::warn!(
+                "{} has no qualifying response with a valid X-WP-TotalPages header",
+                options.warc.display()
+            ),
+            Some(total_pages) => {
+                let missing_count = coverage
+                    .missing_page_count()
+                    .expect("an advertised page count has a missing-page count");
+                let mut missing = coverage.missing_pages();
+                let shown = missing.by_ref().take(20).collect::<Vec<_>>();
+                let suffix = (missing_count > shown.len())
+                    .then(|| format!(" (and {} more)", missing_count - shown.len()));
+                log::warn!(
+                    "{} is missing qualifying responses for {} of {} advertised pages: {}{}",
+                    options.warc.display(),
+                    missing_count,
+                    total_pages,
+                    shown
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    suffix.as_deref().unwrap_or("")
+                );
+            }
+        }
+
+        if !quiet {
+            println!("{} is incomplete", options.warc.display());
+        }
+    }
+
+    Ok(CommandOutcome::from_reported_problems(
+        !complete || total_changed,
+    ))
+}
+
+/// Capture exactly the comment pages missing from an existing WARC.
+fn complete_wp_comments(
+    options: &CompleteCommentsOptions,
+    quiet: bool,
+) -> Result<CommandOutcome, Error> {
+    let config = load_config(options.config.as_deref())?;
+    let archiver = Archiver::new(config)?;
+    let progress = message_spinner("Completing comments");
+    let summary = complete_comments(&archiver, &options.input, &options.output)?;
+    progress.finish_and_clear();
+
+    report_completion_problems(&summary);
+    if !quiet {
+        if summary.missing_pages.is_empty() {
+            println!(
+                "{} was already complete; wrote its warcinfo record to {}",
+                options.input.display(),
+                options.output.display()
+            );
+        } else {
+            println!(
+                "Captured {} of {} missing comment pages to {}",
+                summary.missing_pages.len() - summary.uncaptured_pages.len(),
+                summary.missing_pages.len(),
+                options.output.display()
+            );
+        }
+    }
+
+    Ok(CommandOutcome::from_reported_problems(
+        !summary.is_complete(),
+    ))
+}
+
+fn report_completion_problems(summary: &CommentCompletionSummary) {
+    if let Some(archive) = &summary.archive {
+        for failure in &archive.failures {
+            log::warn!("Failed to capture {}: {}", failure.url, failure.error);
+        }
+        if archive.cancelled {
+            log::warn!("comment completion was cancelled before every request was made");
+        }
+        let partial = archive.partial_captures();
+        if partial > 0 {
+            log::warn!("{partial} comment page captures were unexpectedly truncated");
+        }
+    }
+    if !summary.uncaptured_pages.is_empty() {
+        log::warn!(
+            "no qualifying response was captured for comment pages {}",
+            summary
+                .uncaptured_pages
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
+/// Describe the signed difference at every transition between advertised totals.
+fn page_total_change_warning(coverage: &CommentCompleteness) -> Option<String> {
+    if !coverage.advertised_total_changed() {
+        return None;
+    }
+
+    let totals = coverage
+        .advertised_page_totals
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let differences = coverage
+        .advertised_page_totals
+        .windows(2)
+        .map(|pair| {
+            if pair[1] >= pair[0] {
+                format!("+{}", pair[1] - pair[0])
+            } else {
+                format!("-{}", pair[0] - pair[1])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Some(format!(
+        "X-WP-TotalPages changed over the WARC session ({totals}); successive differences: \
+         {differences}"
+    ))
+}
+
 fn message_spinner(message: &'static str) -> ProgressBar {
     let progress = ProgressBar::new_spinner();
     progress.set_style(
@@ -258,6 +411,8 @@ enum Error {
     SessionId(#[from] archivindex_archiver::session::SessionIdError),
     #[error("WordPress comment reading error: {0}")]
     ReadComments(#[from] archivindex_wordpress::read::Error),
+    #[error("WordPress comment completion error: {0}")]
+    CompleteComments(#[from] archivindex_wordpress::complete::Error),
     #[error("JSON writing error: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -278,9 +433,17 @@ struct Opts {
 #[allow(clippy::large_enum_variant)]
 enum Command {
     /// Archive comments iteratively through a site's `WordPress` REST API v2 endpoint.
-    ArchiveComments(ArchiveCommentsOptions),
+    #[clap(name = "archive-comments")]
+    Archive(ArchiveCommentsOptions),
+    /// Check that every advertised comments page has a successful JSON response record.
+    #[clap(name = "check-comments")]
+    Check(CheckCommentsOptions),
+    /// Capture pages missing from a comments WARC into a new WARC.
+    #[clap(name = "complete-comments")]
+    Complete(CompleteCommentsOptions),
     /// Read comments captured from the `WordPress` REST API in a WARC file.
-    ReadComments(ReadCommentsOptions),
+    #[clap(name = "read-comments")]
+    Read(ReadCommentsOptions),
 }
 
 /// Options for archiving comments from the `WordPress` REST API.
@@ -326,15 +489,36 @@ struct ReadCommentsOptions {
     warc: PathBuf,
 }
 
+/// Options for checking comments page coverage in a WARC file.
+#[derive(Debug, clap::Args)]
+struct CheckCommentsOptions {
+    /// Path of the plain or gzip-compressed WARC file to check.
+    warc: PathBuf,
+}
+
+/// Options for capturing pages missing from a comments WARC.
+#[derive(Debug, clap::Args)]
+struct CompleteCommentsOptions {
+    /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
+    /// optional and takes its default when absent.
+    #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    config: Option<PathBuf>,
+    /// Path of the plain or gzip-compressed WARC file to inspect.
+    input: PathBuf,
+    /// Path of the completion WARC to write (an existing file is not overwritten).
+    output: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use archivindex_archiver::Config;
+    use archivindex_wordpress::read::CommentCompleteness;
     use clap::{CommandFactory, Parser};
 
-    use super::{Command, ConfigFormat, Opts, load_config};
+    use super::{Command, ConfigFormat, Opts, load_config, page_total_change_warning};
 
     #[test]
     fn archive_command_reads_workflow_and_config_options() {
@@ -362,7 +546,7 @@ mod tests {
         ])
         .expect("valid options");
 
-        let Command::ArchiveComments(options) = options.command else {
+        let Command::Archive(options) = options.command else {
             panic!("expected the archiving command");
         };
 
@@ -467,10 +651,64 @@ mod tests {
             Opts::try_parse_from(["archivindex-wordpress", "read-comments", "comments.warc.gz"])
                 .expect("valid options");
 
-        let Command::ReadComments(options) = options.command else {
+        let Command::Read(options) = options.command else {
             panic!("expected the reading command");
         };
 
         assert_eq!(options.warc, PathBuf::from("comments.warc.gz"));
+    }
+
+    #[test]
+    fn check_command_takes_a_warc_path() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "check-comments",
+            "comments.warc.gz",
+        ])
+        .expect("valid options");
+
+        let Command::Check(options) = options.command else {
+            panic!("expected the checking command");
+        };
+
+        assert_eq!(options.warc, PathBuf::from("comments.warc.gz"));
+    }
+
+    #[test]
+    fn complete_command_takes_input_and_output_warc_paths() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "complete-comments",
+            "comments.warc.gz",
+            "completion.warc.gz",
+            "--config",
+            "capture.toml",
+        ])
+        .expect("valid options");
+
+        let Command::Complete(options) = options.command else {
+            panic!("expected the completion command");
+        };
+
+        assert_eq!(options.input, PathBuf::from("comments.warc.gz"));
+        assert_eq!(options.output, PathBuf::from("completion.warc.gz"));
+        assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
+    }
+
+    #[test]
+    fn changed_page_totals_report_successive_differences() {
+        let coverage = CommentCompleteness {
+            total_pages: Some(4),
+            advertised_page_totals: vec![2, 4, 3],
+            captured_pages: vec![1, 2, 3],
+        };
+
+        assert_eq!(
+            page_total_change_warning(&coverage).as_deref(),
+            Some(
+                "X-WP-TotalPages changed over the WARC session (2 -> 4 -> 3); successive \
+                 differences: +2, -1"
+            )
+        );
     }
 }

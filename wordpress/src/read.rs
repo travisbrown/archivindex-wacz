@@ -1,6 +1,6 @@
 //! Reading comments captured from the `WordPress` REST API v2 from WARC files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Read};
 use std::path::Path;
 
@@ -31,6 +31,63 @@ pub struct CommentConflict {
     pub first: Value,
     /// The object encountered later in the archive.
     pub second: Value,
+}
+
+/// Coverage of the page range advertised by archived `WordPress` comments responses.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CommentCompleteness {
+    /// Greatest valid `X-WP-TotalPages` value on a qualifying response, when any was found.
+    pub total_pages: Option<usize>,
+    /// Valid advertised totals in encounter order, retaining each transition but not repetitions.
+    pub advertised_page_totals: Vec<usize>,
+    /// Distinct page numbers with a qualifying response, in ascending order.
+    pub captured_pages: Vec<usize>,
+}
+
+impl CommentCompleteness {
+    /// Whether every page from one through [`total_pages`](Self::total_pages) was captured.
+    ///
+    /// An archive with no valid `X-WP-TotalPages` value is incomplete. A reported total of zero
+    /// describes an empty range and is complete because the response carrying it was captured.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.total_pages.is_some_and(|total_pages| {
+            let required = self
+                .captured_pages
+                .partition_point(|page| *page <= total_pages);
+
+            required == total_pages
+                && self.captured_pages[..required]
+                    .iter()
+                    .copied()
+                    .eq(1..=total_pages)
+        })
+    }
+
+    /// Whether `X-WP-TotalPages` changed between qualifying responses.
+    #[must_use]
+    pub fn advertised_total_changed(&self) -> bool {
+        self.advertised_page_totals
+            .windows(2)
+            .any(|pair| pair[0] != pair[1])
+    }
+
+    /// Page numbers in the advertised range for which no qualifying response was found.
+    pub fn missing_pages(&self) -> impl Iterator<Item = usize> + '_ {
+        (1..=self.total_pages.unwrap_or(0))
+            .filter(|page| self.captured_pages.binary_search(page).is_err())
+    }
+
+    /// Number of pages in the advertised range without a qualifying response.
+    #[must_use]
+    pub fn missing_page_count(&self) -> Option<usize> {
+        self.total_pages.map(|total_pages| {
+            let captured = self
+                .captured_pages
+                .partition_point(|page| *page <= total_pages);
+            total_pages - captured
+        })
+    }
 }
 
 /// An error produced while reading archived `WordPress` comments.
@@ -104,7 +161,33 @@ pub fn read_comments(path: impl AsRef<Path>) -> Result<CommentReadResult, Error>
     Ok(comments.finish())
 }
 
-fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {
+/// Check coverage of the page range advertised by a plain or gzip-compressed comments WARC.
+///
+/// A page is captured when a `response` record targets the `WordPress` REST API v2 comments
+/// endpoint, its HTTP status is 200, its `WARC-Identified-Payload-Type` is `application/json`, and
+/// its target URI has that page number (or omits `page`, which means page one). The greatest valid
+/// `X-WP-TotalPages` value on such a response determines the required range. Every transition in
+/// that value is retained so callers can warn about pagination changes. Duplicate captures satisfy
+/// the page only once. An archive without a valid advertised total is incomplete.
+pub fn check_comment_completeness(path: impl AsRef<Path>) -> Result<CommentCompleteness, Error> {
+    let path = path.as_ref();
+    let display_path = path.display().to_string();
+    let mut coverage = CoverageCollector::default();
+
+    if is_gzip_file(path)? {
+        collect_coverage(
+            WarcReader::from_path_gzip(path)?,
+            &display_path,
+            &mut coverage,
+        )?;
+    } else {
+        collect_coverage(WarcReader::from_path(path)?, &display_path, &mut coverage)?;
+    }
+
+    Ok(coverage.finish())
+}
+
+pub(crate) fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {
     let mut file = std::fs::File::open(path)?;
     let mut magic = [0; 2];
     Ok(file.read(&mut magic)? == magic.len() && magic == [0x1f, 0x8b])
@@ -152,12 +235,97 @@ fn collect_records<R: BufRead>(
     Ok(())
 }
 
+fn collect_coverage<R: BufRead>(
+    reader: WarcReader<R>,
+    path: &str,
+    coverage: &mut CoverageCollector,
+) -> Result<(), Error> {
+    for record in reader.iter_records::<NoExtension>() {
+        let record = record.map_err(|source| Error::Warc {
+            path: path.to_owned(),
+            source,
+        })?;
+
+        let Record::Response { header, body } = record else {
+            continue;
+        };
+        let url = header.target_uri.as_str();
+        if !is_comment_endpoint(url)
+            || !header
+                .payload
+                .identified_payload_type
+                .as_ref()
+                .is_some_and(|media_type| media_type.is("application", "json"))
+        {
+            continue;
+        }
+
+        let Some(response) = archivindex_warc::record::http::ResponseMetadata::parse(&body) else {
+            continue;
+        };
+        if response.status != 200 {
+            continue;
+        }
+
+        if let Some(page) = comment_page(url) {
+            coverage.pages.insert(page);
+        }
+        if let Some(total_pages) = response
+            .header("x-wp-totalpages")
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.trim().parse::<usize>().ok())
+        {
+            if coverage.advertised_page_totals.last() != Some(&total_pages) {
+                coverage.advertised_page_totals.push(total_pages);
+            }
+            coverage.total_pages = Some(
+                coverage
+                    .total_pages
+                    .map_or(total_pages, |previous| previous.max(total_pages)),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Whether a captured URL targets the comments collection endpoint (with any query string).
-fn is_comment_endpoint(url: &str) -> bool {
+pub(crate) fn is_comment_endpoint(url: &str) -> bool {
     url.split_once('?')
         .map_or(url, |(path, _)| path)
         .trim_end_matches('/')
         .ends_with("/wp-json/wp/v2/comments")
+}
+
+/// The positive `page` query value, defaulting to the first page when it is absent.
+pub(crate) fn comment_page(url: &str) -> Option<usize> {
+    let url = url::Url::parse(url).ok()?;
+    let mut values = url
+        .query_pairs()
+        .filter_map(|(name, value)| (name == "page").then_some(value));
+    let page = match values.next() {
+        Some(value) => value.parse::<usize>().ok().filter(|page| *page > 0)?,
+        None => 1,
+    };
+
+    values.next().is_none().then_some(page)
+}
+
+#[derive(Default)]
+struct CoverageCollector {
+    total_pages: Option<usize>,
+    advertised_page_totals: Vec<usize>,
+    pages: BTreeSet<usize>,
+}
+
+impl CoverageCollector {
+    fn finish(self) -> CommentCompleteness {
+        CommentCompleteness {
+            total_pages: self.total_pages,
+            advertised_page_totals: self.advertised_page_totals,
+            captured_pages: self.pages.into_iter().collect(),
+        }
+    }
 }
 
 /// Comments grouped by ID while archive records are being traversed.
@@ -216,12 +384,13 @@ impl CommentCollector {
 mod tests {
     use archivindex_warc::io::write::WarcWriter;
     use archivindex_warc::record::Record;
+    use archivindex_warc::value::MediaType;
     use chrono::Utc;
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use serde_json::json;
 
-    use super::{CommentConflict, read_comments};
+    use super::{CommentConflict, check_comment_completeness, read_comments};
 
     /// Write response records into a WARC fixture and return its temporary directory.
     fn fixture(
@@ -243,6 +412,146 @@ mod tests {
         warc_writer.flush()?;
 
         Ok((directory, path))
+    }
+
+    /// Write response records with configurable inferred types and advertised page counts.
+    fn coverage_fixture(
+        responses: &[(&str, &str, Option<&str>, Option<&str>)],
+    ) -> Result<(tempfile::TempDir, std::path::PathBuf), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("comments.warc");
+        let mut warc_writer = WarcWriter::new(std::fs::File::create(&path)?);
+
+        for (url, status, inferred_type, total_pages) in responses {
+            let total_pages = total_pages
+                .map_or_else(String::new, |value| format!("x-wp-totalpages: {value}\r\n"));
+            let message = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{total_pages}\
+                 content-length: 2\r\n\r\n[]"
+            );
+            let mut builder = Record::response(url, Utc::now())?;
+            if let Some(inferred_type) = inferred_type {
+                builder =
+                    builder.identified_payload_type(MediaType::parse(inferred_type.as_bytes())?);
+            }
+            let record: Record = builder.body(message.into_bytes())?;
+            warc_writer.write(&record.into_raw()?)?;
+        }
+        warc_writer.flush()?;
+
+        Ok((directory, path))
+    }
+
+    #[test]
+    fn complete_archive_covers_every_advertised_page() -> Result<(), Box<dyn std::error::Error>> {
+        let (directory, path) = coverage_fixture(&[
+            (
+                "https://example.com/wp-json/wp/v2/comments?before=x",
+                "200 OK",
+                Some("application/json"),
+                Some("3"),
+            ),
+            (
+                "https://example.com/wp-json/wp/v2/comments?page=3",
+                "200 OK",
+                Some("application/json"),
+                Some("2"),
+            ),
+            (
+                "https://example.com/wp-json/wp/v2/comments?page=2",
+                "200 OK",
+                Some("application/json"),
+                Some("3"),
+            ),
+        ])?;
+
+        let coverage = check_comment_completeness(&path)?;
+
+        let gzip_path = directory.path().join("comments.warc.gz");
+        let mut encoder =
+            GzEncoder::new(std::fs::File::create(&gzip_path)?, Compression::default());
+        std::io::copy(&mut std::fs::File::open(path)?, &mut encoder)?;
+        encoder.finish()?;
+        let gzip_coverage = check_comment_completeness(gzip_path)?;
+
+        assert_eq!(coverage.total_pages, Some(3));
+        assert_eq!(coverage.advertised_page_totals, [3, 2, 3]);
+        assert_eq!(coverage.captured_pages, [1, 2, 3]);
+        assert_eq!(
+            coverage.missing_pages().collect::<Vec<_>>(),
+            Vec::<usize>::new()
+        );
+        assert_eq!(coverage.missing_page_count(), Some(0));
+        assert!(coverage.is_complete());
+        assert!(coverage.advertised_total_changed());
+        assert_eq!(gzip_coverage, coverage);
+
+        Ok(())
+    }
+
+    #[test]
+    fn only_200_json_inferred_comment_responses_cover_pages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path) = coverage_fixture(&[
+            (
+                "https://example.com/wp-json/wp/v2/comments?page=1",
+                "200 OK",
+                Some("application/json"),
+                Some("3"),
+            ),
+            (
+                "https://example.com/wp-json/wp/v2/comments?page=2",
+                "200 OK",
+                Some("text/plain"),
+                Some("3"),
+            ),
+            (
+                "https://example.com/wp-json/wp/v2/comments?page=3",
+                "204 No Content",
+                Some("application/json"),
+                Some("3"),
+            ),
+            (
+                "https://example.com/wp-json/wp/v2/posts?page=2",
+                "200 OK",
+                Some("application/json"),
+                Some("3"),
+            ),
+        ])?;
+
+        let coverage = check_comment_completeness(path)?;
+
+        assert_eq!(coverage.total_pages, Some(3));
+        assert_eq!(coverage.advertised_page_totals, [3]);
+        assert_eq!(coverage.captured_pages, [1]);
+        assert_eq!(coverage.missing_pages().collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(coverage.missing_page_count(), Some(2));
+        assert!(!coverage.is_complete());
+        assert!(!coverage.advertised_total_changed());
+
+        Ok(())
+    }
+
+    #[test]
+    fn archive_without_an_advertised_page_count_is_incomplete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path) = coverage_fixture(&[(
+            "https://example.com/wp-json/wp/v2/comments?page=1",
+            "200 OK",
+            Some("application/json"),
+            None,
+        )])?;
+
+        let coverage = check_comment_completeness(path)?;
+
+        assert_eq!(coverage.total_pages, None);
+        assert!(coverage.advertised_page_totals.is_empty());
+        assert_eq!(coverage.captured_pages, [1]);
+        assert_eq!(coverage.missing_page_count(), None);
+        assert!(!coverage.is_complete());
+        assert!(!coverage.advertised_total_changed());
+
+        Ok(())
     }
 
     #[test]
