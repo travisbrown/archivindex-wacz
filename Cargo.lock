@@ -255,9 +255,11 @@ version = "0.1.0"
 dependencies = [
  "archivindex-archiver",
  "archivindex-cli-support",
+ "archivindex-warc",
  "archivindex-wordpress",
  "chrono",
  "clap",
+ "flate2",
  "humantime",
  "indicatif",
  "log",

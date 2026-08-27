@@ -110,6 +110,18 @@ cargo run --bin archivindex-wordpress -- update-comments comments.warc.gz \
   --config comments.toml
 ```
 
+The input may instead be a directory. In that case every `.warc` or `.warc.gz` file directly in
+the directory is parsed independently, and its site is added to one update session in domain-name
+order. Each site's first page is a session seed and therefore has no metadata `via`; every later
+page points to the preceding page for that same site. Other files and nested directories are
+ignored:
+
+```bash
+cargo run --bin archivindex-wordpress -- update-comments historical-comments/ \
+  --output comments-update.warc.gz \
+  --session-name comments-update-2026-08-20
+```
+
 ### WACZ packaging
 
 The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A

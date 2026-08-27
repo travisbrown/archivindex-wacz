@@ -2,6 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,8 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments};
 use archivindex_wordpress::read::{
-    CommentCompleteness, check_comment_completeness, find_comment_update_anchor, read_comments,
+    CommentCompleteness, CommentUpdateAnchor, check_comment_completeness,
+    find_comment_update_anchor, read_comments,
 };
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
 use chrono::Utc;
@@ -54,9 +56,11 @@ fn archive_comments(
         processor = processor.resume_after(resume_after)?;
     }
     capture_comment_run(
-        processor,
+        vec![CommentRun {
+            base_url: options.base_url.clone(),
+            processor,
+        }],
         CommentRunOptions {
-            base_url: &options.base_url,
             config: options.config.as_deref(),
             cookie: options.cookie.as_deref(),
             output: &options.output,
@@ -71,34 +75,46 @@ fn archive_comments(
 
 /// Capture comments newer than an overlap before the last archived comment.
 fn update_comments(options: &UpdateCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let anchor = find_comment_update_anchor(&options.input)?;
+    let updates = comment_update_inputs(&options.input)?;
     let before = Utc::now();
     let overlap = chrono::Duration::from_std(options.overlap)
         .map_err(|_| Error::OverlapOutOfRange(options.overlap))?;
-    let after = anchor
-        .datetime
-        .checked_sub_signed(overlap)
-        .ok_or(Error::OverlapOutOfRange(options.overlap))?;
-    if after >= before {
-        return Err(Error::InvalidUpdateWindow { after, before });
-    }
-    log::info!(
-        "updating {} comments after {} and before {} (anchor from {})",
-        anchor.base_url,
-        after.to_rfc3339(),
-        before.to_rfc3339(),
-        if anchor.from_comment {
-            "latest comment"
-        } else {
-            "archived before cutoff"
-        }
-    );
-    let processor = CommentCaptureProcessor::for_window(&anchor.base_url, after, before)?;
+    let runs = updates
+        .into_iter()
+        .map(|update| {
+            let after = update
+                .anchor
+                .datetime
+                .checked_sub_signed(overlap)
+                .ok_or(Error::OverlapOutOfRange(options.overlap))?;
+            if after >= before {
+                return Err(Error::InvalidUpdateWindow { after, before });
+            }
+            log::info!(
+                "updating {} comments from {} after {} and before {} (anchor from {})",
+                update.anchor.base_url,
+                update.path.display(),
+                after.to_rfc3339(),
+                before.to_rfc3339(),
+                if update.anchor.from_comment {
+                    "latest comment"
+                } else {
+                    "archived before cutoff"
+                }
+            );
+            let processor =
+                CommentCaptureProcessor::for_window(&update.anchor.base_url, after, before)?;
+
+            Ok(CommentRun {
+                base_url: update.anchor.base_url,
+                processor,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
 
     capture_comment_run(
-        processor,
+        runs,
         CommentRunOptions {
-            base_url: &anchor.base_url,
             config: options.config.as_deref(),
             cookie: options.cookie.as_deref(),
             output: &options.output,
@@ -111,9 +127,94 @@ fn update_comments(options: &UpdateCommentsOptions, quiet: bool) -> Result<Comma
     )
 }
 
+struct CommentUpdateInput {
+    path: PathBuf,
+    anchor: CommentUpdateAnchor,
+}
+
+/// Read one update WARC, or every directly contained WARC when `input` is a directory.
+fn comment_update_inputs(input: &Path) -> Result<Vec<CommentUpdateInput>, Error> {
+    let metadata = std::fs::metadata(input).map_err(|source| Error::UpdateInputRead {
+        path: input.to_owned(),
+        source,
+    })?;
+    let mut paths = if metadata.is_dir() {
+        let mut paths = Vec::new();
+        let entries = std::fs::read_dir(input).map_err(|source| Error::UpdateInputRead {
+            path: input.to_owned(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::UpdateInputRead {
+                path: input.to_owned(),
+                source,
+            })?;
+            let file_type = entry.file_type().map_err(|source| Error::UpdateInputRead {
+                path: entry.path(),
+                source,
+            })?;
+            if file_type.is_file() && is_warc_file_name(&entry.file_name()) {
+                paths.push(entry.path());
+            }
+        }
+        if paths.is_empty() {
+            return Err(Error::NoUpdateWarcs(input.to_owned()));
+        }
+        paths
+    } else {
+        vec![input.to_owned()]
+    };
+    // Make the input order deterministic before the semantic domain sort below resolves it.
+    paths.sort();
+
+    let mut updates = paths
+        .into_iter()
+        .map(|path| {
+            let anchor =
+                find_comment_update_anchor(&path).map_err(|source| Error::UpdateAnchor {
+                    path: path.clone(),
+                    source: Box::new(source),
+                })?;
+            Ok(CommentUpdateInput { path, anchor })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    updates.sort_by(|left, right| {
+        update_domain(&left.anchor)
+            .cmp(&update_domain(&right.anchor))
+            .then_with(|| left.anchor.base_url.cmp(&right.anchor.base_url))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    Ok(updates)
+}
+
+fn is_warc_file_name(name: &OsStr) -> bool {
+    let path = Path::new(name);
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("warc"))
+        || (path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
+            && path
+                .file_stem()
+                .and_then(|stem| Path::new(stem).extension())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("warc")))
+}
+
+fn update_domain(anchor: &CommentUpdateAnchor) -> String {
+    url::Url::parse(&anchor.base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| anchor.base_url.to_ascii_lowercase())
+}
+
+struct CommentRun {
+    base_url: String,
+    processor: CommentCaptureProcessor,
+}
+
 #[derive(Clone, Copy)]
 struct CommentRunOptions<'a> {
-    base_url: &'a str,
     config: Option<&'a Path>,
     cookie: Option<&'a str>,
     output: &'a Path,
@@ -124,32 +225,58 @@ struct CommentRunOptions<'a> {
 }
 
 fn capture_comment_run(
-    processor: CommentCaptureProcessor,
+    runs: Vec<CommentRun>,
     options: CommentRunOptions<'_>,
     quiet: bool,
 ) -> Result<CommandOutcome, Error> {
-    let processor = processor.second_sweep(options.second_sweep);
-    let first_url = processor.first_comment_url();
-    let comment_progress = Rc::new(RefCell::new(None));
+    let mut first_urls = Vec::with_capacity(runs.len());
+    let mut seen_first_urls = HashSet::with_capacity(runs.len());
+    let mut scheduled = Vec::with_capacity(runs.len());
+    let base_urls = runs
+        .into_iter()
+        .map(|run| {
+            let processor = run.processor.second_sweep(options.second_sweep);
+            let first_url = processor.first_comment_url();
+            if !seen_first_urls.insert(first_url.clone()) {
+                return Err(Error::DuplicateUpdateUrl(first_url));
+            }
+            first_urls.push(first_url.clone());
+            scheduled.push(ScheduledCommentProcessor {
+                processor,
+                next_url: Some(first_url),
+            });
+
+            Ok(run.base_url)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let comment_progress = Rc::new(RefCell::new(CommentRunProgress {
+        base_urls: base_urls.clone(),
+        snapshots: vec![None; base_urls.len()],
+        latest: None,
+    }));
     let processor = ProgressingCommentProcessor {
-        processor,
+        scheduled,
         progress: Rc::clone(&comment_progress),
     };
     let config = load_config(options.config)?;
-    let archiver = match options.cookie {
-        Some(cookie) => Archiver::new(config)?.cookie_for(options.base_url, cookie)?,
-        None => Archiver::new(config)?,
-    };
+    let mut archiver = Archiver::new(config)?;
+    if let Some(cookie) = options.cookie {
+        for base_url in &base_urls {
+            archiver = archiver.cookie_for(base_url, cookie)?;
+        }
+    }
     let progress = message_spinner("Downloading comments");
     let event_progress = progress.clone();
     let event_comment_progress = Rc::clone(&comment_progress);
-    let mut session = Session::new(archiver, options.session_name, [first_url], options.output)?
+    // Every domain's page one is a seed, so it has no `via`. Pages each processor schedules are
+    // recaptures and therefore point back to that domain's preceding page.
+    let mut session = Session::new(archiver, options.session_name, first_urls, options.output)?
         .processor(processor)
         .events(move |event: CaptureEvent<'_>| {
             if matches!(event, CaptureEvent::Written { .. })
-                && let Some(snapshot) = *event_comment_progress.borrow()
+                && let Some(message) = event_comment_progress.borrow().latest_message()
             {
-                event_progress.set_message(snapshot.to_string());
+                event_progress.set_message(message);
             }
             CaptureControl::Continue
         });
@@ -171,19 +298,25 @@ fn capture_comment_run(
         log::warn!("The session ended early: {error}");
     }
 
-    if let Some(snapshot) = *comment_progress.borrow() {
-        if let Some(shortfall) = snapshot.visibility_shortfall() {
-            log::warn!(
-                "WordPress counted {} comments before visibility filtering but returned {} visible comments ({shortfall} omitted)",
-                snapshot.total,
-                snapshot.downloaded
+    for (base_url, snapshot) in comment_progress.borrow().iter() {
+        if let Some(snapshot) = snapshot {
+            if let Some(shortfall) = snapshot.visibility_shortfall() {
+                log::warn!(
+                    "WordPress counted {} comments for {} before visibility filtering but returned {} visible comments ({shortfall} omitted)",
+                    snapshot.total,
+                    base_url,
+                    snapshot.downloaded
+                );
+            }
+            if !quiet {
+                println!("{base_url}: {snapshot} to {}", options.output.display());
+            }
+        } else if !quiet {
+            println!(
+                "Downloaded no comments from {base_url} to {}",
+                options.output.display()
             );
         }
-        if !quiet {
-            println!("{snapshot} to {}", options.output.display());
-        }
-    } else if !quiet {
-        println!("Downloaded no comments to {}", options.output.display());
     }
 
     if summary.is_complete() {
@@ -250,14 +383,56 @@ impl ConfigFormat {
 }
 
 struct ProgressingCommentProcessor {
+    scheduled: Vec<ScheduledCommentProcessor>,
+    progress: Rc<RefCell<CommentRunProgress>>,
+}
+
+struct ScheduledCommentProcessor {
     processor: CommentCaptureProcessor,
-    progress: Rc<RefCell<Option<CommentProgress>>>,
+    next_url: Option<String>,
+}
+
+struct CommentRunProgress {
+    base_urls: Vec<String>,
+    snapshots: Vec<Option<CommentProgress>>,
+    latest: Option<usize>,
+}
+
+impl CommentRunProgress {
+    fn latest_message(&self) -> Option<String> {
+        let index = self.latest?;
+        Some(format!(
+            "{}: {}",
+            self.base_urls[index], self.snapshots[index]?
+        ))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, Option<CommentProgress>)> + '_ {
+        self.base_urls
+            .iter()
+            .map(String::as_str)
+            .zip(self.snapshots.iter().copied())
+    }
 }
 
 impl CaptureProcessor for ProgressingCommentProcessor {
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        let inspection = self.processor.inspect(capture);
-        *self.progress.borrow_mut() = self.processor.progress();
+        let Some(index) = self
+            .scheduled
+            .iter()
+            .position(|scheduled| scheduled.next_url.as_deref() == Some(capture.url))
+        else {
+            return Inspection::error(format!(
+                "captured an unscheduled WordPress comments URL: {}",
+                capture.url
+            ));
+        };
+        let scheduled = &mut self.scheduled[index];
+        let inspection = scheduled.processor.inspect(capture);
+        scheduled.next_url = inspection.recaptures.first().cloned();
+        let mut progress = self.progress.borrow_mut();
+        progress.snapshots[index] = scheduled.processor.progress();
+        progress.latest = Some(index);
         inspection
     }
 }
@@ -491,6 +666,22 @@ enum Error {
     ReadComments(#[from] archivindex_wordpress::read::Error),
     #[error("WordPress comment completion error: {0}")]
     CompleteComments(#[from] archivindex_wordpress::complete::Error),
+    #[error("cannot read comment update input {}: {source}", path.display())]
+    UpdateInputRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("comment update directory {} contains no direct .warc or .warc.gz files", .0.display())]
+    NoUpdateWarcs(PathBuf),
+    #[error("cannot derive a comment update from {}: {source}", path.display())]
+    UpdateAnchor {
+        path: PathBuf,
+        #[source]
+        source: Box<archivindex_wordpress::read::Error>,
+    },
+    #[error("more than one comment update produced the same first-page URL: {0}")]
+    DuplicateUpdateUrl(String),
     #[error("comment update overlap is out of range: {0:?}")]
     OverlapOutOfRange(Duration),
     #[error("comment update window starts at {after}, which is not before {before}")]
@@ -604,7 +795,7 @@ struct UpdateCommentsOptions {
     /// optional and takes its default when absent.
     #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     config: Option<PathBuf>,
-    /// Existing plain or gzip-compressed comments WARC used to choose the update window.
+    /// Existing comments WARC, or a directory whose direct .warc and .warc.gz files are updated.
     input: PathBuf,
     /// Path of the WARC file to write (an existing file is not overwritten).
     #[clap(long)]
@@ -624,7 +815,7 @@ struct UpdateCommentsOptions {
     /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
     #[clap(long)]
     second_sweep: bool,
-    /// Cookie header obtained from a browser, scoped to the archived site's host.
+    /// Cookie header obtained from a browser, scoped to every archived site's host.
     #[clap(long)]
     cookie: Option<String>,
 }
@@ -635,14 +826,103 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::thread;
     use std::time::Duration;
 
     use archivindex_archiver::Config;
+    use archivindex_warc::io::read::WarcReader;
+    use archivindex_warc::io::write::WarcWriter;
+    use archivindex_warc::record::extension::NoExtension;
+    use archivindex_warc::record::{FieldsBlock, Record};
+    use archivindex_wordpress::CommentCaptureProcessor;
     use archivindex_wordpress::read::CommentCompleteness;
+    use chrono::Utc;
     use clap::{CommandFactory, Parser};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
 
-    use super::{Command, ConfigFormat, Opts, load_config, page_total_change_warning};
+    use super::{
+        Command, CommentRun, CommentRunOptions, ConfigFormat, Error, Opts, capture_comment_run,
+        comment_update_inputs, load_config, page_total_change_warning,
+    };
+
+    fn write_update_warc(
+        path: &Path,
+        base_url: &str,
+        comment_datetime: &str,
+        gzip: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!("{base_url}wp-json/wp/v2/comments?before=2026-08-20T00:00:00Z&page=1");
+        let body = format!(r#"[{{"id":1,"date_gmt":"{comment_datetime}"}}]"#);
+        let message = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let record: Record = Record::response(&url, Utc::now())?.body(message.into_bytes())?;
+        let mut bytes = Vec::new();
+        let mut writer = WarcWriter::new(&mut bytes);
+        writer.write(&record.into_raw()?)?;
+        writer.flush()?;
+        if gzip {
+            let mut encoder = GzEncoder::new(std::fs::File::create(path)?, Compression::default());
+            encoder.write_all(&bytes)?;
+            encoder.finish()?;
+        } else {
+            std::fs::write(path, bytes)?;
+        }
+
+        Ok(())
+    }
+
+    fn serve_comment_pages() -> std::io::Result<(u16, thread::JoinHandle<Vec<String>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("a local test connection");
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).expect("a request read");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let head = String::from_utf8_lossy(&request);
+                let target = head
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("a request target")
+                    .to_owned();
+                let page = url::Url::parse(&format!("http://localhost{target}"))
+                    .expect("a request URL")
+                    .query_pairs()
+                    .find_map(|(name, value)| (name == "page").then(|| value.into_owned()))
+                    .expect("a page parameter");
+                let body = format!(r#"[{{"id":{page},"date_gmt":"2026-08-20T00:00:0{page}"}}]"#);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     x-wp-total: 2\r\nx-wp-totalpages: 2\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("a response write");
+                requests.push(target);
+            }
+            requests
+        });
+
+        Ok((port, server))
+    }
 
     #[test]
     fn archive_command_reads_workflow_and_config_options() {
@@ -861,6 +1141,135 @@ mod tests {
             panic!("expected the update command");
         };
         assert_eq!(options.overlap, Duration::from_hours(36));
+    }
+
+    #[test]
+    fn update_directory_reads_only_direct_warcs_in_domain_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested)?;
+        write_update_warc(
+            &directory.path().join("zeta.warc.gz"),
+            "https://zeta.example/",
+            "2026-08-18T00:00:00",
+            true,
+        )?;
+        write_update_warc(
+            &directory.path().join("alpha.warc"),
+            "https://alpha.example/blog/",
+            "2026-08-19T00:00:00",
+            false,
+        )?;
+        write_update_warc(
+            &directory.path().join("ignored.data"),
+            "https://ignored.example/",
+            "2026-08-19T00:00:00",
+            false,
+        )?;
+        write_update_warc(
+            &nested.join("nested.warc"),
+            "https://nested.example/",
+            "2026-08-19T00:00:00",
+            false,
+        )?;
+
+        let updates = comment_update_inputs(directory.path())?;
+
+        assert_eq!(
+            updates
+                .iter()
+                .map(|update| update.anchor.base_url.as_str())
+                .collect::<Vec<_>>(),
+            ["https://alpha.example/blog/", "https://zeta.example/"]
+        );
+        assert_eq!(
+            updates
+                .iter()
+                .filter_map(|update| update.path.file_name().and_then(|name| name.to_str()))
+                .collect::<Vec<_>>(),
+            ["alpha.warc", "zeta.warc.gz"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_directory_requires_a_direct_warc() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+
+        assert!(matches!(
+            comment_update_inputs(directory.path()),
+            Err(Error::NoUpdateWarcs(path)) if path == directory.path()
+        ));
+    }
+
+    #[test]
+    fn multi_domain_update_starts_each_via_chain_at_its_own_first_page()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first_port, first_server) = serve_comment_pages()?;
+        let (second_port, second_server) = serve_comment_pages()?;
+        let mut base_urls = [
+            format!("http://127.0.0.1:{first_port}/"),
+            format!("http://127.0.0.1:{second_port}/"),
+        ];
+        base_urls.sort();
+        let before =
+            chrono::DateTime::parse_from_rfc3339("2026-08-21T00:00:00Z")?.with_timezone(&Utc);
+        let after =
+            chrono::DateTime::parse_from_rfc3339("2026-08-19T00:00:00Z")?.with_timezone(&Utc);
+        let runs = base_urls
+            .iter()
+            .map(|base_url| {
+                Ok(CommentRun {
+                    base_url: base_url.clone(),
+                    processor: CommentCaptureProcessor::for_window(base_url, after, before)?,
+                })
+            })
+            .collect::<Result<Vec<_>, url::ParseError>>()?;
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("updates.warc");
+
+        let outcome = capture_comment_run(
+            runs,
+            CommentRunOptions {
+                config: None,
+                cookie: None,
+                output: &output,
+                session_name: "multi-domain-update",
+                revisit_index: None,
+                limit: None,
+                second_sweep: false,
+            },
+            true,
+        )?;
+        assert_eq!(outcome, archivindex_cli_support::CommandOutcome::Success);
+        first_server.join().expect("the first local server");
+        second_server.join().expect("the second local server");
+
+        let mut metadata = Vec::new();
+        for record in WarcReader::from_path(&output)?.iter_records::<NoExtension>() {
+            let Record::Metadata { header, body } = record? else {
+                continue;
+            };
+            let Some(target) = header.target_uri else {
+                continue;
+            };
+            let target = target.into_string();
+            let FieldsBlock::Fields(fields) = body else {
+                continue;
+            };
+            metadata.push((target, fields.via().map(str::to_owned)));
+        }
+        for base_url in base_urls {
+            let processor = CommentCaptureProcessor::for_window(&base_url, after, before)?;
+            let first = processor.first_comment_url();
+            let second = first.replace("&page=1&", "&page=2&");
+            assert!(metadata.contains(&(first.clone(), None)));
+            assert!(metadata.contains(&(second, Some(first))));
+        }
+
+        Ok(())
     }
 
     #[test]
