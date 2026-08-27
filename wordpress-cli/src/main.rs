@@ -203,6 +203,8 @@ enum Error {
     Cookie(#[from] archivindex_archiver::CookieError),
     #[error("archiving error: {0}")]
     Archive(#[from] archivindex_archiver::Error),
+    #[error("invalid archiver configuration: {0}")]
+    Config(#[from] archivindex_archiver::ConfigError),
     #[error(transparent)]
     UserAgent(#[from] archivindex_archiver::UserAgentError),
     #[error(transparent)]
@@ -331,6 +333,7 @@ impl ConfigOptions {
             concurrency: defaults.concurrency,
             max_response_length: self.max_response_length,
             gzip_warc: self.gzip,
+            ..defaults
         }
     }
 }

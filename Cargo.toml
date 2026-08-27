@@ -22,14 +22,14 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
-archivindex-archiver = { version = "0.1.0", git = "https://github.com/travisbrown/archivindex-warc" }
+archivindex-archiver = { version = "0.1.0", git = "https://github.com/travisbrown/archivindex-warc", branch = "archiver-config" }
 archivindex-cdx = { version = "0.1.0", path = "cdx" }
 archivindex-cli-support = { version = "0.1.0", path = "cli-support" }
 archivindex-surt = { version = "0.1.0", path = "surt" }
 archivindex-wacz = { version = "0.1.0", path = "wacz" }
 # Keep the shared declaration feature-free. Each consumer enables only the WARC capabilities it
 # uses, so lightweight readers do not inherit the archiver's HTTP and payload-identification stack.
-archivindex-warc = { version = "0.1.0", git = "https://github.com/travisbrown/archivindex-warc", default-features = false }
+archivindex-warc = { version = "0.1.0", git = "https://github.com/travisbrown/archivindex-warc", branch = "archiver-config", default-features = false }
 # Feature-free as well: the borrowing models opt into `derive`, and only WACZ needs `chrono`.
 bounded-static = "0.8"
 chrono = "0.4"

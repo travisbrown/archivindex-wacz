@@ -17,9 +17,8 @@ mod resource;
 mod warc;
 
 pub use index::IndexSpool;
-pub use warc::WarcSink;
-
 use resource::options_for;
+pub use warc::WarcSink;
 const DEFAULT_PAGE_ID_LENGTH: NonZeroUsize = NonZeroUsize::new(24).unwrap();
 const DEFAULT_ZIPNUM_LINES: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
 /// Least ZIP DEFLATE compression level supported by the enabled encoders.
