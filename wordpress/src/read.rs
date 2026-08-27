@@ -56,6 +56,15 @@ pub struct CommentCompleteness {
     pub captured_pages: Vec<usize>,
 }
 
+/// Page coverage for one archived `WordPress` comments endpoint.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CommentCollectionCompleteness {
+    /// Comments endpoint shared by the records in [`coverage`](Self::coverage), without a query.
+    pub endpoint: String,
+    /// Coverage computed only from records targeting [`endpoint`](Self::endpoint).
+    pub coverage: CommentCompleteness,
+}
+
 impl CommentCompleteness {
     /// Whether every page from one through [`total_pages`](Self::total_pages) was captured.
     ///
@@ -153,6 +162,9 @@ pub enum Error {
     /// No comment datetime or request `before` cutoff can anchor an update.
     #[error("comments WARC has no valid comment datetime or before cutoff")]
     MissingUpdateDatetime,
+    /// A caller requiring one collection was given an archive containing several.
+    #[error("comments WARC contains {0} WordPress comments endpoints; exactly one is required")]
+    MultipleCommentCollections(usize),
 }
 
 /// Read all comments captured in a plain or gzip-compressed WARC file.
@@ -227,11 +239,31 @@ pub fn find_comment_update_anchor(path: impl AsRef<Path>) -> Result<CommentUpdat
 /// `WARC-Identified-Payload-Type` set to `application/json`. The greatest valid
 /// `X-WP-TotalPages` value on a qualifying record determines the required range. Every transition
 /// in that value is retained so callers can warn about pagination changes. Duplicate captures
-/// satisfy the page only once. An archive without a valid advertised total is incomplete.
+/// satisfy the page only once. An archive without a valid advertised total is incomplete. This
+/// single-collection convenience function rejects a WARC containing several endpoints; use
+/// [`check_comment_collections`] for a multi-site archive.
 pub fn check_comment_completeness(path: impl AsRef<Path>) -> Result<CommentCompleteness, Error> {
+    let mut collections = check_comment_collections(path)?;
+    let count = collections.len();
+    match collections.as_mut_slice() {
+        [] => Ok(CommentCompleteness::default()),
+        [collection] => Ok(std::mem::take(&mut collection.coverage)),
+        _ => Err(Error::MultipleCommentCollections(count)),
+    }
+}
+
+/// Check page coverage independently for every comments endpoint in a WARC.
+///
+/// Collections are returned in domain-name order. Records for one site can never supply page
+/// coverage or advertised totals for another, which makes this suitable for archives written by a
+/// directory-based `update-comments` run. An archive without a qualifying capture returns an empty
+/// vector.
+pub fn check_comment_collections(
+    path: impl AsRef<Path>,
+) -> Result<Vec<CommentCollectionCompleteness>, Error> {
     let path = path.as_ref();
     let display_path = path.display().to_string();
-    let mut coverage = CoverageCollector::default();
+    let mut coverage = BTreeMap::new();
 
     if is_gzip_file(path)? {
         collect_coverage(
@@ -243,7 +275,22 @@ pub fn check_comment_completeness(path: impl AsRef<Path>) -> Result<CommentCompl
         collect_coverage(WarcReader::from_path(path)?, &display_path, &mut coverage)?;
     }
 
-    Ok(coverage.finish())
+    let mut collections = coverage
+        .into_iter()
+        .map(
+            |(endpoint, coverage): (String, CoverageCollector)| CommentCollectionCompleteness {
+                endpoint,
+                coverage: coverage.finish(),
+            },
+        )
+        .collect::<Vec<_>>();
+    collections.sort_by(|left, right| {
+        endpoint_domain(&left.endpoint)
+            .cmp(&endpoint_domain(&right.endpoint))
+            .then_with(|| left.endpoint.cmp(&right.endpoint))
+    });
+
+    Ok(collections)
 }
 
 pub(crate) fn is_gzip_file(path: &Path) -> Result<bool, std::io::Error> {
@@ -297,7 +344,7 @@ fn collect_records<R: BufRead>(
 fn collect_coverage<R: BufRead>(
     reader: WarcReader<R>,
     path: &str,
-    coverage: &mut CoverageCollector,
+    collections: &mut BTreeMap<String, CoverageCollector>,
 ) -> Result<(), Error> {
     for record in reader.iter_records::<NoExtension>() {
         let record = record.map_err(|source| Error::Warc {
@@ -308,6 +355,10 @@ fn collect_coverage<R: BufRead>(
         let Some((url, response)) = qualifying_comment_capture(&record) else {
             continue;
         };
+        let Some(endpoint) = comment_endpoint(url) else {
+            continue;
+        };
+        let coverage = collections.entry(endpoint).or_default();
 
         if let Some(page) = comment_page(url) {
             coverage.pages.insert(page);
@@ -455,6 +506,26 @@ pub(crate) fn comment_page(url: &str) -> Option<usize> {
     values.next().is_none().then_some(page)
 }
 
+fn comment_endpoint(url: &str) -> Option<String> {
+    let mut url = url::Url::parse(url).ok()?;
+    let path = url.path().trim_end_matches('/').to_owned();
+    if !path.ends_with("/wp-json/wp/v2/comments") {
+        return None;
+    }
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+
+    Some(url.into())
+}
+
+fn endpoint_domain(endpoint: &str) -> String {
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| endpoint.to_ascii_lowercase())
+}
+
 #[derive(Default)]
 struct CoverageCollector {
     total_pages: Option<usize>,
@@ -537,7 +608,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CommentConflict, check_comment_completeness, find_comment_update_anchor, read_comments,
+        CommentConflict, Error, check_comment_collections, check_comment_completeness,
+        find_comment_update_anchor, read_comments,
     };
 
     /// Write response records into a WARC fixture and return its temporary directory.
@@ -633,6 +705,67 @@ mod tests {
         assert!(coverage.is_complete());
         assert!(coverage.advertised_total_changed());
         assert_eq!(gzip_coverage, coverage);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_site_archive_checks_each_endpoint_independently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path) = coverage_fixture(&[
+            (
+                "https://zeta.example/wp-json/wp/v2/comments?page=1",
+                "200 OK",
+                Some("application/json"),
+                Some("3"),
+            ),
+            (
+                "https://alpha.example/blog/wp-json/wp/v2/comments?page=1",
+                "200 OK",
+                Some("application/json"),
+                Some("2"),
+            ),
+            (
+                "https://zeta.example/wp-json/wp/v2/comments?page=3",
+                "200 OK",
+                Some("application/json"),
+                Some("3"),
+            ),
+            (
+                "https://alpha.example/blog/wp-json/wp/v2/comments?page=2",
+                "200 OK",
+                Some("application/json"),
+                Some("2"),
+            ),
+        ])?;
+
+        let collections = check_comment_collections(&path)?;
+
+        assert_eq!(collections.len(), 2);
+        assert_eq!(
+            collections[0].endpoint,
+            "https://alpha.example/blog/wp-json/wp/v2/comments"
+        );
+        assert_eq!(collections[0].coverage.total_pages, Some(2));
+        assert_eq!(collections[0].coverage.captured_pages, [1, 2]);
+        assert!(collections[0].coverage.is_complete());
+        assert!(!collections[0].coverage.advertised_total_changed());
+        assert_eq!(
+            collections[1].endpoint,
+            "https://zeta.example/wp-json/wp/v2/comments"
+        );
+        assert_eq!(collections[1].coverage.total_pages, Some(3));
+        assert_eq!(collections[1].coverage.captured_pages, [1, 3]);
+        assert_eq!(
+            collections[1].coverage.missing_pages().collect::<Vec<_>>(),
+            [2]
+        );
+        assert!(!collections[1].coverage.is_complete());
+        assert!(!collections[1].coverage.advertised_total_changed());
+        assert!(matches!(
+            check_comment_completeness(path),
+            Err(Error::MultipleCommentCollections(2))
+        ));
 
         Ok(())
     }

@@ -16,7 +16,7 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments};
 use archivindex_wordpress::read::{
-    CommentCompleteness, CommentUpdateAnchor, check_comment_completeness,
+    CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchor, read_comments,
 };
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
@@ -467,29 +467,47 @@ fn read_wp_comments(options: ReadCommentsOptions) -> Result<CommandOutcome, Erro
 
 /// Check that every page advertised in a comments WARC has a qualifying capture record.
 fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let coverage = check_comment_completeness(&options.warc)?;
-    let complete = coverage.is_complete();
-    let total_changed = coverage.advertised_total_changed();
-
-    if let Some(warning) = page_total_change_warning(&coverage) {
-        log::warn!("{warning}");
+    let collections = check_comment_collections(&options.warc)?;
+    if collections.is_empty() {
+        log::warn!(
+            "{} has no qualifying WordPress comments capture",
+            options.warc.display()
+        );
+        if !quiet {
+            println!("{} is incomplete", options.warc.display());
+        }
+        return Ok(CommandOutcome::ReportedProblems);
     }
 
-    if complete {
-        if !quiet {
-            println!(
-                "{} is complete: all {} advertised comment pages were captured",
-                options.warc.display(),
-                coverage
-                    .total_pages
-                    .expect("complete coverage has an advertised page count")
-            );
+    let mut reported_problems = false;
+    for collection in collections {
+        let coverage = collection.coverage;
+        let complete = coverage.is_complete();
+        let total_changed = coverage.advertised_total_changed();
+        reported_problems |= !complete || total_changed;
+
+        if let Some(warning) = page_total_change_warning(&coverage) {
+            log::warn!("{}: {warning}", collection.endpoint);
         }
-    } else {
+        if complete {
+            if !quiet {
+                println!(
+                    "{} is complete for {}: all {} advertised comment pages were captured",
+                    options.warc.display(),
+                    collection.endpoint,
+                    coverage
+                        .total_pages
+                        .expect("complete coverage has an advertised page count")
+                );
+            }
+            continue;
+        }
+
         match coverage.total_pages {
             None => log::warn!(
-                "{} has no qualifying record with a valid X-WP-TotalPages header",
-                options.warc.display()
+                "{} has no qualifying record with a valid X-WP-TotalPages header for {}",
+                options.warc.display(),
+                collection.endpoint
             ),
             Some(total_pages) => {
                 let missing_count = coverage
@@ -500,10 +518,11 @@ fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<Comm
                 let suffix = (missing_count > shown.len())
                     .then(|| format!(" (and {} more)", missing_count - shown.len()));
                 log::warn!(
-                    "{} is missing qualifying records for {} of {} advertised pages: {}{}",
+                    "{} is missing qualifying records for {} of {} advertised pages for {}: {}{}",
                     options.warc.display(),
                     missing_count,
                     total_pages,
+                    collection.endpoint,
                     shown
                         .iter()
                         .map(usize::to_string)
@@ -513,15 +532,16 @@ fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<Comm
                 );
             }
         }
-
         if !quiet {
-            println!("{} is incomplete", options.warc.display());
+            println!(
+                "{} is incomplete for {}",
+                options.warc.display(),
+                collection.endpoint
+            );
         }
     }
 
-    Ok(CommandOutcome::from_reported_problems(
-        !complete || total_changed,
-    ))
+    Ok(CommandOutcome::from_reported_problems(reported_problems))
 }
 
 /// Capture exactly the comment pages missing from an existing WARC.
@@ -838,15 +858,16 @@ mod tests {
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
     use archivindex_wordpress::CommentCaptureProcessor;
-    use archivindex_wordpress::read::CommentCompleteness;
+    use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
     use chrono::Utc;
     use clap::{CommandFactory, Parser};
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
     use super::{
-        Command, CommentRun, CommentRunOptions, ConfigFormat, Error, Opts, capture_comment_run,
-        comment_update_inputs, load_config, page_total_change_warning,
+        CheckCommentsOptions, Command, CommentRun, CommentRunOptions, ConfigFormat, Error, Opts,
+        capture_comment_run, check_wp_comments, comment_update_inputs, load_config,
+        page_total_change_warning,
     };
 
     fn write_update_warc(
@@ -1268,6 +1289,22 @@ mod tests {
             assert!(metadata.contains(&(first.clone(), None)));
             assert!(metadata.contains(&(second, Some(first))));
         }
+        let collections = check_comment_collections(&output)?;
+        assert_eq!(collections.len(), 2);
+        assert!(collections.iter().all(|collection| {
+            collection.coverage.total_pages == Some(2)
+                && collection.coverage.captured_pages == [1, 2]
+                && collection.coverage.is_complete()
+        }));
+        assert_eq!(
+            check_wp_comments(
+                &CheckCommentsOptions {
+                    warc: output,
+                },
+                true,
+            )?,
+            archivindex_cli_support::CommandOutcome::Success
+        );
 
         Ok(())
     }

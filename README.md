@@ -78,9 +78,11 @@ cargo run --bin archivindex-wordpress -- read-comments comments.warc > comments.
 
 The `check-comments` command verifies that the WARC has an HTTP 200 response or revisit record
 inferred as `application/json` for every page from one through the greatest valid
-`X-WP-TotalPages` value it contains. The command accepts plain or gzip-compressed WARCs and exits
-with status 1 when coverage is incomplete. A changing `X-WP-TotalPages` value is also reported with
-the signed differences between successive values and produces status 1:
+`X-WP-TotalPages` value it contains. Multi-site WARCs are grouped by comments endpoint and checked
+independently in domain-name order, so one site's pages or totals never affect another's. The
+command accepts plain or gzip-compressed WARCs and exits with status 1 when any collection is
+incomplete. A changing `X-WP-TotalPages` value is also reported per collection with the signed
+differences between successive values and produces status 1:
 
 ```bash
 cargo run --bin archivindex-wordpress -- check-comments comments.warc.gz
