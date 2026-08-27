@@ -76,12 +76,11 @@ order. Conflicting captures of the same comment are reported through the warning
 cargo run --bin archivindex-wordpress -- read-comments comments.warc > comments.jsonl
 ```
 
-The `check-comments` command verifies that the WARC has an HTTP 200 response or revisit record for
-every page from one through the greatest valid `X-WP-TotalPages` value it contains. Full response
-records must be inferred as `application/json`; revisits need no inferred payload type because they
-do not carry the payload. The command accepts plain or gzip-compressed WARCs and exits with status 1
-when coverage is incomplete. A changing `X-WP-TotalPages` value is also reported with the signed
-differences between successive values and produces status 1:
+The `check-comments` command verifies that the WARC has an HTTP 200 response or revisit record
+inferred as `application/json` for every page from one through the greatest valid
+`X-WP-TotalPages` value it contains. The command accepts plain or gzip-compressed WARCs and exits
+with status 1 when coverage is incomplete. A changing `X-WP-TotalPages` value is also reported with
+the signed differences between successive values and produces status 1:
 
 ```bash
 cargo run --bin archivindex-wordpress -- check-comments comments.warc.gz

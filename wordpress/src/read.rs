@@ -165,9 +165,8 @@ pub fn read_comments(path: impl AsRef<Path>) -> Result<CommentReadResult, Error>
 ///
 /// A page is captured when a record targets the `WordPress` REST API v2 comments endpoint, holds an
 /// HTTP 200 response, and has that page number in its target URI (or omits `page`, which means page
-/// one). A `response` record must additionally have `WARC-Identified-Payload-Type` set to
-/// `application/json`; a `revisit` record is accepted without that field because revisits do not
-/// carry their payload and the archiver consequently does not identify its type. The greatest valid
+/// one). Both `response` and `revisit` records must additionally have
+/// `WARC-Identified-Payload-Type` set to `application/json`. The greatest valid
 /// `X-WP-TotalPages` value on a qualifying record determines the required range. Every transition
 /// in that value is retained so callers can warn about pagination changes. Duplicate captures
 /// satisfy the page only once. An archive without a valid advertised total is incomplete.
@@ -281,20 +280,21 @@ fn collect_coverage<R: BufRead>(
 pub(crate) fn qualifying_comment_capture(
     record: &Record,
 ) -> Option<(&str, archivindex_warc::record::http::ResponseMetadata)> {
-    let (url, body) = match record {
-        Record::Response { header, body }
-            if header
-                .payload
-                .identified_payload_type
-                .as_ref()
-                .is_some_and(|media_type| media_type.is("application", "json")) =>
-        {
-            (header.target_uri.as_str(), body.as_slice())
+    let (url, payload, body) = match record {
+        Record::Response { header, body } => {
+            (header.target_uri.as_str(), &header.payload, body.as_slice())
         }
-        Record::Revisit { header, body } => (header.target_uri.as_str(), body.as_slice()),
+        Record::Revisit { header, body } => {
+            (header.target_uri.as_str(), &header.payload, body.as_slice())
+        }
         _ => return None,
     };
-    if !is_comment_endpoint(url) {
+    if !is_comment_endpoint(url)
+        || !payload
+            .identified_payload_type
+            .as_ref()
+            .is_some_and(|media_type| media_type.is("application", "json"))
+    {
         return None;
     }
     let response = archivindex_warc::record::http::ResponseMetadata::parse(body)?;
@@ -548,8 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn a_200_revisit_covers_a_page_without_an_identified_payload_type()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn only_an_inferred_json_200_revisit_covers_a_page() -> Result<(), Box<dyn std::error::Error>> {
         let (_directory, path) = coverage_fixture(&[(
             "https://example.com/wp-json/wp/v2/comments?page=1&per_page=100",
             "200 OK",
@@ -563,26 +562,33 @@ mod tests {
             RevisitProfile::IDENTICAL_PAYLOAD_DIGEST,
         )?
         .content_type(MediaType::HTTP_RESPONSE)
+        .identified_payload_type(MediaType::parse(b"application/json")?)
         .payload_digest(LabelledDigest::parse(b"sha1:AAAA")?)
         .truncated(TruncatedType::Length)
         .body(b"HTTP/1.1 200 OK\r\nx-wp-totalpages: 2\r\ncontent-length: 2\r\n\r\n".to_vec())?;
-        assert!(
-            accepted
-                .payload()
-                .is_some_and(|payload| { payload.identified_payload_type.is_none() })
-        );
         writer.write(&accepted.into_raw()?)?;
-        let rejected: Record = Record::revisit(
+        let missing_type: Record = Record::revisit(
             "https://example.com/wp-json/wp/v2/comments?page=3&per_page=100",
+            Utc::now(),
+            RevisitProfile::IDENTICAL_PAYLOAD_DIGEST,
+        )?
+        .content_type(MediaType::HTTP_RESPONSE)
+        .payload_digest(LabelledDigest::parse(b"sha1:BBBB")?)
+        .truncated(TruncatedType::Length)
+        .body(b"HTTP/1.1 200 OK\r\nx-wp-totalpages: 3\r\ncontent-length: 2\r\n\r\n".to_vec())?;
+        writer.write(&missing_type.into_raw()?)?;
+        let wrong_status: Record = Record::revisit(
+            "https://example.com/wp-json/wp/v2/comments?page=4&per_page=100",
             Utc::now(),
             RevisitProfile::SERVER_NOT_MODIFIED,
         )?
         .content_type(MediaType::HTTP_RESPONSE)
+        .identified_payload_type(MediaType::parse(b"application/json")?)
         .body(
-            b"HTTP/1.1 304 Not Modified\r\nx-wp-totalpages: 3\r\ncontent-length: 0\r\n\r\n"
+            b"HTTP/1.1 304 Not Modified\r\nx-wp-totalpages: 4\r\ncontent-length: 0\r\n\r\n"
                 .to_vec(),
         )?;
-        writer.write(&rejected.into_raw()?)?;
+        writer.write(&wrong_status.into_raw()?)?;
         writer.flush()?;
 
         let coverage = check_comment_completeness(path)?;
