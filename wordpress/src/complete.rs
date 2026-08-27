@@ -9,10 +9,11 @@ use archivindex_archiver::capture::ArchiveSummary;
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::io::write::{self as warc_write, Compression, WarcWriter};
 use archivindex_warc::parse::raw;
-use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 
-use crate::read::{check_comment_completeness, comment_page, is_comment_endpoint, is_gzip_file};
+use crate::read::{
+    check_comment_completeness, comment_page, is_gzip_file, qualifying_comment_capture,
+};
 
 /// The result of requesting the comment pages absent from an input archive.
 #[derive(Debug)]
@@ -237,23 +238,10 @@ fn find_paging_url<R: BufRead>(
             path: path.to_owned(),
             source,
         })?;
-        let Record::Response { header, body } = record else {
+        let Some((url, _response)) = qualifying_comment_capture(&record) else {
             continue;
         };
-        let url = header.target_uri.as_str();
-        if !is_comment_endpoint(url)
-            || !header
-                .payload
-                .identified_payload_type
-                .as_ref()
-                .is_some_and(|media_type| media_type.is("application", "json"))
-        {
-            continue;
-        }
-        let Some(response) = archivindex_warc::record::http::ResponseMetadata::parse(&body) else {
-            continue;
-        };
-        if response.status != 200 || comment_page(url).is_none() {
+        if comment_page(url).is_none() {
             continue;
         }
 

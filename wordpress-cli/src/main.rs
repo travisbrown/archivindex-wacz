@@ -212,7 +212,7 @@ fn read_wp_comments(options: ReadCommentsOptions) -> Result<CommandOutcome, Erro
     ))
 }
 
-/// Check that every page advertised in a comments WARC has a qualifying response record.
+/// Check that every page advertised in a comments WARC has a qualifying capture record.
 fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
     let coverage = check_comment_completeness(&options.warc)?;
     let complete = coverage.is_complete();
@@ -235,7 +235,7 @@ fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<Comm
     } else {
         match coverage.total_pages {
             None => log::warn!(
-                "{} has no qualifying response with a valid X-WP-TotalPages header",
+                "{} has no qualifying record with a valid X-WP-TotalPages header",
                 options.warc.display()
             ),
             Some(total_pages) => {
@@ -247,7 +247,7 @@ fn check_wp_comments(options: &CheckCommentsOptions, quiet: bool) -> Result<Comm
                 let suffix = (missing_count > shown.len())
                     .then(|| format!(" (and {} more)", missing_count - shown.len()));
                 log::warn!(
-                    "{} is missing qualifying responses for {} of {} advertised pages: {}{}",
+                    "{} is missing qualifying records for {} of {} advertised pages: {}{}",
                     options.warc.display(),
                     missing_count,
                     total_pages,
@@ -435,7 +435,7 @@ enum Command {
     /// Archive comments iteratively through a site's `WordPress` REST API v2 endpoint.
     #[clap(name = "archive-comments")]
     Archive(ArchiveCommentsOptions),
-    /// Check that every advertised comments page has a successful JSON response record.
+    /// Check that every advertised comments page has a qualifying response or revisit record.
     #[clap(name = "check-comments")]
     Check(CheckCommentsOptions),
     /// Capture pages missing from a comments WARC into a new WARC.
