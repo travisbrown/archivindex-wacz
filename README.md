@@ -28,7 +28,7 @@ its revisit index live there too.
 Each library with a command-line front end has its own binary, so a command below is invoked
 through the binary that owns it.
 
-Capture output is uncompressed by default. Archiving commands use the `gzip_warc` configuration
+Capture output is uncompressed by default. Archiving commands use the `gzip-warc` configuration
 setting to compress each WARC record as an independent gzip member.
 
 Commands exit with status 0 when they complete without reportable problems. Status 1 means the
@@ -46,14 +46,14 @@ WARC metadata, digest, and session settings—including retry policy, request de
 in that file. For example, `comments.toml` could contain:
 
 ```toml
-gzip_warc = true
+gzip-warc = true
 
 [operator]
 name = "A. Archivist"
 email = "archivist@example.com"
 
 [session]
-request_delay = "1s"
+request-delay = "1s"
 titles = true
 ```
 

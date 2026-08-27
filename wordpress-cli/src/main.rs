@@ -740,9 +740,9 @@ mod tests {
         let path = directory.path().join("capture.toml");
         std::fs::write(
             &path,
-            "gzip_warc = true\n\
+            "gzip-warc = true\n\
              [operator]\nname = \"A. Archivist\"\nemail = \"archivist@example.com\"\n\
-             [session]\nrequest_delay = \"750ms\"\ntitles = true\n",
+             [session]\nrequest-delay = \"750ms\"\ntitles = true\n",
         )
         .expect("write the configuration");
 

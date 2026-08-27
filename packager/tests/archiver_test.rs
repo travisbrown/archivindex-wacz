@@ -86,6 +86,14 @@ fn gzip_config() -> Config {
     }
 }
 
+/// A gzip configuration that also turns short duplicate fixtures into revisits.
+fn gzip_revisit_config() -> Config {
+    Config {
+        min_revisit_payload_length: 0,
+        ..gzip_config()
+    }
+}
+
 fn operator() -> Operator {
     Operator {
         name: "Test Operator".to_owned(),
@@ -451,7 +459,7 @@ fn packages_a_crawl_session_with_extra_pages() -> Result<(), Box<dyn std::error:
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("session.warc.gz");
     let summary = Session::new(
-        Archiver::new(gzip_config())?,
+        Archiver::new(gzip_revisit_config())?,
         "crawl-2026.08",
         &seeds,
         &path,
@@ -531,9 +539,14 @@ fn packages_an_identical_payload_revisit() -> Result<(), Box<dyn std::error::Err
     let url = format!("http://127.0.0.1:{port}/about");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("recapture.warc.gz");
-    let summary = Session::new(Archiver::new(gzip_config())?, "recapture", [&url], &path)?
-        .processor(RecaptureProcessor { remaining: 1 })
-        .run()?;
+    let summary = Session::new(
+        Archiver::new(gzip_revisit_config())?,
+        "recapture",
+        [&url],
+        &path,
+    )?
+    .processor(RecaptureProcessor { remaining: 1 })
+    .run()?;
     server.join().expect("server thread should not panic");
     assert!(summary.is_complete());
 
