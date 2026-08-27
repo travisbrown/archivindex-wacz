@@ -97,6 +97,19 @@ cargo run --bin archivindex-wordpress -- complete-comments \
   --config comments.toml
 ```
 
+After a complete historical capture, `update-comments` starts a bounded incremental run. It uses
+the latest archived comment's `date_gmt`, falling back to the historical request's `before` cutoff
+when no comments were returned. The new run sends that instant minus `--overlap` as `after` and the
+current time as `before`; the overlap defaults to one day:
+
+```bash
+cargo run --bin archivindex-wordpress -- update-comments comments.warc.gz \
+  --output comments-update.warc.gz \
+  --session-name comments-update-2026-08-20 \
+  --overlap 1day \
+  --config comments.toml
+```
+
 ### WACZ packaging
 
 The `warc-to-wacz` command converts a plain or gzip-compressed WARC file into an indexed WACZ. A

@@ -81,6 +81,7 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 pub struct CommentCaptureProcessor {
     endpoint: Url,
     site_name: String,
+    after: Option<DateTime<Utc>>,
     before: DateTime<Utc>,
     seen_ids: HashSet<u64>,
     first_date: Option<NaiveDate>,
@@ -201,6 +202,21 @@ impl CommentCaptureProcessor {
         Self::with_before(base_url.as_ref(), Utc::now())
     }
 
+    /// Create a comment processor restricted to a fixed update window.
+    ///
+    /// Every comments request carries `after` and `before` at whole-second UTC precision. The
+    /// caller is responsible for choosing an `after` instant earlier than `before`.
+    pub fn for_window(
+        base_url: impl AsRef<str>,
+        after: DateTime<Utc>,
+        before: DateTime<Utc>,
+    ) -> Result<Self, url::ParseError> {
+        let mut processor = Self::with_before(base_url.as_ref(), before)?;
+        processor.after = Some(after);
+
+        Ok(processor)
+    }
+
     /// Produce the first comments URL for this processor's saved snapshot cutoff.
     ///
     /// Normally the request asks for page one in ascending comment-ID order. After
@@ -235,6 +251,7 @@ impl CommentCaptureProcessor {
         }
 
         self.before = parameters.before;
+        self.after = parameters.after;
         self.resumed_after_page = Some(parameters.page);
         self.traversal = Traversal::Active(Sweep::starting_at(
             parameters
@@ -261,6 +278,7 @@ impl CommentCaptureProcessor {
         Ok(Self {
             endpoint,
             site_name,
+            after: None,
             before,
             seen_ids: HashSet::new(),
             first_date: None,
@@ -312,8 +330,12 @@ impl CommentCaptureProcessor {
     /// Build one page URL, retaining the snapshot cutoff on every request.
     fn comment_url(&self, page: usize) -> String {
         let before = format_timestamp(self.before);
+        let after = self
+            .after
+            .map(format_timestamp)
+            .map_or_else(String::new, |after| format!("after={after}&"));
         let query = format!(
-            "before={before}&orderby=id&order=asc&page={page}&per_page={COMMENTS_PER_PAGE}"
+            "{after}before={before}&orderby=id&order=asc&page={page}&per_page={COMMENTS_PER_PAGE}"
         );
 
         let mut url = self.endpoint.clone();
@@ -390,6 +412,7 @@ pub enum CommentResumeError {
 
 /// The pagination state recovered from a resume URI.
 struct ResumeParameters {
+    after: Option<DateTime<Utc>>,
     before: DateTime<Utc>,
     page: usize,
 }
@@ -400,6 +423,7 @@ impl ResumeParameters {
     /// Anything else would describe a different traversal, whose page numbers this processor cannot
     /// continue from.
     fn parse(uri: &Url) -> Result<Self, CommentResumeError> {
+        let mut after = None;
         let mut before = None;
         let mut page = None;
         let mut orderby = None;
@@ -408,6 +432,7 @@ impl ResumeParameters {
 
         for (name, value) in uri.query_pairs() {
             let slot = match name.as_ref() {
+                "after" => &mut after,
                 "before" => &mut before,
                 "page" => &mut page,
                 "orderby" => &mut orderby,
@@ -421,6 +446,12 @@ impl ResumeParameters {
             }
         }
 
+        let after = after
+            .as_deref()
+            .map(DateTime::parse_from_rfc3339)
+            .transpose()
+            .map_err(|_| CommentResumeError::InvalidParameter("after parameter"))?
+            .map(|after| after.with_timezone(&Utc));
         let before = before
             .as_deref()
             .ok_or(CommentResumeError::InvalidParameter("before parameter"))?;
@@ -449,7 +480,15 @@ impl ResumeParameters {
             return Err(CommentResumeError::InvalidParameter("per_page parameter"));
         }
 
-        Ok(Self { before, page })
+        if after.is_some_and(|after| after >= before) {
+            return Err(CommentResumeError::InvalidParameter("after parameter"));
+        }
+
+        Ok(Self {
+            after,
+            before,
+            page,
+        })
     }
 }
 
@@ -755,6 +794,32 @@ mod tests {
 
         assert_eq!(processor.first_comment_url(), expected);
         assert_eq!(processor.first_comment_url(), expected);
+    }
+
+    #[test]
+    fn update_window_is_retained_on_every_page_and_resume() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let processor = CommentCaptureProcessor::for_window(
+            "https://example.com/",
+            timestamp("2026-08-18T00:00:00Z"),
+            timestamp(BEFORE),
+        )
+        .expect("a processor");
+        let first = "https://example.com/wp-json/wp/v2/comments?\
+            after=2026-08-18T00:00:00Z&before=2026-08-20T00:00:00Z&\
+            orderby=id&order=asc&page=1&per_page=100";
+
+        assert_eq!(processor.first_comment_url(), first);
+
+        let resumed = CommentCaptureProcessor::new("https://example.com/")?.resume_after(first)?;
+        assert_eq!(
+            resumed.first_comment_url(),
+            "https://example.com/wp-json/wp/v2/comments?\
+             after=2026-08-18T00:00:00Z&before=2026-08-20T00:00:00Z&\
+             orderby=id&order=asc&page=2&per_page=100"
+        );
+
+        Ok(())
     }
 
     #[test]

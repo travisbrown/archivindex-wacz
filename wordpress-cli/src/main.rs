@@ -7,14 +7,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::time::Duration;
 
 use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
 use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Session};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments};
-use archivindex_wordpress::read::{CommentCompleteness, check_comment_completeness, read_comments};
+use archivindex_wordpress::read::{
+    CommentCompleteness, check_comment_completeness, find_comment_update_anchor, read_comments,
+};
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
+use chrono::Utc;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -29,10 +33,11 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
     let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
-        Command::Archive(options) => archive_comments(options, quiet),
+        Command::Archive(options) => archive_comments(&options, quiet),
         Command::Check(options) => check_wp_comments(&options, quiet),
         Command::Complete(options) => complete_wp_comments(&options, quiet),
         Command::Read(options) => read_wp_comments(options),
+        Command::Update(options) => update_comments(&options, quiet),
     }
 }
 
@@ -40,11 +45,89 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
 ///
 /// Captures that fail or a session that ends early leave a partial archive behind, which is
 /// reported through the exit status rather than treated as an error.
-fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+fn archive_comments(
+    options: &ArchiveCommentsOptions,
+    quiet: bool,
+) -> Result<CommandOutcome, Error> {
     let mut processor = CommentCaptureProcessor::new(&options.base_url)?;
     if let Some(resume_after) = &options.resume_after {
         processor = processor.resume_after(resume_after)?;
     }
+    capture_comment_run(
+        processor,
+        CommentRunOptions {
+            base_url: &options.base_url,
+            config: options.config.as_deref(),
+            cookie: options.cookie.as_deref(),
+            output: &options.output,
+            session_name: &options.session_name,
+            revisit_index: options.revisit_index.as_deref(),
+            limit: options.limit,
+            second_sweep: options.second_sweep,
+        },
+        quiet,
+    )
+}
+
+/// Capture comments newer than an overlap before the last archived comment.
+fn update_comments(options: &UpdateCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let anchor = find_comment_update_anchor(&options.input)?;
+    let before = Utc::now();
+    let overlap = chrono::Duration::from_std(options.overlap)
+        .map_err(|_| Error::OverlapOutOfRange(options.overlap))?;
+    let after = anchor
+        .datetime
+        .checked_sub_signed(overlap)
+        .ok_or(Error::OverlapOutOfRange(options.overlap))?;
+    if after >= before {
+        return Err(Error::InvalidUpdateWindow { after, before });
+    }
+    log::info!(
+        "updating {} comments after {} and before {} (anchor from {})",
+        anchor.base_url,
+        after.to_rfc3339(),
+        before.to_rfc3339(),
+        if anchor.from_comment {
+            "latest comment"
+        } else {
+            "archived before cutoff"
+        }
+    );
+    let processor = CommentCaptureProcessor::for_window(&anchor.base_url, after, before)?;
+
+    capture_comment_run(
+        processor,
+        CommentRunOptions {
+            base_url: &anchor.base_url,
+            config: options.config.as_deref(),
+            cookie: options.cookie.as_deref(),
+            output: &options.output,
+            session_name: &options.session_name,
+            revisit_index: options.revisit_index.as_deref(),
+            limit: options.limit,
+            second_sweep: options.second_sweep,
+        },
+        quiet,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct CommentRunOptions<'a> {
+    base_url: &'a str,
+    config: Option<&'a Path>,
+    cookie: Option<&'a str>,
+    output: &'a Path,
+    session_name: &'a str,
+    revisit_index: Option<&'a Path>,
+    limit: Option<usize>,
+    second_sweep: bool,
+}
+
+fn capture_comment_run(
+    processor: CommentCaptureProcessor,
+    options: CommentRunOptions<'_>,
+    quiet: bool,
+) -> Result<CommandOutcome, Error> {
     let processor = processor.second_sweep(options.second_sweep);
     let first_url = processor.first_comment_url();
     let comment_progress = Rc::new(RefCell::new(None));
@@ -52,29 +135,24 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<Comm
         processor,
         progress: Rc::clone(&comment_progress),
     };
-    let config = load_config(options.config.as_deref())?;
-    let archiver = match &options.cookie {
-        Some(cookie) => Archiver::new(config)?.cookie_for(&options.base_url, cookie)?,
+    let config = load_config(options.config)?;
+    let archiver = match options.cookie {
+        Some(cookie) => Archiver::new(config)?.cookie_for(options.base_url, cookie)?,
         None => Archiver::new(config)?,
     };
     let progress = message_spinner("Downloading comments");
     let event_progress = progress.clone();
     let event_comment_progress = Rc::clone(&comment_progress);
-    let mut session = Session::new(
-        archiver,
-        &options.session_name,
-        [first_url],
-        &options.output,
-    )?
-    .processor(processor)
-    .events(move |event: CaptureEvent<'_>| {
-        if matches!(event, CaptureEvent::Written { .. })
-            && let Some(snapshot) = *event_comment_progress.borrow()
-        {
-            event_progress.set_message(snapshot.to_string());
-        }
-        CaptureControl::Continue
-    });
+    let mut session = Session::new(archiver, options.session_name, [first_url], options.output)?
+        .processor(processor)
+        .events(move |event: CaptureEvent<'_>| {
+            if matches!(event, CaptureEvent::Written { .. })
+                && let Some(snapshot) = *event_comment_progress.borrow()
+            {
+                event_progress.set_message(snapshot.to_string());
+            }
+            CaptureControl::Continue
+        });
 
     if let Some(revisit_index) = options.revisit_index {
         session = session.revisit_index(revisit_index);
@@ -413,6 +491,13 @@ enum Error {
     ReadComments(#[from] archivindex_wordpress::read::Error),
     #[error("WordPress comment completion error: {0}")]
     CompleteComments(#[from] archivindex_wordpress::complete::Error),
+    #[error("comment update overlap is out of range: {0:?}")]
+    OverlapOutOfRange(Duration),
+    #[error("comment update window starts at {after}, which is not before {before}")]
+    InvalidUpdateWindow {
+        after: chrono::DateTime<Utc>,
+        before: chrono::DateTime<Utc>,
+    },
     #[error("JSON writing error: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -444,6 +529,9 @@ enum Command {
     /// Read comments captured from the `WordPress` REST API in a WARC file.
     #[clap(name = "read-comments")]
     Read(ReadCommentsOptions),
+    /// Capture new comments in a window overlapping an existing comments WARC.
+    #[clap(name = "update-comments")]
+    Update(UpdateCommentsOptions),
 }
 
 /// Options for archiving comments from the `WordPress` REST API.
@@ -507,6 +595,42 @@ struct CompleteCommentsOptions {
     input: PathBuf,
     /// Path of the completion WARC to write (an existing file is not overwritten).
     output: PathBuf,
+}
+
+/// Options for incrementally updating an archived comments collection.
+#[derive(Debug, clap::Args)]
+struct UpdateCommentsOptions {
+    /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
+    /// optional and takes its default when absent.
+    #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    config: Option<PathBuf>,
+    /// Existing plain or gzip-compressed comments WARC used to choose the update window.
+    input: PathBuf,
+    /// Path of the WARC file to write (an existing file is not overwritten).
+    #[clap(long)]
+    output: PathBuf,
+    /// URL-safe name identifying the update session and its WARC file.
+    #[clap(long)]
+    session_name: String,
+    /// Begin this far before the latest archived comment datetime.
+    #[clap(long, default_value = "1day", value_parser = parse_duration)]
+    overlap: Duration,
+    /// Persistent payload-revisit and conditional-request state database.
+    #[clap(long)]
+    revisit_index: Option<PathBuf>,
+    /// Stop successfully after capturing this many comment batches.
+    #[clap(long)]
+    limit: Option<usize>,
+    /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
+    #[clap(long)]
+    second_sweep: bool,
+    /// Cookie header obtained from a browser, scoped to the archived site's host.
+    #[clap(long)]
+    cookie: Option<String>,
+}
+
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    humantime::parse_duration(value).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -693,6 +817,50 @@ mod tests {
         assert_eq!(options.input, PathBuf::from("comments.warc.gz"));
         assert_eq!(options.output, PathBuf::from("completion.warc.gz"));
         assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
+    }
+
+    #[test]
+    fn update_command_uses_a_one_day_default_overlap() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "update-comments",
+            "historical.warc.gz",
+            "--output",
+            "update.warc.gz",
+            "--session-name",
+            "comments-update-2026-08-20",
+        ])
+        .expect("valid options");
+
+        let Command::Update(options) = options.command else {
+            panic!("expected the update command");
+        };
+
+        assert_eq!(options.input, PathBuf::from("historical.warc.gz"));
+        assert_eq!(options.output, PathBuf::from("update.warc.gz"));
+        assert_eq!(options.session_name, "comments-update-2026-08-20");
+        assert_eq!(options.overlap, Duration::from_hours(24));
+    }
+
+    #[test]
+    fn update_command_parses_a_configured_overlap() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "update-comments",
+            "historical.warc",
+            "--output",
+            "update.warc",
+            "--session-name",
+            "comments-update",
+            "--overlap",
+            "36hours",
+        ])
+        .expect("valid options");
+
+        let Command::Update(options) = options.command else {
+            panic!("expected the update command");
+        };
+        assert_eq!(options.overlap, Duration::from_hours(36));
     }
 
     #[test]

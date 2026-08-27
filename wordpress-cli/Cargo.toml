@@ -25,7 +25,9 @@ bundled = ["archivindex-archiver/bundled"]
 archivindex-archiver.workspace = true
 archivindex-cli-support.workspace = true
 archivindex-wordpress = { version = "0.1.0", path = "../wordpress/" }
+chrono.workspace = true
 clap.workspace = true
+humantime = "2"
 indicatif = "0.18"
 log.workspace = true
 serde_json.workspace = true

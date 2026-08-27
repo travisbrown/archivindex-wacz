@@ -7,6 +7,7 @@ use std::path::Path;
 use archivindex_warc::io::read::{self as warc_read, WarcReader};
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::{Record, payload};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -31,6 +32,17 @@ pub struct CommentConflict {
     pub first: Value,
     /// The object encountered later in the archive.
     pub second: Value,
+}
+
+/// The site and instant from which a subsequent comments capture should overlap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommentUpdateAnchor {
+    /// Base URL of the archived `WordPress` installation.
+    pub base_url: String,
+    /// Latest valid comment datetime, or the archived request cutoff when no comment has one.
+    pub datetime: DateTime<Utc>,
+    /// Whether [`datetime`](Self::datetime) came from a comment rather than a request cutoff.
+    pub from_comment: bool,
 }
 
 /// Coverage of the page range advertised by archived `WordPress` comments records.
@@ -135,6 +147,12 @@ pub enum Error {
         /// The captured comments URL.
         url: String,
     },
+    /// No archived capture identifies the `WordPress` installation to update.
+    #[error("comments WARC has no WordPress comments capture URL")]
+    MissingUpdateUrl,
+    /// No comment datetime or request `before` cutoff can anchor an update.
+    #[error("comments WARC has no valid comment datetime or before cutoff")]
+    MissingUpdateDatetime,
 }
 
 /// Read all comments captured in a plain or gzip-compressed WARC file.
@@ -159,6 +177,46 @@ pub fn read_comments(path: impl AsRef<Path>) -> Result<CommentReadResult, Error>
     }
 
     Ok(comments.finish())
+}
+
+/// Find the site and latest datetime that anchor an incremental comments update.
+///
+/// The greatest valid `date_gmt` among the archived comments is preferred. If no comment has one,
+/// the greatest valid `before` value on an archived comments response or revisit URL is used.
+pub fn find_comment_update_anchor(path: impl AsRef<Path>) -> Result<CommentUpdateAnchor, Error> {
+    let path = path.as_ref();
+    let latest_comment = read_comments(path)?
+        .comments
+        .iter()
+        .filter_map(|comment| {
+            comment
+                .get("date_gmt")
+                .and_then(Value::as_str)
+                .and_then(parse_comment_datetime)
+        })
+        .max();
+    let mut context = UpdateContext::default();
+    let display_path = path.display().to_string();
+    if is_gzip_file(path)? {
+        collect_update_context(
+            WarcReader::from_path_gzip(path)?,
+            &display_path,
+            &mut context,
+        )?;
+    } else {
+        collect_update_context(WarcReader::from_path(path)?, &display_path, &mut context)?;
+    }
+    let base_url = context.base_url.ok_or(Error::MissingUpdateUrl)?;
+    let (datetime, from_comment) = latest_comment
+        .map(|datetime| (datetime, true))
+        .or_else(|| context.before.map(|datetime| (datetime, false)))
+        .ok_or(Error::MissingUpdateDatetime)?;
+
+    Ok(CommentUpdateAnchor {
+        base_url,
+        datetime,
+        from_comment,
+    })
 }
 
 /// Check coverage of the page range advertised by a plain or gzip-compressed comments WARC.
@@ -271,6 +329,79 @@ fn collect_coverage<R: BufRead>(
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct UpdateContext {
+    base_url: Option<String>,
+    before: Option<DateTime<Utc>>,
+}
+
+fn collect_update_context<R: BufRead>(
+    reader: WarcReader<R>,
+    path: &str,
+    context: &mut UpdateContext,
+) -> Result<(), Error> {
+    for record in reader.iter_records::<NoExtension>() {
+        let record = record.map_err(|source| Error::Warc {
+            path: path.to_owned(),
+            source,
+        })?;
+        let url = match record {
+            Record::Response { header, .. } => header.target_uri.into_string(),
+            Record::Revisit { header, .. } => header.target_uri.into_string(),
+            _ => continue,
+        };
+        if !is_comment_endpoint(&url) {
+            continue;
+        }
+        let Some(parsed) = url::Url::parse(&url).ok() else {
+            continue;
+        };
+        if context.base_url.is_none() {
+            context.base_url = comment_base_url(parsed.clone());
+        }
+        if let Some(before) = query_datetime(&parsed, "before") {
+            context.before = Some(context.before.map_or(before, |current| current.max(before)));
+        }
+    }
+
+    Ok(())
+}
+
+fn comment_base_url(mut url: url::Url) -> Option<String> {
+    let path = url.path().trim_end_matches('/');
+    let root = path.strip_suffix("/wp-json/wp/v2/comments")?;
+    let root = if root.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("{root}/")
+    };
+    url.set_path(&root);
+    url.set_query(None);
+    url.set_fragment(None);
+
+    Some(url.into())
+}
+
+fn query_datetime(url: &url::Url, name: &str) -> Option<DateTime<Utc>> {
+    let mut values = url
+        .query_pairs()
+        .filter_map(|(key, value)| (key == name).then_some(value));
+    let datetime = parse_comment_datetime(values.next()?.as_ref())?;
+
+    values.next().is_none().then_some(datetime)
+}
+
+fn parse_comment_datetime(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|date| date.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+                .map(|date| date.and_utc())
+                .ok()
+        })
 }
 
 /// The target and HTTP metadata of a record that satisfies comments page coverage.
@@ -405,7 +536,9 @@ mod tests {
     use flate2::write::GzEncoder;
     use serde_json::json;
 
-    use super::{CommentConflict, check_comment_completeness, read_comments};
+    use super::{
+        CommentConflict, check_comment_completeness, find_comment_update_anchor, read_comments,
+    };
 
     /// Write response records into a WARC fixture and return its temporary directory.
     fn fixture(
@@ -668,6 +801,56 @@ mod tests {
                 },
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn update_anchor_uses_the_latest_comment_datetime_and_installation_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path) = fixture(&[
+            (
+                "https://example.com/blog/wp-json/wp/v2/comments?before=2026-08-20T00:00:00Z&page=1",
+                "200 OK",
+                r#"[{"id":1,"date_gmt":"2026-08-18T12:00:00"}]"#,
+            ),
+            (
+                "https://example.com/blog/wp-json/wp/v2/comments?before=2026-08-20T00:00:00Z&page=2",
+                "200 OK",
+                r#"[{"id":2,"date_gmt":"2026-08-19T13:14:15Z"}]"#,
+            ),
+        ])?;
+
+        let anchor = find_comment_update_anchor(path)?;
+
+        assert_eq!(anchor.base_url, "https://example.com/blog/");
+        assert_eq!(anchor.datetime.to_rfc3339(), "2026-08-19T13:14:15+00:00");
+        assert!(anchor.from_comment);
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_archive_uses_the_request_before_cutoff_as_its_update_anchor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path) = fixture(&[
+            (
+                "https://example.com/wp-json/wp/v2/comments?before=2026-08-19T23:59:58Z&page=1",
+                "200 OK",
+                "[]",
+            ),
+            (
+                "https://example.com/wp-json/wp/v2/comments?before=2026-08-20T00:00:00Z&page=2",
+                "200 OK",
+                "[]",
+            ),
+        ])?;
+
+        let anchor = find_comment_update_anchor(path)?;
+
+        assert_eq!(anchor.base_url, "https://example.com/");
+        assert_eq!(anchor.datetime.to_rfc3339(), "2026-08-20T00:00:00+00:00");
+        assert!(!anchor.from_comment);
 
         Ok(())
     }

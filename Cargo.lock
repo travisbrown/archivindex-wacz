@@ -82,7 +82,7 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#b96abf6796b5625bb275580d3675116a4d333a25"
+source = "git+https://github.com/travisbrown/archivindex-warc#e94d68bc14ffae5419444680b1580df65a184004"
 dependencies = [
  "archivindex-warc",
  "archivindex-warc-revisit-index",
@@ -193,7 +193,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#b96abf6796b5625bb275580d3675116a4d333a25"
+source = "git+https://github.com/travisbrown/archivindex-warc#e94d68bc14ffae5419444680b1580df65a184004"
 dependencies = [
  "archivindex-warc-digest",
  "chrono",
@@ -211,7 +211,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#b96abf6796b5625bb275580d3675116a4d333a25"
+source = "git+https://github.com/travisbrown/archivindex-warc#e94d68bc14ffae5419444680b1580df65a184004"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -224,7 +224,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#b96abf6796b5625bb275580d3675116a4d333a25"
+source = "git+https://github.com/travisbrown/archivindex-warc#e94d68bc14ffae5419444680b1580df65a184004"
 dependencies = [
  "archivindex-warc",
  "fluent-uri",
@@ -256,7 +256,9 @@ dependencies = [
  "archivindex-archiver",
  "archivindex-cli-support",
  "archivindex-wordpress",
+ "chrono",
  "clap",
+ "humantime",
  "indicatif",
  "log",
  "serde_json",
