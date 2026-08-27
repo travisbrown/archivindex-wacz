@@ -2,14 +2,14 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::time::Duration;
 
 use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
-use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, RetryConfig, Session};
+use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Session};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{CommandOutcome, Verbosity, exit_code};
 use archivindex_wordpress::read::read_comments;
@@ -38,7 +38,6 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
 /// Captures that fail or a session that ends early leave a partial archive behind, which is
 /// reported through the exit status rather than treated as an error.
 fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let titles = options.titles;
     let mut processor = CommentCaptureProcessor::new(&options.base_url)?;
     if let Some(resume_after) = &options.resume_after {
         processor = processor.resume_after(resume_after)?;
@@ -50,17 +49,7 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<Comm
         processor,
         progress: Rc::clone(&comment_progress),
     };
-    let retry_defaults = RetryConfig::default();
-    let retry = RetryConfig {
-        attempts: options.retry_attempts.unwrap_or(retry_defaults.attempts),
-        initial_backoff: options
-            .retry_initial_backoff
-            .map_or(retry_defaults.initial_backoff, Duration::from_secs),
-        max_backoff: options
-            .retry_max_backoff
-            .map_or(retry_defaults.max_backoff, Duration::from_secs),
-    };
-    let config = options.config.into_config();
+    let config = load_config(options.config.as_deref())?;
     let archiver = match &options.cookie {
         Some(cookie) => Archiver::new(config)?.cookie_for(&options.base_url, cookie)?,
         None => Archiver::new(config)?,
@@ -74,7 +63,6 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<Comm
         [first_url],
         &options.output,
     )?
-    .operator(options.operator, options.operator_email)
     .processor(processor)
     .events(move |event: CaptureEvent<'_>| {
         if matches!(event, CaptureEvent::Written { .. })
@@ -83,13 +71,7 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<Comm
             event_progress.set_message(snapshot.to_string());
         }
         CaptureControl::Continue
-    })
-    .retry(retry)
-    .request_delay(Duration::from_secs(options.request_delay));
-
-    if titles {
-        session = session.titles();
-    }
+    });
 
     if let Some(revisit_index) = options.revisit_index {
         session = session.revisit_index(revisit_index);
@@ -132,6 +114,57 @@ fn archive_comments(options: ArchiveCommentsOptions, quiet: bool) -> Result<Comm
         );
 
         Ok(CommandOutcome::ReportedProblems)
+    }
+}
+
+/// Read the configuration file at `path`, or take the default configuration without one.
+fn load_config(path: Option<&Path>) -> Result<Config, Error> {
+    path.map_or_else(
+        || Ok(Config::default()),
+        |path| {
+            let format = ConfigFormat::of(path)?;
+            let text = std::fs::read_to_string(path).map_err(|source| Error::ConfigRead {
+                path: path.to_owned(),
+                source,
+            })?;
+
+            format.parse(path, &text)
+        },
+    )
+}
+
+/// A supported configuration document format, recognized by file extension.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigFormat {
+    Toml,
+    Json,
+}
+
+impl ConfigFormat {
+    fn of(path: &Path) -> Result<Self, Error> {
+        let extension = path
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(str::to_ascii_lowercase);
+
+        match extension.as_deref() {
+            Some("toml") => Ok(Self::Toml),
+            Some("json") => Ok(Self::Json),
+            _ => Err(Error::ConfigExtension(path.to_owned())),
+        }
+    }
+
+    fn parse(self, path: &Path, text: &str) -> Result<Config, Error> {
+        match self {
+            Self::Toml => toml::from_str(text).map_err(|source| Error::ConfigToml {
+                path: path.to_owned(),
+                source,
+            }),
+            Self::Json => serde_json::from_str(text).map_err(|source| Error::ConfigJson {
+                path: path.to_owned(),
+                source,
+            }),
+        }
     }
 }
 
@@ -199,6 +232,26 @@ enum Error {
     Archive(#[from] archivindex_archiver::Error),
     #[error("invalid archiver configuration: {0}")]
     Config(#[from] archivindex_archiver::ConfigError),
+    #[error("cannot read configuration file {}: {source}", path.display())]
+    ConfigRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("configuration file {} must have a .toml or .json extension", .0.display())]
+    ConfigExtension(PathBuf),
+    #[error("cannot parse TOML configuration file {}: {source}", path.display())]
+    ConfigToml {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("cannot parse JSON configuration file {}: {source}", path.display())]
+    ConfigJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error(transparent)]
     UserAgent(#[from] archivindex_archiver::UserAgentError),
     #[error(transparent)]
@@ -233,8 +286,10 @@ enum Command {
 /// Options for archiving comments from the `WordPress` REST API.
 #[derive(Debug, clap::Args)]
 struct ArchiveCommentsOptions {
-    #[clap(flatten)]
-    config: ConfigOptions,
+    /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
+    /// optional and takes its default when absent.
+    #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    config: Option<PathBuf>,
     /// Base URL of the `WordPress` site.
     #[clap(long)]
     base_url: String,
@@ -244,12 +299,6 @@ struct ArchiveCommentsOptions {
     /// URL-safe name identifying the session and its WARC file.
     #[clap(long)]
     session_name: String,
-    /// Name of the operator running the crawl, recorded in `warcinfo`.
-    #[clap(long)]
-    operator: String,
-    /// Email address of the operator running the crawl, recorded in `warcinfo`.
-    #[clap(long)]
-    operator_email: Option<String>,
     /// Persistent payload-revisit and conditional-request state database.
     #[clap(long)]
     revisit_index: Option<PathBuf>,
@@ -268,21 +317,6 @@ struct ArchiveCommentsOptions {
     /// Quote values containing semicolons.
     #[clap(long)]
     cookie: Option<String>,
-    /// Record titles in the session's `warcinfo` and per-capture metadata records.
-    #[clap(long)]
-    titles: bool,
-    /// Total attempts for a transiently failing URL (defaults to 3; zero is treated as one).
-    #[clap(long)]
-    retry_attempts: Option<usize>,
-    /// Seconds before the first retry (defaults to 1; subsequent delays double).
-    #[clap(long)]
-    retry_initial_backoff: Option<u64>,
-    /// Maximum retry delay in seconds (defaults to 30).
-    #[clap(long)]
-    retry_max_backoff: Option<u64>,
-    /// Seconds to wait between successive comment-batch requests (defaults to 0).
-    #[clap(long, default_value_t = 0)]
-    request_delay: u64,
 }
 
 /// Options for reading comments from a WARC file.
@@ -292,67 +326,29 @@ struct ReadCommentsOptions {
     warc: PathBuf,
 }
 
-/// Capture settings for the archiving workflow.
-#[derive(Debug, clap::Args)]
-struct ConfigOptions {
-    /// Compress each WARC record as an independent gzip member.
-    #[clap(long)]
-    gzip: bool,
-    /// The User-Agent header value sent with every request (defaults to the archiver's own).
-    #[clap(long)]
-    user_agent: Option<String>,
-    /// The timeout in seconds for each request (defaults to 30).
-    #[clap(long)]
-    timeout: Option<u64>,
-    /// The maximum number of redirects followed for each URL (defaults to 10).
-    #[clap(long)]
-    max_redirects: Option<usize>,
-    /// The maximum number of response bytes stored for one fetch (unbounded when unset; a response
-    /// reaching the limit is archived truncated rather than failed).
-    #[clap(long)]
-    max_response_length: Option<u64>,
-}
-
-impl ConfigOptions {
-    /// Build an archiver configuration.
-    ///
-    /// A comment session walks one paginated sequence, so it never fetches concurrently.
-    fn into_config(self) -> Config {
-        let defaults = Config::default();
-
-        Config {
-            user_agent: self.user_agent.unwrap_or(defaults.user_agent),
-            timeout: self.timeout.map_or(defaults.timeout, Duration::from_secs),
-            max_redirects: self.max_redirects.unwrap_or(defaults.max_redirects),
-            concurrency: defaults.concurrency,
-            max_response_length: self.max_response_length,
-            gzip_warc: self.gzip,
-            ..defaults
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
-    use clap::Parser;
+    use archivindex_archiver::Config;
+    use clap::{CommandFactory, Parser};
 
-    use super::{Command, Opts};
+    use super::{Command, ConfigFormat, Opts, load_config};
 
     #[test]
-    fn archive_command_reads_required_options_and_limit() {
+    fn archive_command_reads_workflow_and_config_options() {
         let options = Opts::try_parse_from([
             "archivindex-wordpress",
             "archive-comments",
+            "--config",
+            "capture.toml",
             "--base-url",
             "https://example.com/",
             "--output",
             "comments.warc.gz",
             "--session-name",
             "comments-2026",
-            "--operator",
-            "A. Archivist",
             "--revisit-index",
             "comments-state.sqlite3",
             "--limit",
@@ -363,9 +359,6 @@ mod tests {
              before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=8&per_page=100",
             "--cookie",
             "cf_clearance=test-clearance; __cf_bm=test-bot-cookie",
-            "--request-delay",
-            "7",
-            "--gzip",
         ])
         .expect("valid options");
 
@@ -376,7 +369,7 @@ mod tests {
         assert_eq!(options.base_url, "https://example.com/");
         assert_eq!(options.output, PathBuf::from("comments.warc.gz"));
         assert_eq!(options.session_name, "comments-2026");
-        assert_eq!(options.operator, "A. Archivist");
+        assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
         assert_eq!(
             options.revisit_index,
             Some(PathBuf::from("comments-state.sqlite3"))
@@ -394,33 +387,78 @@ mod tests {
             options.cookie.as_deref(),
             Some("cf_clearance=test-clearance; __cf_bm=test-bot-cookie")
         );
-        assert!(!options.titles);
-        assert_eq!(options.request_delay, 7);
-        assert!(options.config.gzip);
     }
 
     #[test]
-    fn archive_command_enables_titles_explicitly() {
-        let options = Opts::try_parse_from([
-            "archivindex-wordpress",
-            "archive-comments",
-            "--base-url",
-            "https://example.com/",
-            "--output",
-            "comments.warc.gz",
-            "--session-name",
-            "comments-2026",
-            "--operator",
-            "A. Archivist",
-            "--titles",
-        ])
-        .expect("valid options");
+    fn archive_command_does_not_duplicate_configuration_fields() {
+        let command = Opts::command();
+        let archive = command
+            .find_subcommand("archive-comments")
+            .expect("the archive-comments command");
+        let argument_ids = archive
+            .get_arguments()
+            .map(|argument| argument.get_id().as_str())
+            .collect::<Vec<_>>();
 
-        let Command::ArchiveComments(options) = options.command else {
-            panic!("expected the archiving command");
-        };
+        for removed in [
+            "gzip",
+            "user_agent",
+            "timeout",
+            "max_redirects",
+            "max_response_length",
+            "operator",
+            "operator_email",
+            "titles",
+            "retry_attempts",
+            "retry_initial_backoff",
+            "retry_max_backoff",
+            "request_delay",
+        ] {
+            assert!(!argument_ids.contains(&removed), "unexpected --{removed}");
+        }
+    }
 
-        assert!(options.titles);
+    #[test]
+    fn no_configuration_file_uses_archiver_defaults() {
+        assert_eq!(
+            load_config(None).expect("the default configuration"),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn configuration_file_supplies_archiver_and_session_settings() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("capture.toml");
+        std::fs::write(
+            &path,
+            "gzip_warc = true\n\
+             [operator]\nname = \"A. Archivist\"\nemail = \"archivist@example.com\"\n\
+             [session]\nrequest_delay = \"750ms\"\ntitles = true\n",
+        )
+        .expect("write the configuration");
+
+        let config = load_config(Some(&path)).expect("read the configuration");
+
+        assert!(config.gzip_warc);
+        let operator = config.operator.expect("a configured operator");
+        assert_eq!(operator.name, "A. Archivist");
+        assert_eq!(operator.email.as_deref(), Some("archivist@example.com"));
+        assert_eq!(config.session.request_delay, Duration::from_millis(750));
+        assert!(config.session.titles);
+    }
+
+    #[test]
+    fn configuration_format_is_recognized_by_extension() {
+        assert_eq!(
+            ConfigFormat::of(Path::new("capture.toml")).ok(),
+            Some(ConfigFormat::Toml)
+        );
+        assert_eq!(
+            ConfigFormat::of(Path::new("capture.JSON")).ok(),
+            Some(ConfigFormat::Json)
+        );
+        assert!(ConfigFormat::of(Path::new("capture.yaml")).is_err());
     }
 
     #[test]

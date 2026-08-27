@@ -47,6 +47,7 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 /// # Examples
 ///
 /// ```no_run
+/// use archivindex_archiver::config::Operator;
 /// use archivindex_archiver::{Archiver, Config};
 /// use archivindex_archiver::session::Session;
 /// use archivindex_wordpress::CommentCaptureProcessor;
@@ -54,14 +55,20 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let processor = CommentCaptureProcessor::new("https://example.com/")?;
 /// let first = processor.first_comment_url();
+/// let config = Config {
+///     operator: Some(Operator {
+///         name: "A. Archivist".to_owned(),
+///         email: None,
+///     }),
+///     ..Config::default()
+/// };
 ///
 /// let summary = Session::new(
-///     Archiver::new(Config::default())?,
+///     Archiver::new(config)?,
 ///     "wordpress-comments",
 ///     [first],
 ///     "wordpress-comments.warc",
 /// )?
-/// .operator("A. Archivist", None)
 /// .processor(processor)
 /// .run()?;
 ///
