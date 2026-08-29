@@ -14,10 +14,19 @@ use chrono::{DateTime, Utc};
 use url::Url;
 
 /// The API resources requested before any collection, relative to the installation root.
-const ROOTS: [&str; 3] = ["wp-json", "wp-json/wp/v2", "wp-json/wp/v2/types"];
+const ROOTS: [&str; 8] = [
+    "wp-json",
+    "wp-json/wp/v2",
+    "wp-json/wp/v2/types",
+    "wp-json/wp/v2/taxonomies",
+    "wp-json/wp/v2/block-types",
+    "wp-json/wp/v2/block-patterns/categories",
+    "wp-json/wp/v2/block-patterns/patterns",
+    "wp-json/wp/v2/menu-locations",
+];
 
 /// A REST API v2 collection endpoint. The variant order is the order endpoints are archived in.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Endpoint {
     /// The `pages` collection.
     Pages,
