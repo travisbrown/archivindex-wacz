@@ -1,9 +1,9 @@
 //! Capturing and reading `WordPress` REST API v2 resources.
 //!
 //! The [`archive`] module archives a site's collections endpoint by endpoint through an
-//! `archivindex-archiver` crawl session. [`CommentCaptureProcessor`] captures a bounded window
-//! of a site's comments, and the [`read`] module reads comments from the resulting WARC file and
-//! checks its page coverage.
+//! `archivindex-archiver` session. [`CommentDriver`] captures a bounded window of a site's
+//! comments, and the [`read`] module reads comments from the resulting WARC file and checks its
+//! page coverage.
 //!
 //! # Modules
 //!
@@ -23,7 +23,8 @@ mod strategies;
 
 use std::collections::HashSet;
 
-use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection};
+use archivindex_archiver::Error;
+use archivindex_archiver::session::{Capture, Driver, Inspection, Request};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use url::Url;
@@ -41,24 +42,25 @@ const INVALID_PAGE_ERROR_CODE: &str = "rest_post_invalid_page_number";
 const CLOUDFLARE_CHALLENGE: &str = "Cloudflare requires an interactive browser challenge; \
      browser-derived clearance cookies are required";
 
-/// Inspect batches from the `WordPress` REST API v2 comments endpoint.
+/// Drive a session through the `WordPress` REST API v2 comments endpoint.
 ///
-/// The processor takes a window of comment creation times when it is constructed. Start a crawl
-/// with [`first_comment_url`](Self::first_comment_url), which requests comments in ascending ID
-/// order within that window. It walks every page advertised by `X-WP-TotalPages` and normally finishes after
-/// one sweep when the pagination headers are stable and the number of visible comments does not
-/// exceed `X-WP-Total`. `WordPress` applies per-comment read checks after its pagination query, so
-/// the reported total can legitimately exceed the number of comments returned. A second sweep
-/// runs when the consistency checks fail, or when explicitly requested with
-/// [`second_sweep`](Self::second_sweep). The fixed cutoff prevents ordinary additions after
-/// construction from moving the snapshot. Already captured IDs remain retained even if they are
-/// deleted during collection.
+/// The driver takes a window of comment creation times when it is constructed. Its first request
+/// is a seed for page one of the comments in ascending ID order within that window, also given by
+/// [`first_comment_url`](Self::first_comment_url). It walks every page advertised by
+/// `X-WP-TotalPages` and normally finishes after one sweep when the pagination headers are stable
+/// and the number of visible comments does not exceed `X-WP-Total`. `WordPress` applies
+/// per-comment read checks after its pagination query, so the reported total can legitimately
+/// exceed the number of comments returned. A second sweep runs when the consistency checks fail,
+/// or when explicitly requested with [`second_sweep`](Self::second_sweep). The fixed cutoff
+/// prevents ordinary additions after construction from moving the snapshot. Already captured IDs
+/// remain retained even if they are deleted during collection.
 ///
-/// Each page is requested as a link from the preceding page, and a validation sweep repeats pages
-/// already read, so the session must not skip repeated discoveries. A repeated page the server
-/// answers with `304 Not Modified` adds no IDs, and the sweep continues by the page count last
-/// advertised. Malformed JSON or an unexpected HTTP response makes the session incomplete instead
-/// of silently ending pagination.
+/// Every page after the first is requested via the preceding page, and a validation sweep repeats
+/// pages already read, its page one requested via the page that ended the first sweep. A repeated
+/// page the server answers with `304 Not Modified` adds no IDs, and the sweep continues by the
+/// page count last advertised. Malformed JSON or an unexpected HTTP response makes the session
+/// incomplete instead of silently ending pagination, and a failed capture ends the driver's
+/// requests.
 ///
 /// # Examples
 ///
@@ -66,14 +68,13 @@ const CLOUDFLARE_CHALLENGE: &str = "Cloudflare requires an interactive browser c
 /// use archivindex_archiver::config::Operator;
 /// use archivindex_archiver::{Archiver, Config};
 /// use archivindex_archiver::session::Session;
-/// use archivindex_wordpress::CommentCaptureProcessor;
+/// use archivindex_wordpress::CommentDriver;
 /// use chrono::{TimeDelta, Utc};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let before = Utc::now();
 /// let after = before - TimeDelta::days(1);
-/// let processor = CommentCaptureProcessor::for_window("https://example.com/", after, before)?;
-/// let first = processor.first_comment_url();
+/// let driver = CommentDriver::for_window("https://example.com/", after, before)?;
 /// let config = Config {
 ///     operator: Some(Operator {
 ///         name: "A. Archivist".to_owned(),
@@ -85,19 +86,16 @@ const CLOUDFLARE_CHALLENGE: &str = "Cloudflare requires an interactive browser c
 /// let summary = Session::new(
 ///     Archiver::new(config)?,
 ///     "wordpress-comments",
-///     [first],
+///     driver,
 ///     "wordpress-comments.warc",
 /// )?
-/// // Validation sweeps repeat page URLs, which a deduplicating session would skip.
-/// .dedupe_discoveries(false)
-/// .processor(processor)
 /// .run()?;
 ///
 /// assert!(summary.is_complete());
 /// # Ok(())
 /// # }
 /// ```
-pub struct CommentCaptureProcessor {
+pub struct CommentDriver {
     endpoint: Url,
     site_name: String,
     after: Option<DateTime<Utc>>,
@@ -113,19 +111,21 @@ pub struct CommentCaptureProcessor {
 enum Traversal {
     Active(Sweep),
     Complete(Sweep),
+    /// A capture failed, so the sweep it was part of cannot be finished.
+    Failed(Sweep),
 }
 
 impl Traversal {
     const fn sweep(&self) -> &Sweep {
         match self {
-            Self::Active(sweep) | Self::Complete(sweep) => sweep,
+            Self::Active(sweep) | Self::Complete(sweep) | Self::Failed(sweep) => sweep,
         }
     }
 
     const fn active_sweep_mut(&mut self) -> Option<&mut Sweep> {
         match self {
             Self::Active(sweep) => Some(sweep),
-            Self::Complete(_) => None,
+            Self::Complete(_) | Self::Failed(_) => None,
         }
     }
 
@@ -133,9 +133,14 @@ impl Traversal {
         matches!(self, Self::Complete(_))
     }
 
-    fn complete(&mut self) {
+    /// End an active traversal, as complete or as failed.
+    fn end(&mut self, complete: bool) {
         if let Self::Active(sweep) = self {
-            *self = Self::Complete(sweep.clone());
+            *self = if complete {
+                Self::Complete(sweep.clone())
+            } else {
+                Self::Failed(sweep.clone())
+            };
         }
     }
 }
@@ -152,7 +157,11 @@ struct Sweep {
 #[derive(Clone, Copy)]
 enum SweepPhase {
     Primary,
-    Validation { previous_total: Option<usize> },
+    /// A repeat of the first sweep's pages, whose page one is requested via page `after`.
+    Validation {
+        previous_total: Option<usize>,
+        after: usize,
+    },
 }
 
 impl Sweep {
@@ -168,12 +177,13 @@ impl Sweep {
     }
 
     /// Begin a validation sweep, which re-traverses the same pages this sweep covered.
-    const fn validation(&self, page: usize) -> Self {
+    const fn validation(&self) -> Self {
         Self {
             phase: SweepPhase::Validation {
                 previous_total: self.effective_total(),
+                after: self.page,
             },
-            page,
+            page: 1,
             total: None,
             headers_consistent: true,
             total_pages: self.total_pages,
@@ -187,6 +197,7 @@ impl Sweep {
                 None,
                 SweepPhase::Validation {
                     previous_total: Some(total),
+                    ..
                 },
             ) => Some(total),
             (None, _) => None,
@@ -205,8 +216,8 @@ impl Sweep {
     }
 }
 
-impl CommentCaptureProcessor {
-    /// Create a comment processor restricted to a fixed update window.
+impl CommentDriver {
+    /// Create a comment driver restricted to a fixed update window.
     ///
     /// Every comments request carries `after` and `before` at whole-second UTC precision. The
     /// caller is responsible for choosing an `after` instant earlier than `before`. A base URL
@@ -221,19 +232,19 @@ impl CommentCaptureProcessor {
         after: DateTime<Utc>,
         before: DateTime<Utc>,
     ) -> Result<Self, url::ParseError> {
-        let mut processor = Self::with_before(base_url.as_ref(), before)?;
-        processor.after = Some(after);
+        let mut driver = Self::with_before(base_url.as_ref(), before)?;
+        driver.after = Some(after);
 
-        Ok(processor)
+        Ok(driver)
     }
 
-    /// Produce the first comments URL: page one in ascending comment-ID order within the window.
+    /// The first comments URL: page one in ascending comment-ID order within the window.
     #[must_use]
     pub fn first_comment_url(&self) -> String {
         self.comment_url(1)
     }
 
-    /// Construct a processor with an explicit snapshot cutoff.
+    /// Construct a driver with an explicit snapshot cutoff.
     fn with_before(base_url: &str, before: DateTime<Utc>) -> Result<Self, url::ParseError> {
         let mut base = Url::parse(base_url)?;
         base.set_query(None);
@@ -300,8 +311,8 @@ impl CommentCaptureProcessor {
         let count_is_plausible = total.is_some_and(|total| self.seen_ids.len() <= total);
         let snapshot_is_consistent = self.sweep().headers_consistent && count_is_plausible;
         if self.sweep().is_primary() && (self.force_second_sweep || !snapshot_is_consistent) {
-            self.traversal = Traversal::Active(self.sweep().validation(1));
-            return next_page(self.first_comment_url());
+            self.traversal = Traversal::Active(self.sweep().validation());
+            return Inspection::default();
         }
 
         if !snapshot_is_consistent {
@@ -318,7 +329,7 @@ impl CommentCaptureProcessor {
             ));
         }
 
-        self.traversal.complete();
+        self.traversal.end(true);
         Inspection::default()
     }
 
@@ -336,13 +347,26 @@ impl CommentCaptureProcessor {
     }
 }
 
-impl CaptureProcessor for CommentCaptureProcessor {
-    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        if self.traversal.is_complete() {
-            return Inspection::default();
-        }
+impl Driver for CommentDriver {
+    fn next(&mut self) -> Option<Request> {
+        let Traversal::Active(sweep) = &self.traversal else {
+            return None;
+        };
+        let url = self.comment_url(sweep.page);
 
-        let page = self.sweep().page;
+        Some(match (sweep.phase, sweep.page) {
+            (SweepPhase::Primary, 1) => Request::seed(url),
+            (SweepPhase::Validation { after, .. }, 1) => {
+                Request::extra(url, self.comment_url(after))
+            }
+            (_, page) => Request::extra(url, self.comment_url(page - 1)),
+        })
+    }
+
+    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        let Some(page) = self.traversal.active_sweep_mut().map(|sweep| sweep.page) else {
+            return Inspection::default();
+        };
 
         if is_cloudflare_challenge(capture) {
             return Inspection::error(CLOUDFLARE_CHALLENGE);
@@ -419,14 +443,17 @@ impl CaptureProcessor for CommentCaptureProcessor {
             .total_pages
             .map_or(comments.len() == PER_PAGE, |total| page < total);
         let mut inspection = if has_next {
-            let next = page + 1;
-            self.active_sweep_mut().page = next;
-            next_page(self.comment_url(next))
+            self.active_sweep_mut().page = page + 1;
+            Inspection::default()
         } else {
             self.finish_sweep()
         };
         inspection.title = title;
         inspection
+    }
+
+    fn failed(&mut self, _url: &str, _error: &Error) {
+        self.traversal.end(false);
     }
 }
 
@@ -441,7 +468,7 @@ pub struct CommentProgress {
     pub first_date: Option<NaiveDate>,
     /// Latest valid GMT date among downloaded comments.
     pub last_date: Option<NaiveDate>,
-    /// Whether the processor completed a stable traversal of the snapshot.
+    /// Whether the driver completed a stable traversal of the snapshot.
     pub complete: bool,
 }
 
@@ -514,14 +541,6 @@ impl Comment {
     }
 }
 
-/// Request one further page next, ahead of anything else waiting in the session.
-fn next_page(url: String) -> Inspection {
-    Inspection {
-        links: vec![url],
-        ..Inspection::default()
-    }
-}
-
 /// Whether Cloudflare's managed challenge answered the request.
 ///
 /// The challenge cannot be answered without a browser, and every further request would meet it
@@ -563,13 +582,13 @@ fn bounds<T: Copy + Ord>(mut items: impl Iterator<Item = T>) -> Option<(T, T)> {
 
 #[cfg(test)]
 mod tests {
-    use archivindex_archiver::capture::Origin;
-    use archivindex_archiver::session::{Capture, CaptureProcessor};
+    use archivindex_archiver::Error;
+    use archivindex_archiver::session::{Capture, Driver, Request};
     use chrono::Utc;
     use proptest::prelude::*;
     use serde_json::json;
 
-    use super::{CommentCaptureProcessor, CommentProgress, DateTime, bounds, format_timestamp};
+    use super::{CommentDriver, CommentProgress, DateTime, bounds, format_timestamp};
     use crate::strategies;
 
     #[test_strategy::proptest]
@@ -597,8 +616,8 @@ mod tests {
         #[strategy(strategies::datetime())] before: DateTime<Utc>,
         #[strategy(1..=100_usize)] page: usize,
     ) {
-        let processor = CommentCaptureProcessor::with_before(base.as_str(), before).unwrap();
-        let url = url::Url::parse(&processor.comment_url(page)).unwrap();
+        let driver = CommentDriver::with_before(base.as_str(), before).unwrap();
+        let url = url::Url::parse(&driver.comment_url(page)).unwrap();
 
         prop_assert!(url.path().ends_with("/wp-json/wp/v2/comments"));
 
@@ -634,47 +653,64 @@ mod tests {
         Capture::new(
             "https://example.com/wp-json/wp/v2/comments",
             "https://example.com/wp-json/wp/v2/comments",
-            Origin::Seed,
             payload,
             response,
         )
         .expect("a complete test response")
     }
 
+    /// A driver whose next request is `page`, via the page before it or `via` for page one.
+    fn page_request(driver: &CommentDriver, page: usize, via: Option<&str>) -> Request {
+        let via = via.map_or_else(|| driver.comment_url(page - 1), str::to_owned);
+
+        Request::extra(driver.comment_url(page), via)
+    }
+
     #[test]
-    fn first_url_uses_the_saved_snapshot_cutoff() {
-        let processor =
-            CommentCaptureProcessor::with_before("https://example.com/", timestamp(BEFORE))
-                .expect("a processor");
+    fn the_first_request_is_a_seed_for_the_saved_snapshot_cutoff() {
+        let mut driver = CommentDriver::with_before("https://example.com/", timestamp(BEFORE))
+            .expect("a driver");
         let expected = "https://example.com/wp-json/wp/v2/comments?\
             before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=1&per_page=100";
 
-        assert_eq!(processor.first_comment_url(), expected);
+        assert_eq!(driver.first_comment_url(), expected);
+        assert_eq!(driver.next(), Some(Request::seed(expected)));
+    }
+
+    #[test]
+    fn a_failed_capture_ends_the_requests() {
+        let mut driver = CommentDriver::with_before("https://example.com/", timestamp(BEFORE))
+            .expect("a driver");
+        let _ = driver.inspect(&capture(b"[]", TWO_PAGES));
+
+        driver.failed(&driver.comment_url(2), &Error::MissingHost(String::new()));
+
+        assert_eq!(driver.next(), None);
+        assert!(driver.progress().is_some_and(|progress| !progress.complete));
     }
 
     #[test]
     fn update_window_is_sent_with_the_first_page() {
-        let processor = CommentCaptureProcessor::for_window(
+        let driver = CommentDriver::for_window(
             "https://example.com/",
             timestamp("2026-08-18T00:00:00Z"),
             timestamp(BEFORE),
         )
-        .expect("a processor");
+        .expect("a driver");
         let first = "https://example.com/wp-json/wp/v2/comments?\
             after=2026-08-18T00:00:00Z&before=2026-08-20T00:00:00Z&\
             orderby=id&order=asc&page=1&per_page=100";
 
-        assert_eq!(processor.first_comment_url(), first);
+        assert_eq!(driver.first_comment_url(), first);
     }
 
     #[test]
     fn a_cloudflare_challenge_ends_the_traversal_with_an_explanation() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com/", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver = CommentDriver::with_before("https://example.com/", timestamp(BEFORE))
+            .expect("a driver");
         let response = b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\n\r\n";
 
-        let inspection = processor.inspect(&capture(b"", response));
+        let inspection = driver.inspect(&capture(b"", response));
 
         assert!(
             inspection
@@ -686,24 +722,26 @@ mod tests {
 
     #[test]
     fn inspection_titles_a_batch_and_advances_by_page() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let payload = br#"[
             {"id": 211416, "date_gmt": "2020-11-28T08:15:00"},
             {"id": 211420, "date_gmt": "2020-11-30T12:30:00"}
         ]"#;
 
-        let inspection = processor.inspect(&capture(payload, TWO_PAGES));
+        let inspection = driver.inspect(&capture(payload, TWO_PAGES));
 
         assert_eq!(
             inspection.title.as_deref(),
             Some("example.com comments 211416-211420 (2020-11-28 to 2020-11-30)")
         );
         assert_eq!(
-            inspection.links,
-            ["https://example.com/wp-json/wp/v2/comments?\
-                before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
+            driver.next(),
+            Some(Request::extra(
+                "https://example.com/wp-json/wp/v2/comments?\
+                    before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100",
+                driver.first_comment_url()
+            ))
         );
         let progress = CommentProgress {
             downloaded: 2,
@@ -712,7 +750,7 @@ mod tests {
             last_date: Some(timestamp("2020-11-30T00:00:00Z").date_naive()),
             complete: false,
         };
-        assert_eq!(processor.progress(), Some(progress));
+        assert_eq!(driver.progress(), Some(progress));
         assert_eq!(
             progress.to_string(),
             "Downloaded 2 of 101 comments (2020-11-28 to 2020-11-30)"
@@ -722,9 +760,8 @@ mod tests {
     #[test]
     fn matching_total_finishes_after_one_complete_sweep() -> Result<(), Box<dyn std::error::Error>>
     {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let page_one = serde_json::to_vec(
             &(1..=100)
                 .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
@@ -733,17 +770,12 @@ mod tests {
         let page_two =
             serde_json::to_vec(&[json!({"id": 101, "date_gmt": "2020-11-30T12:30:00"})])?;
 
-        assert_eq!(
-            processor.inspect(&capture(&page_one, TWO_PAGES)).links,
-            ["https://example.com/wp-json/wp/v2/comments?\
-                before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100"]
-        );
+        let _ = driver.inspect(&capture(&page_one, TWO_PAGES));
+        assert_eq!(driver.next(), Some(page_request(&driver, 2, None)));
         // Stable pagination headers make the first sweep sufficient.
-        assert_eq!(
-            processor.inspect(&capture(&page_two, TWO_PAGES)).links,
-            Vec::<String>::new()
-        );
-        assert_eq!(processor.seen_ids.len(), 101);
+        let _ = driver.inspect(&capture(&page_two, TWO_PAGES));
+        assert_eq!(driver.next(), None);
+        assert_eq!(driver.seen_ids.len(), 101);
 
         Ok(())
     }
@@ -751,9 +783,8 @@ mod tests {
     #[test]
     fn deletion_that_removes_a_page_cannot_hide_the_shifted_comment()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let original_page = serde_json::to_vec(
             &(1..=100)
                 .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
@@ -765,24 +796,19 @@ mod tests {
                 .collect::<Vec<_>>(),
         )?;
 
+        let _ = driver.inspect(&capture(&original_page, TWO_PAGES));
+        assert_eq!(driver.next(), Some(page_request(&driver, 2, None)));
+        // ID 1 is deleted before page 2 is requested, reducing the collection to one page, so
+        // the validation sweep begins via the page that vanished.
+        let _ = driver.inspect(&capture(INVALID_PAGE_ERROR, BAD_REQUEST));
         assert_eq!(
-            processor
-                .inspect(&capture(&original_page, TWO_PAGES))
-                .links
-                .len(),
-            1
-        );
-        // ID 1 is deleted before page 2 is requested, reducing the collection to one page.
-        assert_eq!(
-            processor
-                .inspect(&capture(INVALID_PAGE_ERROR, BAD_REQUEST))
-                .links,
-            [processor.first_comment_url()]
+            driver.next(),
+            Some(page_request(&driver, 1, Some(&driver.comment_url(2))))
         );
         // The repeated first page now exposes ID 101, but the retained deleted ID means the
         // reported total still cannot account for every distinct ID observed.
-        let validation = processor.inspect(&capture(&shifted_page, ONE_PAGE));
-        assert_eq!(processor.seen_ids.len(), 101);
+        let validation = driver.inspect(&capture(&shifted_page, ONE_PAGE));
+        assert_eq!(driver.seen_ids.len(), 101);
         assert!(validation.error.is_some());
 
         Ok(())
@@ -790,21 +816,19 @@ mod tests {
 
     #[test]
     fn unrelated_bad_request_on_a_later_page_fails_the_traversal() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let unrelated = br#"{
             "code": "rest_invalid_param",
             "message": "Invalid parameter(s): before",
             "data": {"status": 400}
         }"#;
 
-        let first = processor.inspect(&capture(b"[]", TWO_PAGES));
-        assert_eq!(first.links.len(), 1);
+        let _ = driver.inspect(&capture(b"[]", TWO_PAGES));
+        assert_eq!(driver.next(), Some(page_request(&driver, 2, None)));
 
-        let inspection = processor.inspect(&capture(unrelated, BAD_REQUEST));
+        let inspection = driver.inspect(&capture(unrelated, BAD_REQUEST));
 
-        assert_eq!(inspection.links, Vec::<String>::new());
         assert_eq!(
             inspection.error.as_deref(),
             Some("unexpected WordPress comments response status 400 on page 2")
@@ -814,10 +838,9 @@ mod tests {
     #[test]
     fn revalidated_pages_continue_a_sweep_by_the_last_advertised_page_count()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor")
-                .second_sweep(true);
+        let mut driver = CommentDriver::with_before("https://example.com", timestamp(BEFORE))
+            .expect("a driver")
+            .second_sweep(true);
         let page_one = serde_json::to_vec(
             &(1..=100)
                 .map(|id| json!({"id": id, "date_gmt": "2020-11-30T12:30:00"}))
@@ -825,55 +848,52 @@ mod tests {
         )?;
         let page_two =
             serde_json::to_vec(&[json!({"id": 101, "date_gmt": "2020-11-30T12:30:00"})])?;
-        let page_two_url = "https://example.com/wp-json/wp/v2/comments?\
-            before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=2&per_page=100";
 
-        processor.inspect(&capture(&page_one, TWO_PAGES));
-        processor.inspect(&capture(&page_two, TWO_PAGES));
+        driver.inspect(&capture(&page_one, TWO_PAGES));
+        driver.inspect(&capture(&page_two, TWO_PAGES));
+        assert_eq!(
+            driver.next(),
+            Some(page_request(&driver, 1, Some(&driver.comment_url(2))))
+        );
 
         // The validation sweep finds both pages unchanged: the first revalidated page still leads
         // to the second, and the second ends the sweep with nothing new to validate.
-        let first = processor.inspect(&capture(b"", NOT_MODIFIED));
+        let first = driver.inspect(&capture(b"", NOT_MODIFIED));
         assert_eq!(first.title, None);
-        assert_eq!(first.links, [page_two_url]);
-        assert_eq!(
-            processor.inspect(&capture(b"", NOT_MODIFIED)).links,
-            Vec::<String>::new()
-        );
-        assert_eq!(processor.seen_ids.len(), 101);
+        assert_eq!(driver.next(), Some(page_request(&driver, 2, None)));
+        let _ = driver.inspect(&capture(b"", NOT_MODIFIED));
+        assert_eq!(driver.next(), None);
+        assert_eq!(driver.seen_ids.len(), 101);
 
         Ok(())
     }
 
     #[test]
     fn malformed_batches_fail_but_empty_batches_finish() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
 
-        let malformed = processor.inspect(&capture(b"not json", ONE_PAGE));
+        let malformed = driver.inspect(&capture(b"not json", ONE_PAGE));
         assert!(malformed.error.is_some());
-        assert_eq!(malformed.links, Vec::<String>::new());
 
-        let empty = processor.inspect(&capture(b"[]", EMPTY_PAGE));
+        let empty = driver.inspect(&capture(b"[]", EMPTY_PAGE));
         assert_eq!(empty.error, None);
         assert_eq!(empty.title, None);
-        assert_eq!(empty.links, Vec::<String>::new());
+        assert_eq!(driver.next(), None);
     }
 
     #[test]
     fn visibility_filtered_total_finishes_with_a_shortfall() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let payload = br#"[{"id": 1, "date_gmt": "2020-11-30T12:30:00"}]"#;
         let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 2\r\nX-WP-TotalPages: 1\r\n\r\n";
 
-        let inspection = processor.inspect(&capture(payload, response));
-        assert_eq!(inspection.links, Vec::<String>::new());
+        let inspection = driver.inspect(&capture(payload, response));
         assert_eq!(inspection.error, None);
+        assert_eq!(driver.next(), None);
 
-        let progress = processor.progress().expect("reported progress");
+        let progress = driver.progress().expect("reported progress");
         assert!(progress.complete);
         assert_eq!(progress.visibility_shortfall(), Some(1));
         assert_eq!(
@@ -885,59 +905,56 @@ mod tests {
 
     #[test]
     fn more_visible_ids_than_reported_are_validated_then_rejected() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let payload = br#"[
             {"id": 1, "date_gmt": "2020-11-30T12:30:00"},
             {"id": 2, "date_gmt": "2020-11-30T12:30:00"}
         ]"#;
         let response = b"HTTP/1.1 200 OK\r\nX-WP-Total: 1\r\nX-WP-TotalPages: 1\r\n\r\n";
 
-        let first = processor.inspect(&capture(payload, response));
-        assert_eq!(first.links, [processor.first_comment_url()]);
+        let first = driver.inspect(&capture(payload, response));
         assert_eq!(first.error, None);
+        assert_eq!(
+            driver.next(),
+            Some(page_request(&driver, 1, Some(&driver.first_comment_url())))
+        );
 
-        let second = processor.inspect(&capture(payload, response));
-        assert_eq!(second.links, Vec::<String>::new());
+        let second = driver.inspect(&capture(payload, response));
         assert!(second.error.is_some());
     }
 
     #[test]
     fn missing_total_fails_the_traversal() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
         let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 1\r\n\r\n";
 
-        let inspection = processor.inspect(&capture(b"[]", response));
+        let inspection = driver.inspect(&capture(b"[]", response));
 
         assert!(inspection.error.is_some());
-        assert_eq!(inspection.links, Vec::<String>::new());
     }
 
     #[test]
     fn unexpected_status_fails_the_traversal() {
-        let mut processor =
-            CommentCaptureProcessor::with_before("https://example.com", timestamp(BEFORE))
-                .expect("a processor");
+        let mut driver =
+            CommentDriver::with_before("https://example.com", timestamp(BEFORE)).expect("a driver");
 
-        let inspection = processor.inspect(&capture(b"{}", b"HTTP/1.1 403 Forbidden\r\n\r\n"));
+        let inspection = driver.inspect(&capture(b"{}", b"HTTP/1.1 403 Forbidden\r\n\r\n"));
 
         assert!(inspection.error.is_some());
-        assert_eq!(inspection.links, Vec::<String>::new());
     }
 
     #[test]
     fn a_path_base_is_the_wordpress_installation_root() {
-        let processor = CommentCaptureProcessor::with_before(
+        let driver = CommentDriver::with_before(
             "https://example.com/blog?ignored=yes#fragment",
             timestamp(BEFORE),
         )
-        .expect("a processor");
+        .expect("a driver");
 
         assert!(
-            processor
+            driver
                 .first_comment_url()
                 .starts_with("https://example.com/blog/wp-json/wp/v2/comments?")
         );

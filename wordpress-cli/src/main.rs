@@ -14,20 +14,20 @@ use std::time::Duration;
 
 use archivindex_archiver::capture::{CaptureControl, CaptureEvent};
 use archivindex_archiver::session::{
-    Capture, CaptureProcessor, Inspection, Session, SessionSummary,
+    Capture, Driver, Inspection, Request, Session, SessionSummary,
 };
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
-use archivindex_wordpress::archive::{ArchiveProcessor, Checkpoint, Site};
+use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Site};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
 use archivindex_wordpress::endpoint::Endpoint;
 use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
 };
-use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
+use archivindex_wordpress::{CommentDriver, CommentProgress};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
 
@@ -56,7 +56,7 @@ fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutco
     let before = Utc::now();
 
     run_archive(
-        ArchiveProcessor::new(options.base.clone(), before),
+        ArchiveDriver::new(options.base.clone(), before),
         options,
         before,
         quiet,
@@ -65,7 +65,7 @@ fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutco
 
 /// Continue an archive from the checkpoint an earlier run reported.
 fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let processor = ArchiveProcessor::resume(
+    let driver = ArchiveDriver::resume(
         options.run.base.clone(),
         options.before,
         options.endpoint,
@@ -73,7 +73,7 @@ fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<Command
         options.total_pages,
     );
 
-    run_archive(processor, &options.run, options.before, quiet)
+    run_archive(driver, &options.run, options.before, quiet)
 }
 
 /// Run an archiving session to a new plain WARC in the output directory.
@@ -81,7 +81,7 @@ fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<Command
 /// A run that stops after the initial requests reports the command that continues it; one that
 /// stops during them is an error, since there is nothing to continue.
 fn run_archive(
-    processor: ArchiveProcessor,
+    driver: ArchiveDriver,
     options: &ArchiveRunOptions,
     before: DateTime<Utc>,
     quiet: bool,
@@ -100,47 +100,45 @@ fn run_archive(
         archiver = archiver.cookie_for(options.base.root().as_str(), cookie)?;
     }
 
-    let seeds = processor.seeds();
-    let extras = processor.extras();
-    let processor = Rc::new(RefCell::new(ArchiveRunState::new(processor)));
+    let state = Rc::new(RefCell::new(ArchiveRunState::new(driver)));
     let progress = spinner(format!("Archiving {}", options.base.base()), None);
     let event_progress = progress.clone();
-    let event_processor = Rc::clone(&processor);
+    let event_state = Rc::clone(&state);
     // An interrupt ends the session cleanly, so its captures are published and the checkpoint
     // reported instead of abandoning a partial file.
     let interrupted = interrupt_flag();
-    let mut session = Session::new(archiver, &session_name, seeds, &output)?
-        .extras(extras)
-        .processor(SharedArchiveProcessor(Rc::clone(&processor)))
-        // A collection's validation pass intentionally requests the same page URLs again.
-        .dedupe_discoveries(false)
-        .events(move |event: CaptureEvent<'_>| {
-            match event {
-                // Every later request depends on the failed one, so the run stops at its
-                // checkpoint rather than continuing with the collections still waiting.
-                CaptureEvent::Failed { .. } => CaptureControl::Cancel,
-                CaptureEvent::Written { url } => {
-                    let mut processor = event_processor.borrow_mut();
-                    processor.written(url);
-                    event_progress.set_message(processor.processor.to_string());
-                    if interrupted.load(Ordering::Relaxed) {
-                        CaptureControl::Cancel
-                    } else {
-                        CaptureControl::Continue
-                    }
-                }
-                // Once a response has been captured, let inspection and recording finish before
-                // honoring an interrupt so the reported checkpoint is durable.
-                CaptureEvent::Captured { .. } => CaptureControl::Continue,
-                CaptureEvent::Started { .. } | CaptureEvent::Retrying { .. } => {
-                    if interrupted.load(Ordering::Relaxed) {
-                        CaptureControl::Cancel
-                    } else {
-                        CaptureControl::Continue
-                    }
+    let mut session = Session::new(
+        archiver,
+        &session_name,
+        SharedArchiveDriver(Rc::clone(&state)),
+        &output,
+    )?
+    .events(move |event: CaptureEvent<'_>| {
+        match event {
+            CaptureEvent::Written { url } => {
+                let mut state = event_state.borrow_mut();
+                state.written(url);
+                event_progress.set_message(state.driver.to_string());
+                if interrupted.load(Ordering::Relaxed) {
+                    CaptureControl::Cancel
+                } else {
+                    CaptureControl::Continue
                 }
             }
-        });
+            // Once a response has been captured, let inspection and recording finish before
+            // honoring an interrupt so the reported checkpoint is durable.
+            CaptureEvent::Captured { .. } => CaptureControl::Continue,
+            CaptureEvent::Started { .. }
+            | CaptureEvent::Retrying { .. }
+            | CaptureEvent::Failed { .. } => {
+                if interrupted.load(Ordering::Relaxed) {
+                    CaptureControl::Cancel
+                } else {
+                    CaptureControl::Continue
+                }
+            }
+        }
+    });
 
     if let Some(revisit_index) = &options.revisit_index {
         session = session.revisit_index(revisit_index);
@@ -152,9 +150,9 @@ fn run_archive(
     let summary = session.run()?;
     progress.finish_and_clear();
 
-    let processor = processor.borrow();
-    report_archive_problems(&summary, &processor.processor, options);
-    let checkpoint = processor.checkpoint_for_summary(&summary);
+    let state = state.borrow();
+    report_archive_problems(&summary, &state.driver, options);
+    let checkpoint = state.checkpoint_for_summary(&summary);
 
     match checkpoint {
         Checkpoint::Finished if summary.is_complete() => {
@@ -170,7 +168,7 @@ fn run_archive(
         }
         Checkpoint::Finished => {
             log::warn!(
-                "the archive session reported problems after its final processor checkpoint; \
+                "the archive session reported problems after its final driver checkpoint; \
                  start a new archive to guarantee completeness"
             );
             Ok(CommandOutcome::ReportedProblems)
@@ -193,7 +191,7 @@ fn run_archive(
 
 fn report_archive_problems(
     summary: &SessionSummary,
-    processor: &ArchiveProcessor,
+    driver: &ArchiveDriver,
     options: &ArchiveRunOptions,
 ) {
     for failure in &summary.failures {
@@ -211,7 +209,7 @@ fn report_archive_problems(
             summary.partial_captures()
         );
     }
-    for &(endpoint, status) in processor.probed() {
+    for &(endpoint, status) in driver.probed() {
         if status == 404 {
             log::info!("{} does not expose {endpoint}", options.base.base());
         } else if !(200..300).contains(&status) && status != 304 {
@@ -279,19 +277,19 @@ fn shell_word(value: &str) -> String {
     }
 }
 
-/// Processor progress paired with the latest checkpoint known to have reached the WARC.
+/// Driver progress paired with the latest checkpoint known to have reached the WARC.
 struct ArchiveRunState {
-    processor: ArchiveProcessor,
+    driver: ArchiveDriver,
     durable: Checkpoint,
     pending: Option<(String, Checkpoint)>,
     transitions: Vec<(String, Checkpoint)>,
 }
 
 impl ArchiveRunState {
-    fn new(processor: ArchiveProcessor) -> Self {
-        let durable = processor.checkpoint();
+    fn new(driver: ArchiveDriver) -> Self {
+        let durable = driver.checkpoint();
         Self {
-            processor,
+            driver,
             durable,
             pending: None,
             transitions: Vec::new(),
@@ -326,18 +324,26 @@ impl ArchiveRunState {
     }
 }
 
-/// The session's processor, shared with the event sink that commits written progress.
-struct SharedArchiveProcessor(Rc<RefCell<ArchiveRunState>>);
+/// The session's driver, shared with the event sink that commits written progress.
+struct SharedArchiveDriver(Rc<RefCell<ArchiveRunState>>);
 
-impl CaptureProcessor for SharedArchiveProcessor {
+impl Driver for SharedArchiveDriver {
+    fn next(&mut self) -> Option<Request> {
+        self.0.borrow_mut().driver.next()
+    }
+
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
         let mut state = self.0.borrow_mut();
-        let before = state.processor.checkpoint();
-        let inspection = state.processor.inspect(capture);
-        let after = state.processor.checkpoint();
+        let before = state.driver.checkpoint();
+        let inspection = state.driver.inspect(capture);
+        let after = state.driver.checkpoint();
         state.transitions.push((capture.url.to_owned(), before));
         state.pending = Some((capture.url.to_owned(), after));
         inspection
+    }
+
+    fn failed(&mut self, url: &str, error: &archivindex_archiver::Error) {
+        self.0.borrow_mut().driver.failed(url, error);
     }
 }
 
@@ -370,12 +376,11 @@ fn update_comments(options: &UpdateCommentsOptions, quiet: bool) -> Result<Comma
                     "archived before cutoff"
                 }
             );
-            let processor =
-                CommentCaptureProcessor::for_window(&update.anchor.base_url, after, before)?;
+            let driver = CommentDriver::for_window(&update.anchor.base_url, after, before)?;
 
             Ok(CommentRun {
                 site_url: update.anchor.base_url,
-                processor,
+                driver,
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -496,7 +501,7 @@ fn update_domain(anchor: &CommentUpdateAnchor) -> String {
 struct CommentRun {
     /// Names the site in progress messages and scopes the cookie to its host.
     site_url: String,
-    processor: CommentCaptureProcessor,
+    driver: CommentDriver,
 }
 
 #[derive(Clone, Copy)]
@@ -515,31 +520,18 @@ fn capture_comment_run(
     options: CommentRunOptions<'_>,
     quiet: bool,
 ) -> Result<CommandOutcome, Error> {
-    // A site's page one is a seed with no `via`; every later page is a link from the preceding
-    // page.
-    let mut seeds = Vec::with_capacity(runs.len());
-    let mut scheduled = Vec::with_capacity(runs.len());
-    let site_urls = runs
+    let (site_urls, drivers): (Vec<_>, Vec<_>) = runs
         .into_iter()
-        .map(|run| {
-            let processor = run.processor.second_sweep(options.second_sweep);
-            let first_url = processor.first_comment_url();
-            seeds.push(first_url.clone());
-            scheduled.push(ScheduledCommentProcessor {
-                processor,
-                next_url: Some(first_url),
-            });
-
-            run.site_url
-        })
-        .collect::<Vec<_>>();
+        .map(|run| (run.site_url, run.driver.second_sweep(options.second_sweep)))
+        .unzip();
     let comment_progress = Rc::new(RefCell::new(CommentRunProgress {
         site_urls: site_urls.clone(),
         snapshots: vec![None; site_urls.len()],
         latest: None,
     }));
-    let processor = ProgressingCommentProcessor {
-        scheduled,
+    let driver = ProgressingCommentDriver {
+        drivers,
+        active: None,
         progress: Rc::clone(&comment_progress),
     };
     let config = load_config_for_output(options.config, options.output)?;
@@ -555,11 +547,8 @@ fn capture_comment_run(
     // An interrupt ends the session cleanly, so its captures are published and the pages it had
     // yet to request are reported instead of abandoning a partial file.
     let interrupted = interrupt_flag();
-    // Validation sweeps repeat pages already read, which a deduplicating session would skip.
-    let mut session = Session::new(archiver, options.session_name, seeds, options.output)?
-        .dedupe_discoveries(false)
-        .processor(processor)
-        .events(move |event: CaptureEvent<'_>| {
+    let mut session = Session::new(archiver, options.session_name, driver, options.output)?.events(
+        move |event: CaptureEvent<'_>| {
             if interrupted.load(Ordering::Relaxed) {
                 return CaptureControl::Cancel;
             }
@@ -569,7 +558,8 @@ fn capture_comment_run(
                 event_progress.set_message(message);
             }
             CaptureControl::Continue
-        });
+        },
+    );
 
     if let Some(revisit_index) = options.revisit_index {
         session = session.revisit_index(revisit_index);
@@ -646,14 +636,12 @@ fn load_config_for_output(config: Option<&Path>, output: &Path) -> Result<Config
     Ok(config)
 }
 
-struct ProgressingCommentProcessor {
-    scheduled: Vec<ScheduledCommentProcessor>,
+/// Drive each site's comment traversal in turn, reporting progress as its pages are inspected.
+struct ProgressingCommentDriver {
+    drivers: Vec<CommentDriver>,
+    /// The index of the driver whose request is outstanding.
+    active: Option<usize>,
     progress: Rc<RefCell<CommentRunProgress>>,
-}
-
-struct ScheduledCommentProcessor {
-    processor: CommentCaptureProcessor,
-    next_url: Option<String>,
 }
 
 struct CommentRunProgress {
@@ -679,25 +667,37 @@ impl CommentRunProgress {
     }
 }
 
-impl CaptureProcessor for ProgressingCommentProcessor {
+impl Driver for ProgressingCommentDriver {
+    fn next(&mut self) -> Option<Request> {
+        let (index, request) = self
+            .drivers
+            .iter_mut()
+            .enumerate()
+            .find_map(|(index, driver)| driver.next().map(|request| (index, request)))?;
+        self.active = Some(index);
+
+        Some(request)
+    }
+
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        let Some(index) = self
-            .scheduled
-            .iter()
-            .position(|scheduled| scheduled.next_url.as_deref() == Some(capture.url))
-        else {
+        let Some(index) = self.active.take() else {
             return Inspection::error(format!(
-                "captured an unscheduled WordPress comments URL: {}",
+                "captured an unrequested WordPress comments URL: {}",
                 capture.url
             ));
         };
-        let scheduled = &mut self.scheduled[index];
-        let inspection = scheduled.processor.inspect(capture);
-        scheduled.next_url = inspection.links.first().cloned();
+        let driver = &mut self.drivers[index];
+        let inspection = driver.inspect(capture);
         let mut progress = self.progress.borrow_mut();
-        progress.snapshots[index] = scheduled.processor.progress();
+        progress.snapshots[index] = driver.progress();
         progress.latest = Some(index);
         inspection
+    }
+
+    fn failed(&mut self, url: &str, error: &archivindex_archiver::Error) {
+        if let Some(index) = self.active.take() {
+            self.drivers[index].failed(url, error);
+        }
     }
 }
 
@@ -1116,16 +1116,15 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use archivindex_archiver::capture::Origin;
-    use archivindex_archiver::session::{Capture, CaptureProcessor};
+    use archivindex_archiver::session::{Capture, Driver, Request};
     use archivindex_cli_support::{CommandOutcome, load_config};
     use archivindex_test_support::http::{dead_port, response, serve_with};
     use archivindex_warc::io::read::WarcReader;
     use archivindex_warc::io::write::WarcWriter;
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
-    use archivindex_wordpress::CommentCaptureProcessor;
-    use archivindex_wordpress::archive::{ArchiveProcessor, Checkpoint, Site};
+    use archivindex_wordpress::CommentDriver;
+    use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Site};
     use archivindex_wordpress::endpoint::Endpoint;
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
     use chrono::{DateTime, Utc};
@@ -1135,7 +1134,7 @@ mod tests {
 
     use super::{
         ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, Command, CommentRun,
-        CommentRunOptions, Config, Error, Opts, SharedArchiveProcessor, capture_comment_run,
+        CommentRunOptions, Config, Error, Opts, SharedArchiveDriver, capture_comment_run,
         check_wp_comments, comment_update_inputs, load_config_for_output,
         page_total_change_warning, resume_command, run_archive,
     };
@@ -1431,22 +1430,21 @@ mod tests {
 
     #[test]
     fn archive_progress_becomes_durable_only_after_the_written_event() {
-        let processor = ArchiveProcessor::resume(
+        let driver = ArchiveDriver::resume(
             Site::parse("example.com").expect("a site"),
             before(),
             Endpoint::Comments,
             1,
             Some(2),
         );
-        let state = Rc::new(RefCell::new(ArchiveRunState::new(processor)));
-        let mut shared = SharedArchiveProcessor(Rc::clone(&state));
+        let state = Rc::new(RefCell::new(ArchiveRunState::new(driver)));
+        let mut shared = SharedArchiveDriver(Rc::clone(&state));
         let url = format!(
             "https://example.com/wp-json/wp/v2/comments?before={BEFORE}&orderby=id&order=asc\
              &page=2&per_page=100"
         );
         let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 2\r\n\r\n";
-        let capture =
-            Capture::new(&url, &url, Origin::Extra, b"[]", response).expect("a complete response");
+        let capture = Capture::new(&url, &url, b"[]", response).expect("a complete response");
 
         let inspection = shared.inspect(&capture);
 
@@ -1458,11 +1456,10 @@ mod tests {
                 total_pages: Some(2),
             }
         );
+        assert_eq!(inspection.error, None);
         assert_eq!(
-            inspection.links,
-            [
-                "https://example.com/wp-json/wp/v2/comments?before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=1&per_page=100"
-            ]
+            shared.next(),
+            Some(Request::extra(url.replace("&page=2&", "&page=1&"), &url))
         );
 
         state.borrow_mut().written(&url);
@@ -1496,7 +1493,6 @@ mod tests {
             "max_response_length",
             "operator",
             "operator_email",
-            "dedupe_discoveries",
             "retry_attempts",
             "retry_initial_backoff",
             "retry_max_backoff",
@@ -1514,7 +1510,7 @@ mod tests {
             &path,
             "gzip-warc = true\n\
              [operator]\nname = \"A. Archivist\"\nemail = \"archivist@example.com\"\n\
-             [session]\nrequest-delay = \"750ms\"\ndedupe-discoveries = false\n",
+             [session]\nrequest-delay = \"750ms\"\n",
         )
         .expect("write the configuration");
 
@@ -1525,7 +1521,6 @@ mod tests {
         assert_eq!(operator.name, "A. Archivist");
         assert_eq!(operator.email.as_deref(), Some("archivist@example.com"));
         assert_eq!(config.session.request_delay, Duration::from_millis(750));
-        assert!(!config.session.dedupe_discoveries);
     }
 
     #[test]
@@ -1790,7 +1785,7 @@ mod tests {
             .map(|base_url| {
                 Ok(CommentRun {
                     site_url: base_url.clone(),
-                    processor: CommentCaptureProcessor::for_window(base_url, after, before)?,
+                    driver: CommentDriver::for_window(base_url, after, before)?,
                 })
             })
             .collect::<Result<Vec<_>, url::ParseError>>()?;
@@ -1816,8 +1811,8 @@ mod tests {
 
         let metadata = metadata_vias(&output)?;
         for base_url in base_urls {
-            let processor = CommentCaptureProcessor::for_window(&base_url, after, before)?;
-            let first = processor.first_comment_url();
+            let driver = CommentDriver::for_window(&base_url, after, before)?;
+            let first = driver.first_comment_url();
             let second = first.replace("&page=1&", "&page=2&");
             assert!(metadata.contains(&(first.clone(), None)));
             assert!(metadata.contains(&(second, Some(first))));
@@ -1853,7 +1848,7 @@ mod tests {
         };
 
         let outcome = run_archive(
-            ArchiveProcessor::new(options.base.clone(), before()),
+            ArchiveDriver::new(options.base.clone(), before()),
             &options,
             before(),
             true,
@@ -1893,15 +1888,17 @@ mod tests {
         let vias = metadata_vias(&warc)?;
         let seeds = vias.iter().filter(|(_, via)| via.is_none()).count();
         assert_eq!(seeds, 15);
-        let last_probe = format!("{root}wp-json/wp/v2/media");
         assert_eq!(
             vias[15..],
             [
-                (page("pages", 1), Some(last_probe.clone())),
+                (page("pages", 1), Some(format!("{root}wp-json/wp/v2/pages"))),
                 (page("pages", 2), Some(page("pages", 1))),
                 (page("pages", 1), Some(page("pages", 2))),
                 (page("pages", 2), Some(page("pages", 1))),
-                (page("comments", 1), Some(last_probe)),
+                (
+                    page("comments", 1),
+                    Some(format!("{root}wp-json/wp/v2/comments"))
+                ),
                 (page("comments", 1), Some(page("comments", 1))),
             ]
         );
@@ -1923,7 +1920,7 @@ mod tests {
         };
 
         let outcome = run_archive(
-            ArchiveProcessor::resume(
+            ArchiveDriver::resume(
                 options.base.clone(),
                 before(),
                 Endpoint::Comments,
@@ -1960,7 +1957,7 @@ mod tests {
         options.limit = Some(16);
 
         let outcome = run_archive(
-            ArchiveProcessor::new(options.base.clone(), before()),
+            ArchiveDriver::new(options.base.clone(), before()),
             &options,
             before(),
             true,
@@ -1981,7 +1978,7 @@ mod tests {
         options.config = Some(config);
 
         let result = run_archive(
-            ArchiveProcessor::new(options.base.clone(), before()),
+            ArchiveDriver::new(options.base.clone(), before()),
             &options,
             before(),
             true,

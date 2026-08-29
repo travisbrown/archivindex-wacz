@@ -50,8 +50,10 @@ hundred items per page; an endpoint answering 404 is skipped. If a collection's 
 changes while it is being paged, the largest value seen decides when the first pass ends. Every
 collection is then read once more from page one. This validation pass catches records shifted onto
 earlier pages by concurrent deletions and fails if the advertised page count changes during the
-pass. The fifteen initial captures are session seeds; collection pages are discovered from the last
-probe or preceding page, which their metadata `via` names.
+pass. The fifteen initial captures are session seeds. Collection pages are session extras whose
+metadata `via` names the page they follow: a collection's first page follows its probe, a validation
+pass's first page follows the last page read before it, and every other page follows the preceding
+page.
 
 `--base` names the site as a host with an optional path and no scheme, such as `example.com` or
 `example.com/blog` (a trailing slash is removed); requests use HTTPS. `--output` names a directory,

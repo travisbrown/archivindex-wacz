@@ -4,7 +4,9 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 use std::thread;
 
-use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection, Operator, Session};
+use archivindex_archiver::session::{
+    Capture, CaptureProcessor, Crawl, Discovery, Operator, Session,
+};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cdx::format::cdxj::Fields;
 use archivindex_packager::WarcToWacz;
@@ -195,7 +197,7 @@ struct SiteProcessor {
 }
 
 impl CaptureProcessor for SiteProcessor {
-    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+    fn inspect(&mut self, capture: &Capture<'_>) -> Discovery {
         let text = std::str::from_utf8(capture.payload).ok();
         let title = text.and_then(|text| {
             text.contains("home")
@@ -203,23 +205,23 @@ impl CaptureProcessor for SiteProcessor {
                 .or_else(|| text.contains("about").then(|| "About".to_owned()))
         });
 
-        Inspection {
+        Discovery {
             links: extract_links(capture.payload, self.port),
             title,
-            ..Inspection::default()
+            ..Discovery::default()
         }
     }
 }
 
 /// Ask for the first successful URL a fixed number of additional times.
 ///
-/// The session must repeat discoveries for the same URL to be requested again.
+/// The crawl must repeat discoveries for the same URL to be requested again.
 struct RecaptureProcessor {
     remaining: usize,
 }
 
 impl CaptureProcessor for RecaptureProcessor {
-    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+    fn inspect(&mut self, capture: &Capture<'_>) -> Discovery {
         let links = if self.remaining == 0 {
             Vec::new()
         } else {
@@ -227,9 +229,9 @@ impl CaptureProcessor for RecaptureProcessor {
             vec![capture.url.to_owned()]
         };
 
-        Inspection {
+        Discovery {
             links,
-            ..Inspection::default()
+            ..Discovery::default()
         }
     }
 }
@@ -463,10 +465,9 @@ fn packages_a_crawl_session_with_extra_pages() -> Result<(), Box<dyn std::error:
     let summary = Session::new(
         Archiver::new(gzip_revisit_config())?,
         "crawl-2026.08",
-        &seeds,
+        Crawl::seeds(&seeds).processor(SiteProcessor { port }),
         &path,
     )?
-    .processor(SiteProcessor { port })
     .run()?;
     server.join().expect("server thread should not panic");
     assert!(summary.is_complete());
@@ -543,11 +544,11 @@ fn packages_an_identical_payload_revisit() -> Result<(), Box<dyn std::error::Err
     let summary = Session::new(
         Archiver::new(gzip_revisit_config())?,
         "recapture",
-        [&url],
+        Crawl::seeds([&url])
+            .dedupe_discoveries(false)
+            .processor(RecaptureProcessor { remaining: 1 }),
         &path,
     )?
-    .dedupe_discoveries(false)
-    .processor(RecaptureProcessor { remaining: 1 })
     .run()?;
     server.join().expect("server thread should not panic");
     assert!(summary.is_complete());
@@ -580,10 +581,15 @@ fn packages_server_not_modified_revisits() -> Result<(), Box<dyn std::error::Err
     let url = format!("http://127.0.0.1:{port}/page");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("revalidate.warc.gz");
-    let summary = Session::new(Archiver::new(gzip_config())?, "revalidate", [&url], &path)?
-        .dedupe_discoveries(false)
-        .processor(RecaptureProcessor { remaining: 2 })
-        .run()?;
+    let summary = Session::new(
+        Archiver::new(gzip_config())?,
+        "revalidate",
+        Crawl::seeds([&url])
+            .dedupe_discoveries(false)
+            .processor(RecaptureProcessor { remaining: 2 }),
+        &path,
+    )?
+    .run()?;
     server.join().expect("server thread should not panic");
     assert!(summary.is_complete());
 
