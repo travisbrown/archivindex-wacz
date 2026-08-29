@@ -39,18 +39,19 @@ archive was published. Operational failures use status 2.
 ### WordPress sites
 
 The `archive` command captures a fixed, supported set of a WordPress site's REST API collections
-into a crawl session. Every run begins with eleven requests that are never paged: the API roots
-`wp-json`, `wp-json/wp/v2`, and `wp-json/wp/v2/types`, then a bare request of each supported
-collection endpoint in the order `pages`,
-`posts`, `categories`, `tags`, `users`, `comments`, `media`, `videos`. Each endpoint whose bare
-request succeeded is then paged to its end, in that same order, with the time the archive started
-as its `before` cutoff, ascending by ID, one hundred items per page; an endpoint answering 404 is
-skipped. If a collection's `X-WP-TotalPages` changes while it is being paged, the largest value seen
-decides when the first pass ends. Every collection is then read once more from page one. This
-validation pass catches records shifted onto earlier pages by concurrent deletions and fails if
-the advertised page count changes during the pass. The eleven initial captures are session seeds;
-collection pages are discovered from the last probe or preceding page, which their metadata `via`
-names.
+into a crawl session. Every run begins with fifteen requests that are never paged: the API roots
+`wp-json`, `wp-json/wp/v2`, `wp-json/wp/v2/types`, `wp-json/wp/v2/taxonomies`,
+`wp-json/wp/v2/block-types`, `wp-json/wp/v2/block-patterns/categories`,
+`wp-json/wp/v2/block-patterns/patterns`, and `wp-json/wp/v2/menu-locations`, then a bare request
+of each supported collection endpoint in the order `pages`, `posts`, `categories`, `tags`,
+`users`, `comments`, `media`. Each endpoint whose bare request succeeded is then paged to its end,
+in that same order, with the time the archive started as its `before` cutoff, ascending by ID, one
+hundred items per page; an endpoint answering 404 is skipped. If a collection's `X-WP-TotalPages`
+changes while it is being paged, the largest value seen decides when the first pass ends. Every
+collection is then read once more from page one. This validation pass catches records shifted onto
+earlier pages by concurrent deletions and fails if the advertised page count changes during the
+pass. The fifteen initial captures are session seeds; collection pages are discovered from the last
+probe or preceding page, which their metadata `via` names.
 
 `--base` names the site as a host with an optional path and no scheme, such as `example.com` or
 `example.com/blog` (a trailing slash is removed); requests use HTTPS. `--output` names a directory,
@@ -71,7 +72,7 @@ email = "archivist@example.com"
 request-delay = "1s"
 ```
 
-The capture limit counts successful captures, including the initial eleven:
+The capture limit counts successful captures, including the initial fifteen:
 
 ```bash
 cargo run --bin archivindex-wordpress -- archive \
@@ -85,9 +86,9 @@ cargo run --bin archivindex-wordpress -- archive \
 The revisit index is consulted for payload digests and validators but is not updated by a session;
 load a published WARC into it with `archivindex-warc load-revisit-index`.
 
-A run that stops after the initial eleven captures—at the capture limit, after a page exhausts its
+A run that stops after the initial fifteen captures—at the capture limit, after a page exhausts its
 retries, or on an interrupt (`Ctrl-C`), which finishes the capture in progress and publishes the
-WARC—prints the `resume-archive` command that continues it. A failure before those eleven captures
+WARC—prints the `resume-archive` command that continues it. A failure before those fifteen captures
 are finished is fatal; the partial WARC is published, but a new `archive` must start over. The
 resumption is identified by the endpoint being paged, the last durably written page (zero when the
 endpoint must restart), the most recently advertised page count when known, and the original
