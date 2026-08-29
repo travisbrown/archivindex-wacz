@@ -108,9 +108,9 @@ impl EndpointType {
 
     /// The `rest_base` values of `entries` that name custom `wp/v2` collections, in order.
     ///
-    /// Entries for supported [`Endpoint`]s, for [`ENDPOINT_EXCLUSIONS`], and in other namespaces
-    /// (whose routes are not under `wp-json/wp/v2/`) are skipped. Repeated values are yielded
-    /// each time they occur.
+    /// Entries for supported [`Endpoint`]s, for [`ENDPOINT_EXCLUSIONS`], parameterized route
+    /// patterns, and in other namespaces (whose routes are not under `wp-json/wp/v2/`) are
+    /// skipped. Repeated values are yielded each time they occur.
     pub fn custom_endpoints<'a>(
         entries: impl IntoIterator<Item = &'a Self>,
     ) -> impl Iterator<Item = &'a str> {
@@ -120,6 +120,7 @@ impl EndpointType {
                 entry.rest_namespace == "wp/v2"
                     && entry.rest_base.parse::<Endpoint>().is_err()
                     && !ENDPOINT_EXCLUSIONS.contains(&entry.rest_base.as_str())
+                    && !entry.rest_base.contains("(?P<")
             })
             .map(|entry| entry.rest_base.as_str())
     }
@@ -391,13 +392,17 @@ mod tests {
     fn custom_endpoints_keep_response_order_and_skip_known_and_excluded_entries() {
         let response = format!(
             "{{\"video\": {}, \"post\": {}, \"template\": {}, \"product\": {}, \"again\": {}, \
-             \"plugin\": {}, \"menu\": {}}}",
+             \"plugin\": {}, \"pattern\": {}, \"menu\": {}}}",
             entry("videos", "wp/v2"),
             entry("posts", "wp/v2"),
             entry(ENDPOINT_EXCLUSIONS[1], "wp/v2"),
             entry("product", "wp/v2"),
             entry("videos", "wp/v2"),
             entry("things", "plugin/v1"),
+            entry(
+                r"font-families/(?P<font_family_id>[\\d]+)/font-faces",
+                "wp/v2",
+            ),
             entry("navigation", "wp/v2"),
         );
 
