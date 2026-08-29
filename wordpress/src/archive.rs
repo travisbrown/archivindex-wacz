@@ -1,10 +1,11 @@
-//! Archiving a site's supported `WordPress` REST API v2 collections one endpoint at a time.
+//! Archiving a site's `WordPress` REST API v2 collections one endpoint at a time.
 //!
 //! [`ArchiveDriver`] drives an `archivindex-archiver` session. A run captures the API's root
-//! resources, probes every supported [`Endpoint`] with a bare request, and then pages each exposed
-//! collection twice, in [`Endpoint::ALL`] order. The second pass detects records shifted onto
-//! earlier pages by concurrent deletions. Its [`Checkpoint`] names the page a stopped run is
-//! continued from.
+//! resources, discovers custom collections from the type and taxonomy registries among them,
+//! probes every supported [`Endpoint`] and then every custom collection with a bare request, and
+//! finally pages each exposed collection twice, in that order. The second pass detects records
+//! shifted onto earlier pages by concurrent deletions. Its [`Checkpoint`] names the page a
+//! stopped run is continued from.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -15,7 +16,7 @@ use archivindex_archiver::session::{Capture, Driver, Inspection, Request};
 use chrono::{DateTime, Utc};
 use url::Url;
 
-use crate::endpoint::{Endpoint, ROOT_ENDPOINTS};
+use crate::endpoint::{Collection, Endpoint, EndpointType, ROOT_ENDPOINTS, Registry};
 
 /// A `WordPress` installation named by its host and optional path, such as `example.com/blog`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,13 +103,13 @@ impl Site {
         format!("{}{path}", self.root)
     }
 
-    /// The bare URL of an endpoint's collection.
-    fn endpoint_url(&self, endpoint: Endpoint) -> String {
+    /// The bare URL of the collection at `wp-json/wp/v2/{endpoint}`.
+    fn endpoint_url(&self, endpoint: &str) -> String {
         self.url(&format!("wp-json/wp/v2/{endpoint}"))
     }
 
     /// The URL of one page of an endpoint's collection, in ascending ID order up to `before`.
-    fn page_url(&self, endpoint: Endpoint, before: DateTime<Utc>, page: usize) -> String {
+    fn page_url(&self, endpoint: &str, before: DateTime<Utc>, page: usize) -> String {
         format!(
             "{}?{}",
             self.endpoint_url(endpoint),
@@ -126,40 +127,46 @@ impl FromStr for Site {
 }
 
 /// Where a stopped run is continued from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Checkpoint {
     /// The root resources and endpoint probes that begin an archive are not finished, and are
     /// repeated by a new archive rather than continued.
     Initial,
-    /// A run continues `endpoint` after `last_page`, which is zero when the endpoint is yet to be
-    /// probed.
-    Resume {
-        /// The endpoint to continue.
-        endpoint: Endpoint,
-        /// The last page of that endpoint captured so far.
-        last_page: usize,
-        /// The most recently observed page count, if one was available.
-        total_pages: Option<usize>,
-    },
-    /// Every supported, exposed collection completed both paging passes.
+    /// A run continues an endpoint after the last page captured of it.
+    Resume(Resumption),
+    /// Every exposed collection completed both paging passes.
     Finished,
 }
 
-/// Archive a site's supported collections one endpoint at a time through a session.
+/// The page a stopped run is continued after.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Resumption {
+    /// The endpoint to continue.
+    pub endpoint: Collection,
+    /// The last page of that endpoint captured so far, or zero when it is yet to be probed.
+    pub last_page: usize,
+    /// The most recently observed page count, if one was available.
+    pub total_pages: Option<usize>,
+}
+
+/// Archive a site's collections one endpoint at a time through a session.
 ///
 /// An archive begins with the API root resources and a bare probe of every [`Endpoint`], all
-/// requested as seeds; a resumed run begins with the page after its checkpoint, requested via the
-/// page before it, and probes only the endpoints still to come. A probe answered with success is
-/// paged from page one through the greatest `X-WP-TotalPages` value seen, all pages carrying the
-/// run's `before` cutoff; any other answer, such as a 404 for a collection the site lacks, skips
-/// the endpoint. Exposed collections are paged one at a time after the last probe, a collection's
-/// first page requested via its probe and every later page via the page before it. After reaching
-/// a collection's end, the driver re-reads it from page one, via the last page read, with a
-/// stable advertised page count; this validation pass captures records shifted earlier by
-/// deletions during the first pass.
+/// requested as seeds. The type and taxonomy registries among the roots advertise the site's
+/// custom collections, which are appended after the supported endpoints in registry order (types
+/// before taxonomies) and probed via the registry that advertised them. A resumed run begins with
+/// the page after its checkpoint, requested via the page before it, and probes only the endpoints
+/// still to come. A probe answered with success is paged from page one through the greatest
+/// `X-WP-TotalPages` value seen, all pages carrying the run's `before` cutoff; any other answer,
+/// such as a 404 for a collection the site lacks, skips the endpoint. Exposed collections are
+/// paged one at a time after the last probe, a collection's first page requested via its probe
+/// and every later page via the page before it. After reaching a collection's end, the driver
+/// re-reads it from page one, via the last page read, with a stable advertised page count; this
+/// validation pass captures records shifted earlier by deletions during the first pass.
 ///
-/// An unexpected page response ends the session with an error, and a failed capture ends the
-/// driver's requests; [`checkpoint`](Self::checkpoint) then names the page to continue from.
+/// An unexpected page response or unreadable registry ends the session with an error, and a
+/// failed capture ends the driver's requests; [`checkpoint`](Self::checkpoint) then names the page
+/// to continue from.
 pub struct ArchiveDriver {
     site: Site,
     before: DateTime<Utc>,
@@ -167,21 +174,23 @@ pub struct ArchiveDriver {
     initial: bool,
     /// Index into [`ROOT_ENDPOINTS`] of the next root resource to request.
     next_root: usize,
-    /// Index into [`Endpoint::ALL`] of the next endpoint to probe.
+    /// The supported endpoints followed by the custom collections, in probing order.
+    endpoints: Vec<Collection>,
+    /// Index into `endpoints` of the next collection to probe.
     next_probe: usize,
-    probed: Vec<(Endpoint, u16)>,
+    probed: Vec<(Collection, u16)>,
     /// Endpoints whose probe succeeded, awaiting paging in order.
     pending: VecDeque<Series>,
     current: Option<Series>,
-    /// Page count carried by a page-zero resume until its probe is inspected.
-    resume_total_pages: Option<(Endpoint, usize)>,
+    /// Page count carried by a page-zero resume until its probe, the run's first, is inspected.
+    resume_total_pages: Option<usize>,
     /// Whether a capture failed, after which nothing more is requested.
     stopped: bool,
 }
 
 /// Progress through one exposed collection.
 struct Series {
-    endpoint: Endpoint,
+    endpoint: Collection,
     /// The last page captured, or zero before the first.
     page: usize,
     /// The greatest page count advertised so far.
@@ -210,7 +219,7 @@ enum SeriesPhase {
 }
 
 impl Series {
-    const fn new(endpoint: Endpoint, total_pages: Option<usize>) -> Self {
+    const fn new(endpoint: Collection, total_pages: Option<usize>) -> Self {
         Self {
             endpoint,
             page: 0,
@@ -220,7 +229,7 @@ impl Series {
         }
     }
 
-    const fn resume(endpoint: Endpoint, page: usize, total_pages: Option<usize>) -> Self {
+    const fn resume(endpoint: Collection, page: usize, total_pages: Option<usize>) -> Self {
         Self {
             endpoint,
             page,
@@ -240,13 +249,13 @@ impl Series {
         matches!(self.phase, SeriesPhase::Primary)
     }
 
-    const fn checkpoint(&self) -> Checkpoint {
-        Checkpoint::Resume {
-            endpoint: self.endpoint,
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint::Resume(Resumption {
+            endpoint: self.endpoint.clone(),
             // A validation pass is deliberately replayed as a fresh primary pass after a stop.
             last_page: if self.is_primary() { self.page } else { 0 },
             total_pages: self.total_pages,
-        }
+        })
     }
 
     /// Record the response to the page after the last one captured.
@@ -316,12 +325,13 @@ impl ArchiveDriver {
     ///
     /// Every page requested carries `before` as its cutoff, so pass the time the archive started.
     #[must_use]
-    pub const fn new(site: Site, before: DateTime<Utc>) -> Self {
+    pub fn new(site: Site, before: DateTime<Utc>) -> Self {
         Self {
             site,
             before,
             initial: true,
             next_root: 0,
+            endpoints: Endpoint::ALL.map(Collection::Known).to_vec(),
             next_probe: 0,
             probed: Vec::new(),
             pending: VecDeque::new(),
@@ -333,27 +343,39 @@ impl ArchiveDriver {
 
     /// Continue an archive of `site` with the same `before` cutoff from a checkpoint.
     ///
-    /// With `last_page` above zero the run begins with `endpoint`'s next page and probes the
-    /// endpoints after it; with zero it begins by probing `endpoint` itself.
+    /// `custom` lists the custom collections the earlier run discovered, in its order, since the
+    /// registries are not read again. With `last_page` above zero the run begins with the
+    /// endpoint's next page and probes the endpoints after it; with zero it begins by probing the
+    /// endpoint itself. A custom endpoint absent from `custom` is archived after them.
     #[must_use]
-    pub const fn resume(
+    pub fn resume(
         site: Site,
         before: DateTime<Utc>,
-        endpoint: Endpoint,
-        last_page: usize,
-        total_pages: Option<usize>,
+        resumption: Resumption,
+        custom: Vec<Collection>,
     ) -> Self {
+        let Resumption {
+            endpoint,
+            last_page,
+            total_pages,
+        } = resumption;
         let mut driver = Self::new(site, before);
         driver.initial = false;
         driver.next_root = ROOT_ENDPOINTS.len();
+        driver.endpoints.extend(custom);
+        let index = driver
+            .endpoints
+            .iter()
+            .position(|collection| collection.name() == endpoint.name())
+            .unwrap_or_else(|| {
+                driver.endpoints.push(endpoint.clone());
+                driver.endpoints.len() - 1
+            });
         if last_page == 0 {
-            driver.next_probe = endpoint as usize;
-            driver.resume_total_pages = match total_pages {
-                Some(total_pages) => Some((endpoint, total_pages)),
-                None => None,
-            };
+            driver.next_probe = index;
+            driver.resume_total_pages = total_pages;
         } else {
-            driver.next_probe = endpoint as usize + 1;
+            driver.next_probe = index + 1;
             driver.current = Some(Series::resume(endpoint, last_page, total_pages));
         }
 
@@ -366,7 +388,7 @@ impl ArchiveDriver {
         if let Some(series) = &self.current {
             return series.checkpoint();
         }
-        let next_probe = Endpoint::ALL.get(self.next_probe).copied();
+        let next_probe = self.endpoints.get(self.next_probe);
         if self.initial && next_probe.is_some() {
             return Checkpoint::Initial;
         }
@@ -377,55 +399,104 @@ impl ArchiveDriver {
             .front()
             .map(Series::checkpoint)
             .or_else(|| {
-                next_probe.map(|endpoint| Checkpoint::Resume {
-                    endpoint,
-                    last_page: 0,
-                    total_pages: self
-                        .resume_total_pages
-                        .filter(|(resume_endpoint, _)| *resume_endpoint == endpoint)
-                        .map(|(_, total_pages)| total_pages),
+                next_probe.map(|endpoint| {
+                    Checkpoint::Resume(Resumption {
+                        endpoint: endpoint.clone(),
+                        last_page: 0,
+                        total_pages: self.resume_total_pages,
+                    })
                 })
             })
             .unwrap_or(Checkpoint::Finished)
     }
 
+    /// The supported endpoints followed by the custom collections discovered so far, in the
+    /// order they are probed.
+    #[must_use]
+    pub fn endpoints(&self) -> &[Collection] {
+        &self.endpoints
+    }
+
     /// Every endpoint probed so far with the status of its bare response, in order.
     #[must_use]
-    pub fn probed(&self) -> &[(Endpoint, u16)] {
+    pub fn probed(&self) -> &[(Collection, u16)] {
         &self.probed
     }
 
     /// The request for a series' next page, via the page its position follows from.
     fn page_request(&self, series: &Series) -> Request {
+        let endpoint = series.endpoint.name();
         let via = match (&series.phase, series.page) {
-            (SeriesPhase::Primary, 0) => self.site.endpoint_url(series.endpoint),
+            (SeriesPhase::Primary, 0) => self.site.endpoint_url(endpoint),
             (SeriesPhase::Validation { after }, 0) => {
-                self.site.page_url(series.endpoint, self.before, *after)
+                self.site.page_url(endpoint, self.before, *after)
             }
-            (_, page) => self.site.page_url(series.endpoint, self.before, page),
+            (_, page) => self.site.page_url(endpoint, self.before, page),
         };
 
         Request::extra(
-            self.site
-                .page_url(series.endpoint, self.before, series.page + 1),
+            self.site.page_url(endpoint, self.before, series.page + 1),
             via,
         )
     }
 
+    /// The bare probe of the next collection: a seed, or an extra via the advertising registry.
+    fn probe_request(&self, collection: &Collection) -> Request {
+        let url = self.site.endpoint_url(collection.name());
+
+        collection.registry().map_or_else(
+            || Request::seed(&url),
+            |registry| Request::extra(&url, self.site.url(registry.path())),
+        )
+    }
+
+    /// Record a root resource and append the custom collections a registry advertises.
+    ///
+    /// A registry answered conditionally (`304 Not Modified`) arrives without a payload and so
+    /// advertises nothing; only a fresh success is read.
+    fn inspect_root(&mut self, root: &str, capture: &Capture<'_>) -> Inspection {
+        self.next_root += 1;
+        let Some(registry) = Registry::ALL
+            .into_iter()
+            .find(|registry| registry.path() == root)
+        else {
+            return Inspection::default();
+        };
+        if !(200..300).contains(&capture.status) {
+            return Inspection::default();
+        }
+        let entries = match EndpointType::parse_registry(capture.payload) {
+            Ok(entries) => entries,
+            Err(error) => return Inspection::error(format!("unreadable {root} response: {error}")),
+        };
+        for name in EndpointType::custom_endpoints(&entries) {
+            if !self
+                .endpoints
+                .iter()
+                .any(|collection| collection.name() == name)
+            {
+                self.endpoints.push(Collection::Custom {
+                    name: name.to_owned(),
+                    registry,
+                });
+            }
+        }
+
+        Inspection::default()
+    }
+
     /// Record a probe's answer and, after the last probe, begin paging the exposed collections.
-    fn inspect_probe(&mut self, endpoint: Endpoint, status: u16) {
+    fn inspect_probe(&mut self, endpoint: Collection, status: u16) {
         self.next_probe += 1;
-        self.probed.push((endpoint, status));
         // A bare probe uses WordPress's default page size, not the 100-item page size below, so
         // only a count carried from an earlier paged response is applicable here.
-        let total_pages = self
-            .resume_total_pages
-            .take_if(|(resume_endpoint, _)| *resume_endpoint == endpoint)
-            .map(|(_, total_pages)| total_pages);
+        let total_pages = self.resume_total_pages.take();
         if (200..300).contains(&status) || status == 304 {
-            self.pending.push_back(Series::new(endpoint, total_pages));
+            self.pending
+                .push_back(Series::new(endpoint.clone(), total_pages));
         }
-        if self.next_probe == Endpoint::ALL.len() {
+        self.probed.push((endpoint, status));
+        if self.next_probe == self.endpoints.len() {
             self.current = self.pending.pop_front();
         }
     }
@@ -439,21 +510,12 @@ impl ArchiveDriver {
         let requested = series.page + 1;
         match series.record(capture) {
             Ok(outcome) => {
-                let title = matches!(capture.status, 200 | 304).then(|| {
-                    format!(
-                        "{} {} page {} of {}",
-                        self.site.base,
-                        series.endpoint,
-                        series.page,
-                        series.total_pages.unwrap_or(series.page)
-                    )
-                });
                 match outcome {
                     PageOutcome::Next => {}
                     PageOutcome::Validate => series.begin_validation(requested),
                     PageOutcome::Last => self.current = self.pending.pop_front(),
                 }
-                Inspection { title, error: None }
+                Inspection::default()
             }
             Err(message) => Inspection::error(message),
         }
@@ -472,9 +534,9 @@ impl Driver for ArchiveDriver {
             return Some(Request::seed(self.site.url(root)));
         }
 
-        Endpoint::ALL
+        self.endpoints
             .get(self.next_probe)
-            .map(|&endpoint| Request::seed(self.site.endpoint_url(endpoint)))
+            .map(|collection| self.probe_request(collection))
     }
 
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
@@ -486,7 +548,7 @@ impl Driver for ArchiveDriver {
             && capture.url
                 == self
                     .site
-                    .page_url(series.endpoint, self.before, series.page + 1)
+                    .page_url(series.endpoint.name(), self.before, series.page + 1)
         {
             return self.inspect_page(capture);
         }
@@ -494,13 +556,13 @@ impl Driver for ArchiveDriver {
         if let Some(root) = ROOT_ENDPOINTS.get(self.next_root)
             && capture.url == self.site.url(root)
         {
-            self.next_root += 1;
-            return Inspection::default();
+            return self.inspect_root(root, capture);
         }
 
-        if let Some(&endpoint) = Endpoint::ALL.get(self.next_probe)
-            && capture.url == self.site.endpoint_url(endpoint)
+        if let Some(endpoint) = self.endpoints.get(self.next_probe)
+            && capture.url == self.site.endpoint_url(endpoint.name())
         {
+            let endpoint = endpoint.clone();
             self.inspect_probe(endpoint, capture.status);
             return Inspection::default();
         }
@@ -524,7 +586,7 @@ impl fmt::Display for ArchiveDriver {
                 write!(formatter, " of {total_pages}")?;
             }
             Ok(())
-        } else if let Some(endpoint) = Endpoint::ALL.get(self.next_probe) {
+        } else if let Some(endpoint) = self.endpoints.get(self.next_probe) {
             write!(formatter, "probing {endpoint}")
         } else {
             formatter.write_str("finished")
@@ -538,8 +600,8 @@ mod tests {
     use archivindex_archiver::session::{Capture, Driver, Inspection, Request};
     use chrono::{DateTime, Utc};
 
-    use super::{ArchiveDriver, Checkpoint, Site};
-    use crate::endpoint::{Endpoint, ROOT_ENDPOINTS};
+    use super::{ArchiveDriver, Checkpoint, Resumption, Site};
+    use crate::endpoint::{Collection, Endpoint, ROOT_ENDPOINTS, Registry};
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
     const OK: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
@@ -553,6 +615,8 @@ mod tests {
     const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
     const INVALID_PAGE_ERROR: &[u8] =
         br#"{"code": "rest_post_invalid_page_number", "message": "", "data": {"status": 400}}"#;
+    const TYPES_URL: &str = "https://example.com/blog/wp-json/wp/v2/types";
+    const TAXONOMIES_URL: &str = "https://example.com/blog/wp-json/wp/v2/taxonomies";
 
     fn before() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(BEFORE)
@@ -564,11 +628,11 @@ mod tests {
         Site::parse("example.com/blog").expect("a site")
     }
 
-    fn endpoint_url(endpoint: Endpoint) -> String {
+    fn endpoint_url(endpoint: &str) -> String {
         format!("https://example.com/blog/wp-json/wp/v2/{endpoint}")
     }
 
-    fn page_url(endpoint: Endpoint, page: usize) -> String {
+    fn page_url(endpoint: &str, page: usize) -> String {
         format!(
             "{}?before={BEFORE}&orderby=id&order=asc&page={page}&per_page=100",
             endpoint_url(endpoint)
@@ -576,7 +640,7 @@ mod tests {
     }
 
     /// The request for `page` of an endpoint, via the page before it or `via` for page one.
-    fn page_request(endpoint: Endpoint, page: usize, via: &str) -> Request {
+    fn page_request(endpoint: &str, page: usize, via: &str) -> Request {
         let via = if page > 1 {
             page_url(endpoint, page - 1)
         } else {
@@ -586,8 +650,51 @@ mod tests {
         Request::extra(page_url(endpoint, page), via)
     }
 
+    fn custom(name: &str, registry: Registry) -> Collection {
+        Collection::Custom {
+            name: name.to_owned(),
+            registry,
+        }
+    }
+
+    fn resumption(
+        endpoint: impl Into<Collection>,
+        last_page: usize,
+        total_pages: Option<usize>,
+    ) -> Resumption {
+        Resumption {
+            endpoint: endpoint.into(),
+            last_page,
+            total_pages,
+        }
+    }
+
+    fn resume(
+        endpoint: impl Into<Collection>,
+        last_page: usize,
+        total_pages: Option<usize>,
+    ) -> Checkpoint {
+        Checkpoint::Resume(resumption(endpoint, last_page, total_pages))
+    }
+
+    /// A registry response listing `entries` as `wp/v2` types or taxonomies.
+    fn registry(entries: &[&str]) -> Vec<u8> {
+        let entries: Vec<String> = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    r#""{entry}": {{"name": "", "description": "", "hierarchical": false,
+                        "slug": "{entry}", "rest_base": "{entry}", "rest_namespace": "wp/v2",
+                        "_links": {{"wp:items": [{{"href": "https://example.com/x"}}]}}}}"#
+                )
+            })
+            .collect();
+
+        format!("{{{}}}", entries.join(", ")).into_bytes()
+    }
+
     fn inspect(driver: &mut ArchiveDriver, url: &str, response: &[u8]) -> Inspection {
-        inspect_payload(driver, url, b"[]", response)
+        inspect_payload(driver, url, b"{}", response)
     }
 
     fn inspect_payload(
@@ -603,17 +710,32 @@ mod tests {
 
     /// Request and answer every root resource, checking that each is requested as a seed.
     fn capture_roots(driver: &mut ArchiveDriver) {
+        capture_roots_with(driver, b"{}", b"{}");
+    }
+
+    /// Like [`capture_roots`], answering the type and taxonomy registries with `types` and
+    /// `taxonomies`.
+    fn capture_roots_with(driver: &mut ArchiveDriver, types: &[u8], taxonomies: &[u8]) {
         for root in ROOT_ENDPOINTS {
             let url = format!("https://example.com/blog/{root}");
+            let payload = match url.as_str() {
+                TYPES_URL => types,
+                TAXONOMIES_URL => taxonomies,
+                _ => b"{}",
+            };
             assert_eq!(driver.next(), Some(Request::seed(&url)));
-            assert_eq!(inspect(driver, &url, OK), Inspection::default());
+            assert_eq!(
+                inspect_payload(driver, &url, payload, OK),
+                Inspection::default()
+            );
         }
     }
 
-    /// Answer every probe with `responses` in endpoint order, checking that each is a seed.
-    fn probe_all(driver: &mut ArchiveDriver, responses: [&[u8]; 7]) {
+    /// Answer every supported endpoint's probe with `responses` in endpoint order, checking that
+    /// each is a seed.
+    fn probe_all(driver: &mut ArchiveDriver, responses: [&[u8]; 8]) {
         for (endpoint, response) in Endpoint::ALL.into_iter().zip(responses) {
-            let url = endpoint_url(endpoint);
+            let url = endpoint_url(endpoint.name());
             assert_eq!(driver.next(), Some(Request::seed(&url)));
             assert_eq!(inspect(driver, &url, response), Inspection::default());
         }
@@ -662,12 +784,10 @@ mod tests {
         assert_eq!(driver.next(), driver.next());
         capture_roots(&mut driver);
         assert_eq!(driver.checkpoint(), Checkpoint::Initial);
-        assert_eq!(
-            driver.next(),
-            Some(Request::seed(endpoint_url(Endpoint::Pages)))
-        );
-        probe_all(&mut driver, [NOT_FOUND; 7]);
+        assert_eq!(driver.next(), Some(Request::seed(endpoint_url("pages"))));
+        probe_all(&mut driver, [NOT_FOUND; 8]);
         assert_eq!(driver.next(), None);
+        assert_eq!(driver.endpoints(), Endpoint::ALL.map(Collection::Known));
     }
 
     #[test]
@@ -677,81 +797,55 @@ mod tests {
 
         probe_all(
             &mut driver,
-            [OK, NOT_FOUND, OK, FORBIDDEN, NOT_FOUND, OK, NOT_FOUND],
+            [
+                OK, NOT_FOUND, OK, FORBIDDEN, NOT_FOUND, OK, NOT_FOUND, NOT_FOUND,
+            ],
         );
 
-        let pages_probe = endpoint_url(Endpoint::Pages);
-        assert_eq!(
-            driver.next(),
-            Some(page_request(Endpoint::Pages, 1, &pages_probe))
-        );
+        let pages_probe = endpoint_url("pages");
+        assert_eq!(driver.next(), Some(page_request("pages", 1, &pages_probe)));
         assert_eq!(
             driver.probed(),
             [
-                (Endpoint::Pages, 200),
-                (Endpoint::Posts, 404),
-                (Endpoint::Categories, 200),
-                (Endpoint::Tags, 403),
-                (Endpoint::Users, 404),
-                (Endpoint::Comments, 200),
-                (Endpoint::Media, 404)
+                (Endpoint::Pages.into(), 200),
+                (Endpoint::Posts.into(), 404),
+                (Endpoint::Categories.into(), 200),
+                (Endpoint::Tags.into(), 403),
+                (Endpoint::Users.into(), 404),
+                (Endpoint::Comments.into(), 200),
+                (Endpoint::Media.into(), 404),
+                (Endpoint::Navigation.into(), 404),
             ]
         );
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Pages,
-                last_page: 0,
-                total_pages: None,
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Pages, 0, None));
 
-        let first = inspect(&mut driver, &page_url(Endpoint::Pages, 1), TWO_PAGES);
-        assert_eq!(
-            first.title.as_deref(),
-            Some("example.com/blog pages page 1 of 2")
-        );
-        assert_eq!(driver.next(), Some(page_request(Endpoint::Pages, 2, "")));
+        // Pages are captured without titles.
+        let first = inspect(&mut driver, &page_url("pages", 1), TWO_PAGES);
+        assert_eq!(first, Inspection::default());
+        assert_eq!(driver.next(), Some(page_request("pages", 2, "")));
         assert_eq!(driver.to_string(), "example.com/blog: pages page 1 of 2");
 
         // The greatest advertised page count decides where the collection ends.
-        let _ = inspect(&mut driver, &page_url(Endpoint::Pages, 2), THREE_PAGES);
-        assert_eq!(driver.next(), Some(page_request(Endpoint::Pages, 3, "")));
-        let third = inspect(&mut driver, &page_url(Endpoint::Pages, 3), TWO_PAGES);
-        assert_eq!(
-            third.title.as_deref(),
-            Some("example.com/blog pages page 3 of 3")
-        );
+        let _ = inspect(&mut driver, &page_url("pages", 2), THREE_PAGES);
+        assert_eq!(driver.next(), Some(page_request("pages", 3, "")));
+        let third = inspect(&mut driver, &page_url("pages", 3), TWO_PAGES);
+        assert_eq!(third, Inspection::default());
         // The validation pass begins via the last page read, which prompted it.
         assert_eq!(
             driver.next(),
-            Some(page_request(
-                Endpoint::Pages,
-                1,
-                &page_url(Endpoint::Pages, 3)
-            ))
+            Some(page_request("pages", 1, &page_url("pages", 3)))
         );
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Pages,
-                last_page: 0,
-                total_pages: Some(3),
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Pages, 0, Some(3)));
 
         for page in 1..=3 {
-            let _ = inspect(&mut driver, &page_url(Endpoint::Pages, page), THREE_PAGES);
+            let _ = inspect(&mut driver, &page_url("pages", page), THREE_PAGES);
             if page < 3 {
-                assert_eq!(
-                    driver.next(),
-                    Some(page_request(Endpoint::Pages, page + 1, ""))
-                );
+                assert_eq!(driver.next(), Some(page_request("pages", page + 1, "")));
             }
         }
 
         // A one-page collection is validated via that page, then the next collection begins.
-        for endpoint in [Endpoint::Categories, Endpoint::Comments] {
+        for endpoint in ["categories", "comments"] {
             assert_eq!(
                 driver.next(),
                 Some(page_request(endpoint, 1, &endpoint_url(endpoint)))
@@ -770,11 +864,85 @@ mod tests {
     }
 
     #[test]
+    fn registries_advertise_custom_endpoints_probed_via_them() {
+        let mut driver = ArchiveDriver::new(site(), before());
+        // Supported and excluded entries are skipped; repeats keep their first registry.
+        capture_roots_with(
+            &mut driver,
+            &registry(&["posts", "videos", "templates", "product"]),
+            &registry(&["categories", "videos", "series"]),
+        );
+        let videos = custom("videos", Registry::Types);
+        let product = custom("product", Registry::Types);
+        let series = custom("series", Registry::Taxonomies);
+        assert_eq!(driver.endpoints()[8..], [videos.clone(), product, series]);
+
+        probe_all(&mut driver, [NOT_FOUND; 8]);
+        assert_eq!(driver.to_string(), "example.com/blog: probing videos");
+        let videos_probe = endpoint_url("videos");
+        assert_eq!(
+            driver.next(),
+            Some(Request::extra(&videos_probe, TYPES_URL))
+        );
+        assert_eq!(driver.checkpoint(), Checkpoint::Initial);
+        let _ = inspect(&mut driver, &videos_probe, OK);
+        assert_eq!(
+            driver.next(),
+            Some(Request::extra(endpoint_url("product"), TYPES_URL))
+        );
+        let _ = inspect(&mut driver, &endpoint_url("product"), NOT_FOUND);
+        assert_eq!(
+            driver.next(),
+            Some(Request::extra(endpoint_url("series"), TAXONOMIES_URL))
+        );
+        let _ = inspect(&mut driver, &endpoint_url("series"), FORBIDDEN);
+
+        assert_eq!(
+            driver.next(),
+            Some(page_request("videos", 1, &videos_probe))
+        );
+        assert_eq!(driver.checkpoint(), resume(videos, 0, None));
+        assert_eq!(driver.probed()[8], (custom("videos", Registry::Types), 200));
+    }
+
+    #[test]
+    fn an_unreadable_registry_stops_the_run() {
+        let mut driver = ArchiveDriver::new(site(), before());
+        for root in &ROOT_ENDPOINTS[..2] {
+            let url = format!("https://example.com/blog/{root}");
+            let _ = inspect(&mut driver, &url, OK);
+        }
+
+        let unreadable = inspect_payload(&mut driver, TYPES_URL, b"[]", OK);
+
+        assert!(
+            unreadable
+                .error
+                .is_some_and(|error| error.starts_with("unreadable wp-json/wp/v2/types response"))
+        );
+        assert_eq!(driver.checkpoint(), Checkpoint::Initial);
+    }
+
+    #[test]
+    fn a_conditional_registry_response_advertises_nothing() {
+        let mut driver = ArchiveDriver::new(site(), before());
+        for root in &ROOT_ENDPOINTS[..2] {
+            let url = format!("https://example.com/blog/{root}");
+            let _ = inspect(&mut driver, &url, OK);
+        }
+
+        let unchanged = inspect_payload(&mut driver, TYPES_URL, b"", NOT_MODIFIED);
+
+        assert_eq!(unchanged, Inspection::default());
+        assert_eq!(driver.endpoints().len(), Endpoint::ALL.len());
+    }
+
+    #[test]
     fn no_exposed_collection_finishes_an_archive() {
         let mut driver = ArchiveDriver::new(site(), before());
         capture_roots(&mut driver);
 
-        probe_all(&mut driver, [NOT_FOUND; 7]);
+        probe_all(&mut driver, [NOT_FOUND; 8]);
 
         assert_eq!(driver.next(), None);
         assert_eq!(driver.checkpoint(), Checkpoint::Finished);
@@ -782,198 +950,216 @@ mod tests {
 
     #[test]
     fn a_resumed_run_continues_the_endpoint_and_probes_the_rest() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Comments, 7, Some(8));
-
-        assert_eq!(driver.next(), Some(page_request(Endpoint::Comments, 8, "")));
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Comments,
-                last_page: 7,
-                total_pages: Some(8),
-            }
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Comments, 7, Some(8)),
+            Vec::new(),
         );
 
-        let _ = inspect(&mut driver, &page_url(Endpoint::Comments, 8), EIGHT_PAGES);
+        assert_eq!(driver.next(), Some(page_request("comments", 8, "")));
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Comments, 7, Some(8)));
+
+        let _ = inspect(&mut driver, &page_url("comments", 8), EIGHT_PAGES);
         assert_eq!(
             driver.next(),
-            Some(page_request(
-                Endpoint::Comments,
-                1,
-                &page_url(Endpoint::Comments, 8)
-            ))
+            Some(page_request("comments", 1, &page_url("comments", 8)))
         );
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Comments,
-                last_page: 0,
-                total_pages: Some(8),
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Comments, 0, Some(8)));
         for page in 1..=8 {
-            let _ = inspect(
-                &mut driver,
-                &page_url(Endpoint::Comments, page),
-                EIGHT_PAGES,
-            );
+            let _ = inspect(&mut driver, &page_url("comments", page), EIGHT_PAGES);
         }
 
         // An endpoint found exposed is paged only after the remaining probes, so a run stopped
         // during those probes resumes by probing it again.
-        let media_probe = endpoint_url(Endpoint::Media);
+        let media_probe = endpoint_url("media");
         assert_eq!(driver.next(), Some(Request::seed(&media_probe)));
         let _ = inspect(&mut driver, &media_probe, OK);
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Media,
-                last_page: 0,
-                total_pages: None,
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Media, 0, None));
         assert_eq!(
             driver.next(),
-            Some(page_request(Endpoint::Media, 1, &media_probe))
+            Some(Request::seed(endpoint_url("navigation")))
         );
+        let _ = inspect(&mut driver, &endpoint_url("navigation"), NOT_FOUND);
+        assert_eq!(driver.next(), Some(page_request("media", 1, &media_probe)));
     }
 
     #[test]
     fn a_resumed_run_at_page_zero_probes_the_endpoint_itself() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Media, 0, None);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Media, 0, None),
+            Vec::new(),
+        );
+
+        assert_eq!(driver.next(), Some(Request::seed(endpoint_url("media"))));
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Media, 0, None));
+    }
+
+    #[test]
+    fn a_resumed_run_probes_the_listed_custom_endpoints_after_the_supported_ones() {
+        let videos = custom("videos", Registry::Types);
+        let series = custom("series", Registry::Taxonomies);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Navigation, 0, None),
+            vec![videos.clone(), series.clone()],
+        );
 
         assert_eq!(
             driver.next(),
-            Some(Request::seed(endpoint_url(Endpoint::Media)))
+            Some(Request::seed(endpoint_url("navigation")))
         );
+        let _ = inspect(&mut driver, &endpoint_url("navigation"), NOT_FOUND);
         assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Media,
-                last_page: 0,
-                total_pages: None,
-            }
+            driver.next(),
+            Some(Request::extra(endpoint_url("videos"), TYPES_URL))
         );
+        assert_eq!(driver.checkpoint(), resume(videos, 0, None));
+        let _ = inspect(&mut driver, &endpoint_url("videos"), NOT_FOUND);
+        assert_eq!(
+            driver.next(),
+            Some(Request::extra(endpoint_url("series"), TAXONOMIES_URL))
+        );
+        let _ = inspect(&mut driver, &endpoint_url("series"), OK);
+        assert_eq!(
+            driver.next(),
+            Some(page_request("series", 1, &endpoint_url("series")))
+        );
+        assert_eq!(driver.checkpoint(), resume(series, 0, None));
+    }
+
+    #[test]
+    fn a_resumed_custom_endpoint_continues_from_its_page() {
+        let videos = custom("videos", Registry::Types);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(videos.clone(), 1, Some(2)),
+            vec![videos.clone()],
+        );
+
+        assert_eq!(driver.next(), Some(page_request("videos", 2, "")));
+        assert_eq!(driver.checkpoint(), resume(videos.clone(), 1, Some(2)));
+        assert_eq!(driver.to_string(), "example.com/blog: videos page 1 of 2");
+
+        // An endpoint missing from the list is archived after the listed ones.
+        let unlisted = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(videos.clone(), 0, None),
+            vec![custom("series", Registry::Taxonomies)],
+        );
+        assert_eq!(unlisted.endpoints()[9], videos);
+        assert_eq!(unlisted.checkpoint(), resume(videos, 0, None));
     }
 
     #[test]
     fn a_carried_page_count_makes_not_modified_responses_resumable() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Media, 0, Some(2));
-        let media_probe = endpoint_url(Endpoint::Media);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Media, 0, Some(2)),
+            Vec::new(),
+        );
+        let media_probe = endpoint_url("media");
 
         let _ = inspect(&mut driver, &media_probe, NOT_MODIFIED);
         assert_eq!(
             driver.next(),
-            Some(page_request(Endpoint::Media, 1, &media_probe))
+            Some(Request::seed(endpoint_url("navigation")))
         );
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Media,
-                last_page: 0,
-                total_pages: Some(2),
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Media, 0, Some(2)));
+        let _ = inspect(&mut driver, &endpoint_url("navigation"), NOT_FOUND);
+        assert_eq!(driver.next(), Some(page_request("media", 1, &media_probe)));
 
-        let _ = inspect(&mut driver, &page_url(Endpoint::Media, 1), NOT_MODIFIED);
-        assert_eq!(driver.next(), Some(page_request(Endpoint::Media, 2, "")));
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Media,
-                last_page: 1,
-                total_pages: Some(2),
-            }
-        );
+        let _ = inspect(&mut driver, &page_url("media", 1), NOT_MODIFIED);
+        assert_eq!(driver.next(), Some(page_request("media", 2, "")));
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Media, 1, Some(2)));
     }
 
     #[test]
     fn a_page_count_change_during_validation_stops_the_run() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Posts, 1, Some(2));
-        let _ = inspect(&mut driver, &page_url(Endpoint::Posts, 2), TWO_PAGES);
-        let _ = inspect(&mut driver, &page_url(Endpoint::Posts, 1), TWO_PAGES);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Posts, 1, Some(2)),
+            Vec::new(),
+        );
+        let _ = inspect(&mut driver, &page_url("posts", 2), TWO_PAGES);
+        let _ = inspect(&mut driver, &page_url("posts", 1), TWO_PAGES);
 
-        let changed = inspect(&mut driver, &page_url(Endpoint::Posts, 2), ONE_PAGE);
+        let changed = inspect(&mut driver, &page_url("posts", 2), ONE_PAGE);
 
         assert_eq!(
             changed.error.as_deref(),
             Some("X-WP-TotalPages changed during the posts validation pass")
         );
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Posts,
-                last_page: 0,
-                total_pages: Some(2),
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Posts, 0, Some(2)));
     }
 
     #[test]
     fn a_vanished_page_restarts_the_collection_for_validation() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Posts, 4, None);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Posts, 4, None),
+            Vec::new(),
+        );
 
         let gone = inspect_payload(
             &mut driver,
-            &page_url(Endpoint::Posts, 5),
+            &page_url("posts", 5),
             INVALID_PAGE_ERROR,
             BAD_REQUEST,
         );
 
-        assert_eq!(gone.title, None);
+        assert_eq!(gone, Inspection::default());
         assert_eq!(
             driver.next(),
-            Some(page_request(
-                Endpoint::Posts,
-                1,
-                &page_url(Endpoint::Posts, 5)
-            ))
+            Some(page_request("posts", 1, &page_url("posts", 5)))
         );
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Posts,
-                last_page: 0,
-                total_pages: None,
-            }
-        );
-        let validation = inspect(&mut driver, &page_url(Endpoint::Posts, 1), ONE_PAGE);
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Posts, 0, None));
+        let validation = inspect(&mut driver, &page_url("posts", 1), ONE_PAGE);
         assert_eq!(validation.error, None);
         assert_eq!(
             driver.next(),
-            Some(Request::seed(endpoint_url(Endpoint::Categories)))
+            Some(Request::seed(endpoint_url("categories")))
         );
     }
 
     #[test]
     fn unexpected_page_responses_stop_the_run_at_the_last_good_page() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Posts, 4, None);
-        let checkpoint = Checkpoint::Resume {
-            endpoint: Endpoint::Posts,
-            last_page: 4,
-            total_pages: None,
-        };
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Posts, 4, None),
+            Vec::new(),
+        );
+        let checkpoint = resume(Endpoint::Posts, 4, None);
 
-        let forbidden = inspect(&mut driver, &page_url(Endpoint::Posts, 5), FORBIDDEN);
+        let forbidden = inspect(&mut driver, &page_url("posts", 5), FORBIDDEN);
         assert_eq!(
             forbidden.error.as_deref(),
             Some("unexpected WordPress response status 403 on posts page 5")
         );
         assert_eq!(driver.checkpoint(), checkpoint);
 
-        let untotalled = inspect(&mut driver, &page_url(Endpoint::Posts, 5), OK);
+        let untotalled = inspect(&mut driver, &page_url("posts", 5), OK);
         assert_eq!(
             untotalled.error.as_deref(),
             Some("missing or invalid X-WP-TotalPages on posts page 5")
         );
         assert_eq!(driver.checkpoint(), checkpoint);
 
-        let unexpected = inspect(&mut driver, &page_url(Endpoint::Posts, 6), TWO_PAGES);
+        let unexpected = inspect(&mut driver, &page_url("posts", 6), TWO_PAGES);
         assert!(unexpected.error.is_some());
 
         let challenge = inspect(
             &mut driver,
-            &page_url(Endpoint::Posts, 5),
+            &page_url("posts", 5),
             b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\n\r\n",
         );
         assert!(
@@ -985,19 +1171,17 @@ mod tests {
 
     #[test]
     fn a_failed_capture_ends_the_requests_at_the_checkpoint() {
-        let mut driver = ArchiveDriver::resume(site(), before(), Endpoint::Posts, 4, None);
-        let url = page_url(Endpoint::Posts, 5);
+        let mut driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Posts, 4, None),
+            Vec::new(),
+        );
+        let url = page_url("posts", 5);
 
         driver.failed(&url, &Error::MissingHost(url.clone()));
 
         assert_eq!(driver.next(), None);
-        assert_eq!(
-            driver.checkpoint(),
-            Checkpoint::Resume {
-                endpoint: Endpoint::Posts,
-                last_page: 4,
-                total_pages: None,
-            }
-        );
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Posts, 4, None));
     }
 }

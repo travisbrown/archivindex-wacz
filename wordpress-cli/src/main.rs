@@ -20,9 +20,9 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
-use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Site};
+use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
-use archivindex_wordpress::endpoint::Endpoint;
+use archivindex_wordpress::endpoint::{Collection, Registry};
 use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
@@ -65,13 +65,16 @@ fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutco
 
 /// Continue an archive from the checkpoint an earlier run reported.
 fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let driver = ArchiveDriver::resume(
-        options.run.base.clone(),
-        options.before,
-        options.endpoint,
-        options.last_page,
-        options.total_pages,
-    );
+    let custom = options.custom_collections();
+    let endpoint = Collection::find(&options.endpoint, &custom)
+        .ok_or_else(|| Error::UnknownEndpoint(options.endpoint.clone()))?;
+    let resumption = Resumption {
+        endpoint,
+        last_page: options.last_page,
+        total_pages: options.total_pages,
+    };
+    let driver =
+        ArchiveDriver::resume(options.run.base.clone(), options.before, resumption, custom);
 
     run_archive(driver, &options.run, options.before, quiet)
 }
@@ -173,15 +176,11 @@ fn run_archive(
             );
             Ok(CommandOutcome::ReportedProblems)
         }
-        Checkpoint::Resume {
-            endpoint,
-            last_page,
-            total_pages,
-        } => {
+        Checkpoint::Resume(resumption) => {
             log::warn!("a partial archive was published at {}", output.display());
             println!(
                 "Continue the archive with: {}",
-                resume_command(options, before, endpoint, last_page, total_pages)
+                resume_command(options, before, &resumption, state.driver.endpoints())
             );
             Ok(CommandOutcome::ReportedProblems)
         }
@@ -209,7 +208,8 @@ fn report_archive_problems(
             summary.partial_captures()
         );
     }
-    for &(endpoint, status) in driver.probed() {
+    for (endpoint, status) in driver.probed() {
+        let status = *status;
         if status == 404 {
             log::info!("{} does not expose {endpoint}", options.base.base());
         } else if !(200..300).contains(&status) && status != 304 {
@@ -221,37 +221,48 @@ fn report_archive_problems(
     }
 }
 
-/// The command continuing an archive after `last_page` of `endpoint` with this run's settings.
+/// The command continuing an archive from `resumption` with this run's settings.
 ///
-/// A cookie is not repeated, since it is a secret; the session name is left to default to a new
-/// timestamp.
+/// The custom collections among `endpoints` are repeated with the flag for their registry, in
+/// order, since the resumed run does not read the registries again. A cookie is not repeated,
+/// since it is a secret; the session name is left to default to a new timestamp.
 fn resume_command(
     options: &ArchiveRunOptions,
     before: DateTime<Utc>,
-    endpoint: Endpoint,
-    last_page: usize,
-    total_pages: Option<usize>,
+    resumption: &Resumption,
+    endpoints: &[Collection],
 ) -> String {
     let mut command = format!(
-        "archivindex-wordpress resume-archive --output {} --base {} --endpoint {endpoint} \
-         --last-page {last_page} --before {}",
+        "archivindex-wordpress resume-archive --output {} --base {} --endpoint {} \
+         --last-page {} --before {}",
         shell_word(&options.output.to_string_lossy()),
         shell_word(options.base.base()),
+        shell_word(resumption.endpoint.name()),
+        resumption.last_page,
         shell_word(&before.to_rfc3339_opts(SecondsFormat::Secs, true))
     );
-    if let Some(total_pages) = total_pages {
+    if let Some(total_pages) = resumption.total_pages {
+        // Writing to a `String` cannot fail, so the `fmt::Result` carries nothing.
         let _ = write!(command, " --total-pages {total_pages}");
+    }
+    for endpoint in endpoints {
+        if let Some(registry) = endpoint.registry() {
+            let flag = match registry {
+                Registry::Types => "--custom",
+                Registry::Taxonomies => "--custom-taxonomy",
+            };
+            let _ = write!(command, " {flag} {}", shell_word(endpoint.name()));
+        }
     }
     let optional = [("--config", &options.config)];
     for (flag, path) in optional {
         if let Some(path) = path {
-            // Writing to a `String` cannot fail, so the `fmt::Result` carries nothing.
             let _ = write!(command, " {flag} {}", shell_word(&path.to_string_lossy()));
         }
     }
     // An unknown page count plus conditional 304 responses cannot establish where a collection
     // ends. Carry the revisit index only when the checkpoint also carries the needed count.
-    if total_pages.is_some()
+    if resumption.total_pages.is_some()
         && let Some(path) = &options.revisit_index
     {
         let _ = write!(
@@ -320,7 +331,7 @@ impl ArchiveRunState {
         self.transitions
             .iter()
             .find(|(url, _)| partial_urls.contains(url.as_str()))
-            .map_or(self.durable, |(_, before)| *before)
+            .map_or_else(|| self.durable.clone(), |(_, before)| before.clone())
     }
 }
 
@@ -943,6 +954,11 @@ enum Error {
         .0.display()
     )]
     InitialRequestsIncomplete(PathBuf),
+    #[error(
+        "unknown endpoint {0:?}; pass a supported endpoint name or one listed with --custom or \
+         --custom-taxonomy"
+    )]
+    UnknownEndpoint(String),
     #[error("comment update overlap is out of range: {0:?}")]
     OverlapOutOfRange(Duration),
     #[error("comment update window starts at {after}, which is not before {before}")]
@@ -1028,9 +1044,10 @@ struct ArchiveRunOptions {
 struct ResumeArchiveOptions {
     #[clap(flatten)]
     run: ArchiveRunOptions,
-    /// The endpoint to continue, by its lowercase name.
+    /// The endpoint to continue: a supported endpoint's lowercase name, or a custom collection
+    /// also listed with `--custom` or `--custom-taxonomy`.
     #[clap(long, value_name = "ENDPOINT")]
-    endpoint: Endpoint,
+    endpoint: String,
     /// The last page of that endpoint the earlier run captured, or 0 to probe the endpoint again.
     #[clap(long, value_name = "PAGE")]
     last_page: usize,
@@ -1040,6 +1057,33 @@ struct ResumeArchiveOptions {
     /// The cutoff the archive started with, as reported by the earlier run.
     #[clap(long, value_name = "TIMESTAMP")]
     before: DateTime<Utc>,
+    /// A custom collection the earlier run discovered in the site's post types, repeated in the
+    /// reported order; the resumed run does not read the registries again.
+    #[clap(long, value_name = "ENDPOINT")]
+    custom: Vec<String>,
+    /// A custom collection the earlier run discovered in the site's taxonomies, repeated in the
+    /// reported order.
+    #[clap(long, value_name = "ENDPOINT")]
+    custom_taxonomy: Vec<String>,
+}
+
+impl ResumeArchiveOptions {
+    /// The custom collections in probing order: those from the post types, then the taxonomies.
+    fn custom_collections(&self) -> Vec<Collection> {
+        let types = self.custom.iter().zip(std::iter::repeat(Registry::Types));
+        let taxonomies = self
+            .custom_taxonomy
+            .iter()
+            .zip(std::iter::repeat(Registry::Taxonomies));
+
+        types
+            .chain(taxonomies)
+            .map(|(name, registry)| Collection::Custom {
+                name: name.clone(),
+                registry,
+            })
+            .collect()
+    }
 }
 
 /// Options for reading comments from a WARC file.
@@ -1124,8 +1168,8 @@ mod tests {
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
     use archivindex_wordpress::CommentDriver;
-    use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Site};
-    use archivindex_wordpress::endpoint::Endpoint;
+    use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
+    use archivindex_wordpress::endpoint::{Collection, Endpoint, Registry};
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
     use chrono::{DateTime, Utc};
     use clap::{CommandFactory, Parser};
@@ -1136,7 +1180,7 @@ mod tests {
         ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, Command, CommentRun,
         CommentRunOptions, Config, Error, Opts, SharedArchiveDriver, capture_comment_run,
         check_wp_comments, comment_update_inputs, load_config_for_output,
-        page_total_change_warning, resume_command, run_archive,
+        page_total_change_warning, resume_archive, resume_command, run_archive,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1147,17 +1191,50 @@ mod tests {
             .expect("a test timestamp")
     }
 
-    /// Serve `requests` of a site exposing two pages of `pages` and one page of `comments`.
+    fn resumption(
+        endpoint: impl Into<Collection>,
+        last_page: usize,
+        total_pages: Option<usize>,
+    ) -> Resumption {
+        Resumption {
+            endpoint: endpoint.into(),
+            last_page,
+            total_pages,
+        }
+    }
+
+    fn custom(name: &str, registry: Registry) -> Collection {
+        Collection::Custom {
+            name: name.to_owned(),
+            registry,
+        }
+    }
+
+    /// A registry response with one `wp/v2` entry whose collection is at `rest_base`.
+    fn registry(rest_base: &str) -> String {
+        format!(
+            r#"{{"{rest_base}": {{"name": "", "description": "", "hierarchical": false,
+                "slug": "{rest_base}", "rest_base": "{rest_base}", "rest_namespace": "wp/v2",
+                "_links": {{"wp:items": [{{"href": "https://example.com/x"}}]}}}}}}"#
+        )
+    }
+
+    /// Serve `requests` of a site exposing two pages of `pages`, one of `comments`, and one of
+    /// the custom `videos` type its type registry advertises.
     ///
-    /// The roots and those two probes are answered with 200, every other probe with 404, and each
-    /// note is the request's path.
+    /// The taxonomy registry advertises `series`, which is not exposed; every other probe is
+    /// answered with 404, and each note is the request's path.
     fn serve_site(requests: usize) -> std::io::Result<(u16, thread::JoinHandle<Vec<String>>)> {
         serve_with(requests, |request| {
             let target = request.path();
             let (path, query) = target.split_once('?').unwrap_or((target, ""));
             let json = [("content-type", "application/json")];
             let reply = match path.strip_prefix("/wp-json/wp/v2/") {
-                Some("pages" | "comments") if query.is_empty() => response("200 OK", &json, "[]"),
+                Some("types") => response("200 OK", &json, &registry("videos")),
+                Some("taxonomies") => response("200 OK", &json, &registry("series")),
+                Some("pages" | "comments" | "videos") if query.is_empty() => {
+                    response("200 OK", &json, "[]")
+                }
                 Some("pages") => response(
                     "200 OK",
                     &[
@@ -1166,7 +1243,7 @@ mod tests {
                     ],
                     "[]",
                 ),
-                Some("comments") => response(
+                Some("comments" | "videos") => response(
                     "200 OK",
                     &[
                         ("content-type", "application/json"),
@@ -1333,6 +1410,12 @@ mod tests {
             "7",
             "--before",
             BEFORE,
+            "--custom-taxonomy",
+            "series",
+            "--custom",
+            "videos",
+            "--custom",
+            "clips",
         ])
         .expect("valid options");
 
@@ -1343,10 +1426,19 @@ mod tests {
         assert_eq!(options.run.base.base(), "example.com");
         assert_eq!(options.run.output, PathBuf::from("archives"));
         assert_eq!(options.run.session_name, None);
-        assert_eq!(options.endpoint, Endpoint::Comments);
+        assert_eq!(options.endpoint, "comments");
         assert_eq!(options.last_page, 7);
         assert_eq!(options.total_pages, None);
         assert_eq!(options.before, before());
+        // Custom collections from the post types precede those from the taxonomies.
+        assert_eq!(
+            options.custom_collections(),
+            [
+                custom("videos", Registry::Types),
+                custom("clips", Registry::Types),
+                custom("series", Registry::Taxonomies),
+            ]
+        );
 
         let arguments = [
             "archivindex-wordpress",
@@ -1362,15 +1454,8 @@ mod tests {
             "--before",
             BEFORE,
         ];
-        // Endpoint names are exact, and each checkpoint argument is required.
+        // Each checkpoint argument is required.
         let rejected = [
-            arguments.map(|argument| {
-                if argument == "comments" {
-                    "Comments"
-                } else {
-                    argument
-                }
-            }),
             arguments.map(|argument| if argument == "7" { "-1" } else { argument }),
             arguments.map(|argument| {
                 if argument == BEFORE {
@@ -1388,6 +1473,23 @@ mod tests {
             incomplete.drain(skipped..skipped + 2);
             assert!(Opts::try_parse_from(incomplete).is_err());
         }
+
+        // Endpoint names are exact, and a custom endpoint must be listed, before anything runs.
+        for (endpoint, custom) in [("Comments", "comments"), ("videos", "clips")] {
+            let mut unknown = arguments.to_vec();
+            unknown[7] = endpoint;
+            unknown.extend(["--custom", custom]);
+            let Command::ResumeArchive(options) = Opts::try_parse_from(unknown)
+                .expect("valid options")
+                .command
+            else {
+                panic!("expected the resuming command");
+            };
+            assert!(matches!(
+                resume_archive(&options, true),
+                Err(Error::UnknownEndpoint(name)) if name == endpoint
+            ));
+        }
     }
 
     #[test]
@@ -1403,26 +1505,45 @@ mod tests {
         };
 
         assert_eq!(
-            resume_command(&options, before(), Endpoint::Comments, 7, None),
+            resume_command(
+                &options,
+                before(),
+                &resumption(Endpoint::Comments, 7, None),
+                &Endpoint::ALL.map(Collection::Known)
+            ),
             "archivindex-wordpress resume-archive --output archives --base example.com/blog \
              --endpoint comments --last-page 7 --before 2026-08-20T00:00:00Z"
         );
 
+        // Custom collections are repeated in order, with the flag of their registry.
         options.config = Some(PathBuf::from("capture.toml"));
         options.revisit_index = Some(PathBuf::from("state.sqlite3"));
+        let videos = custom("videos", Registry::Types);
+        let endpoints = [
+            Endpoint::Media.into(),
+            videos.clone(),
+            custom("series", Registry::Taxonomies),
+            custom("it's", Registry::Types),
+        ];
         assert_eq!(
-            resume_command(&options, before(), Endpoint::Media, 0, Some(12)),
+            resume_command(
+                &options,
+                before(),
+                &resumption(Endpoint::Media, 0, Some(12)),
+                &endpoints
+            ),
             "archivindex-wordpress resume-archive --output archives --base example.com/blog \
              --endpoint media --last-page 0 --before 2026-08-20T00:00:00Z --total-pages 12 \
+             --custom videos --custom-taxonomy series --custom 'it'\"'\"'s' \
              --config capture.toml --revisit-index state.sqlite3"
         );
 
         options.output = PathBuf::from("archive output/it's here");
         options.config = Some(PathBuf::from("capture files/site's.toml"));
         assert_eq!(
-            resume_command(&options, before(), Endpoint::Media, 0, None),
+            resume_command(&options, before(), &resumption(videos, 3, None), &[]),
             "archivindex-wordpress resume-archive --output 'archive output/it'\"'\"'s here' \
-             --base example.com/blog --endpoint media --last-page 0 \
+             --base example.com/blog --endpoint videos --last-page 3 \
              --before 2026-08-20T00:00:00Z \
              --config 'capture files/site'\"'\"'s.toml'"
         );
@@ -1433,9 +1554,8 @@ mod tests {
         let driver = ArchiveDriver::resume(
             Site::parse("example.com").expect("a site"),
             before(),
-            Endpoint::Comments,
-            1,
-            Some(2),
+            resumption(Endpoint::Comments, 1, Some(2)),
+            Vec::new(),
         );
         let state = Rc::new(RefCell::new(ArchiveRunState::new(driver)));
         let mut shared = SharedArchiveDriver(Rc::clone(&state));
@@ -1450,11 +1570,7 @@ mod tests {
 
         assert_eq!(
             state.borrow().durable,
-            Checkpoint::Resume {
-                endpoint: Endpoint::Comments,
-                last_page: 1,
-                total_pages: Some(2),
-            }
+            Checkpoint::Resume(resumption(Endpoint::Comments, 1, Some(2)))
         );
         assert_eq!(inspection.error, None);
         assert_eq!(
@@ -1466,11 +1582,7 @@ mod tests {
 
         assert_eq!(
             state.borrow().durable,
-            Checkpoint::Resume {
-                endpoint: Endpoint::Comments,
-                last_page: 0,
-                total_pages: Some(2),
-            }
+            Checkpoint::Resume(resumption(Endpoint::Comments, 0, Some(2)))
         );
     }
 
@@ -1835,7 +1947,7 @@ mod tests {
     #[test]
     fn an_archive_pages_each_exposed_collection_after_the_probes()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(21)?;
+        let (port, server) = serve_site(26)?;
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("archives");
         let options = archive_options(port, &output, "site-archive");
@@ -1870,6 +1982,8 @@ mod tests {
                 .iter()
                 .map(|endpoint| format!("/wp-json/wp/v2/{endpoint}")),
         );
+        // The custom collections are probed after the supported endpoints, in registry order.
+        expected.extend(["/wp-json/wp/v2/videos", "/wp-json/wp/v2/series"].map(str::to_owned));
         expected.extend(
             [
                 ("pages", 1),
@@ -1878,6 +1992,8 @@ mod tests {
                 ("pages", 2),
                 ("comments", 1),
                 ("comments", 1),
+                ("videos", 1),
+                ("videos", 1),
             ]
             .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
         );
@@ -1887,10 +2003,18 @@ mod tests {
         assert!(std::fs::read(&warc)?.starts_with(b"WARC/"));
         let vias = metadata_vias(&warc)?;
         let seeds = vias.iter().filter(|(_, via)| via.is_none()).count();
-        assert_eq!(seeds, 15);
+        assert_eq!(seeds, 16);
         assert_eq!(
-            vias[15..],
+            vias[16..],
             [
+                (
+                    format!("{root}wp-json/wp/v2/videos"),
+                    Some(format!("{root}wp-json/wp/v2/types"))
+                ),
+                (
+                    format!("{root}wp-json/wp/v2/series"),
+                    Some(format!("{root}wp-json/wp/v2/taxonomies"))
+                ),
                 (page("pages", 1), Some(format!("{root}wp-json/wp/v2/pages"))),
                 (page("pages", 2), Some(page("pages", 1))),
                 (page("pages", 1), Some(page("pages", 2))),
@@ -1900,6 +2024,11 @@ mod tests {
                     Some(format!("{root}wp-json/wp/v2/comments"))
                 ),
                 (page("comments", 1), Some(page("comments", 1))),
+                (
+                    page("videos", 1),
+                    Some(format!("{root}wp-json/wp/v2/videos"))
+                ),
+                (page("videos", 1), Some(page("videos", 1))),
             ]
         );
 
@@ -1909,13 +2038,13 @@ mod tests {
     #[test]
     fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(3)?;
+        let (port, server) = serve_site(7)?;
         let directory = tempfile::tempdir()?;
         let options = archive_options(port, directory.path(), "site-resumed");
-        let comments = |page: usize| {
+        let root = format!("http://127.0.0.1:{port}/wp-json/wp/v2/");
+        let page = |endpoint: &str, page: usize| {
             format!(
-                "http://127.0.0.1:{port}/wp-json/wp/v2/comments?before={BEFORE}&orderby=id\
-                 &order=asc&page={page}&per_page=100"
+                "{root}{endpoint}?before={BEFORE}&orderby=id&order=asc&page={page}&per_page=100"
             )
         };
 
@@ -1923,9 +2052,8 @@ mod tests {
             ArchiveDriver::resume(
                 options.base.clone(),
                 before(),
-                Endpoint::Comments,
-                1,
-                Some(2),
+                resumption(Endpoint::Comments, 1, Some(2)),
+                vec![custom("videos", Registry::Types)],
             ),
             &options,
             before(),
@@ -1934,14 +2062,25 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::Success);
         let requests = server.join().expect("the local server");
-        assert_eq!(requests.len(), 3);
-        assert_eq!(requests[2..], ["/wp-json/wp/v2/media"]);
+        assert_eq!(requests.len(), 7);
+        assert_eq!(
+            requests[2..5],
+            [
+                "/wp-json/wp/v2/media",
+                "/wp-json/wp/v2/navigation",
+                "/wp-json/wp/v2/videos"
+            ]
+        );
         assert_eq!(
             metadata_vias(&directory.path().join("site-resumed.warc"))?,
             [
-                (comments(2), Some(comments(1))),
-                (comments(1), Some(comments(2))),
-                (format!("http://127.0.0.1:{port}/wp-json/wp/v2/media"), None),
+                (page("comments", 2), Some(page("comments", 1))),
+                (page("comments", 1), Some(page("comments", 2))),
+                (format!("{root}media"), None),
+                (format!("{root}navigation"), None),
+                (format!("{root}videos"), Some(format!("{root}types"))),
+                (page("videos", 1), Some(format!("{root}videos"))),
+                (page("videos", 1), Some(page("videos", 1))),
             ]
         );
 
@@ -1951,10 +2090,10 @@ mod tests {
     #[test]
     fn a_limited_archive_reports_problems_at_its_checkpoint()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(16)?;
+        let (port, server) = serve_site(19)?;
         let directory = tempfile::tempdir()?;
         let mut options = archive_options(port, directory.path(), "site-limited");
-        options.limit = Some(16);
+        options.limit = Some(19);
 
         let outcome = run_archive(
             ArchiveDriver::new(options.base.clone(), before()),
@@ -1964,7 +2103,7 @@ mod tests {
         )?;
 
         assert_eq!(outcome, CommandOutcome::ReportedProblems);
-        assert_eq!(server.join().expect("the local server").len(), 16);
+        assert_eq!(server.join().expect("the local server").len(), 19);
 
         Ok(())
     }
