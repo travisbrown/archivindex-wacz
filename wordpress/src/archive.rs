@@ -13,93 +13,7 @@ use archivindex_archiver::session::{Capture, CaptureProcessor, Inspection};
 use chrono::{DateTime, Utc};
 use url::Url;
 
-/// The API resources requested before any collection, relative to the installation root.
-const ROOTS: [&str; 8] = [
-    "wp-json",
-    "wp-json/wp/v2",
-    "wp-json/wp/v2/types",
-    "wp-json/wp/v2/taxonomies",
-    "wp-json/wp/v2/block-types",
-    "wp-json/wp/v2/block-patterns/categories",
-    "wp-json/wp/v2/block-patterns/patterns",
-    "wp-json/wp/v2/menu-locations",
-];
-
-/// A REST API v2 collection endpoint. The variant order is the order endpoints are archived in.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Endpoint {
-    /// The `pages` collection.
-    Pages,
-    /// The `posts` collection.
-    Posts,
-    /// The `categories` collection.
-    Categories,
-    /// The `tags` collection.
-    Tags,
-    /// The `users` collection.
-    Users,
-    /// The `comments` collection.
-    Comments,
-    /// The `media` collection.
-    Media,
-    /// The `videos` collection, a custom post type not every site exposes.
-    Videos,
-}
-
-impl Endpoint {
-    /// Every endpoint, in the order they are probed and paged.
-    pub const ALL: [Self; 8] = [
-        Self::Pages,
-        Self::Posts,
-        Self::Categories,
-        Self::Tags,
-        Self::Users,
-        Self::Comments,
-        Self::Media,
-        Self::Videos,
-    ];
-
-    /// The collection's name, which is the last segment of its endpoint path.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Pages => "pages",
-            Self::Posts => "posts",
-            Self::Categories => "categories",
-            Self::Tags => "tags",
-            Self::Users => "users",
-            Self::Comments => "comments",
-            Self::Media => "media",
-            Self::Videos => "videos",
-        }
-    }
-}
-
-impl fmt::Display for Endpoint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
-
-/// A name that is not the lowercase name of an [`Endpoint`].
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "unknown WordPress endpoint {0:?}; expected one of pages, posts, categories, tags, users, \
-     comments, media, videos"
-)]
-pub struct EndpointParseError(String);
-
-impl FromStr for Endpoint {
-    type Err = EndpointParseError;
-
-    /// Parse an endpoint's exact lowercase name.
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|endpoint| endpoint.name() == name)
-            .ok_or_else(|| EndpointParseError(name.to_owned()))
-    }
-}
+use crate::endpoint::{Endpoint, ROOT_ENDPOINTS};
 
 /// A `WordPress` installation named by its host and optional path, such as `example.com/blog`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -369,7 +283,7 @@ impl ArchiveProcessor {
     pub fn seeds(&self) -> Vec<String> {
         let roots = self
             .initial
-            .then_some(ROOTS)
+            .then_some(ROOT_ENDPOINTS)
             .into_iter()
             .flatten()
             .map(|root| self.site.url(root));
@@ -503,7 +417,11 @@ impl CaptureProcessor for ArchiveProcessor {
             return self.inspect_probe(endpoint, capture.status);
         }
 
-        if self.initial && ROOTS.iter().any(|root| capture.url == self.site.url(root)) {
+        if self.initial
+            && ROOT_ENDPOINTS
+                .iter()
+                .any(|root| capture.url == self.site.url(root))
+        {
             return Inspection::default();
         }
 
@@ -535,7 +453,8 @@ mod tests {
     use archivindex_archiver::session::{Capture, CaptureProcessor};
     use chrono::{DateTime, Utc};
 
-    use super::{ArchiveProcessor, Checkpoint, Endpoint, Site};
+    use super::{ArchiveProcessor, Checkpoint, Site};
+    use crate::endpoint::Endpoint;
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
     const OK: &[u8] = b"HTTP/1.1 200 OK\r\n\r\n";
@@ -586,22 +505,13 @@ mod tests {
     }
 
     /// Answer every probe with `responses` in endpoint order, returning the last inspection.
-    fn probe_all(processor: &mut ArchiveProcessor, responses: [&[u8]; 8]) -> super::Inspection {
+    fn probe_all(processor: &mut ArchiveProcessor, responses: [&[u8]; 7]) -> super::Inspection {
         Endpoint::ALL
             .into_iter()
             .zip(responses)
             .map(|(endpoint, response)| inspect(processor, &endpoint_url(endpoint), response))
             .last()
             .expect("eight probes")
-    }
-
-    #[test]
-    fn endpoint_names_parse_exactly() {
-        for endpoint in Endpoint::ALL {
-            assert_eq!(endpoint.name().parse::<Endpoint>().ok(), Some(endpoint));
-        }
-        assert!("Posts".parse::<Endpoint>().is_err());
-        assert!("posts/".parse::<Endpoint>().is_err());
     }
 
     #[test]
@@ -638,12 +548,12 @@ mod tests {
 
         let seeds = processor.seeds();
 
-        assert_eq!(seeds.len(), 11);
+        assert_eq!(seeds.len(), 15);
         assert_eq!(seeds[0], "https://example.com/blog/wp-json");
         assert_eq!(seeds[1], "https://example.com/blog/wp-json/wp/v2");
         assert_eq!(seeds[2], "https://example.com/blog/wp-json/wp/v2/types");
-        assert_eq!(seeds[3], endpoint_url(Endpoint::Pages));
-        assert_eq!(seeds[10], endpoint_url(Endpoint::Videos));
+        assert_eq!(seeds[8], endpoint_url(Endpoint::Pages));
+        assert_eq!(seeds[14], endpoint_url(Endpoint::Media));
         assert_eq!(processor.extras(), None);
         assert_eq!(processor.checkpoint(), Checkpoint::Initial);
         assert_eq!(processor.to_string(), "example.com/blog: probing pages");
@@ -664,9 +574,7 @@ mod tests {
 
         let last = probe_all(
             &mut processor,
-            [
-                OK, NOT_FOUND, OK, FORBIDDEN, NOT_FOUND, OK, NOT_FOUND, NOT_FOUND,
-            ],
+            [OK, NOT_FOUND, OK, FORBIDDEN, NOT_FOUND, OK, NOT_FOUND],
         );
 
         assert_eq!(
@@ -686,8 +594,7 @@ mod tests {
                 (Endpoint::Tags, 403),
                 (Endpoint::Users, 404),
                 (Endpoint::Comments, 200),
-                (Endpoint::Media, 404),
-                (Endpoint::Videos, 404)
+                (Endpoint::Media, 404)
             ]
         );
         assert_eq!(
@@ -735,7 +642,7 @@ mod tests {
     fn no_exposed_collection_finishes_an_archive() {
         let mut processor = ArchiveProcessor::new(site(), before());
 
-        let last = probe_all(&mut processor, [NOT_FOUND; 8]);
+        let last = probe_all(&mut processor, [NOT_FOUND; 7]);
 
         assert_eq!(last, super::Inspection::default());
         assert_eq!(processor.checkpoint(), Checkpoint::Finished);
@@ -745,13 +652,7 @@ mod tests {
     fn a_resumed_run_continues_the_endpoint_and_probes_the_rest() {
         let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Comments, 7);
 
-        assert_eq!(
-            processor.seeds(),
-            [
-                endpoint_url(Endpoint::Media),
-                endpoint_url(Endpoint::Videos)
-            ]
-        );
+        assert_eq!(processor.seeds(), [endpoint_url(Endpoint::Media)]);
         assert_eq!(
             processor.extras(),
             Some((
@@ -785,7 +686,6 @@ mod tests {
         // An endpoint found exposed is paged only after the remaining probes, so a run stopped
         // during those probes resumes by probing it again.
         let media = inspect(&mut processor, &endpoint_url(Endpoint::Media), OK);
-        assert_eq!(media, super::Inspection::default());
         assert_eq!(
             processor.checkpoint(),
             Checkpoint::Resume {
@@ -793,23 +693,19 @@ mod tests {
                 last_page: 0
             }
         );
-        let videos = inspect(&mut processor, &endpoint_url(Endpoint::Videos), OK);
-        assert_eq!(
-            videos.links,
-            [page_url(Endpoint::Media, 1), page_url(Endpoint::Videos, 1)]
-        );
+        assert_eq!(media.links, [page_url(Endpoint::Media, 1)]);
     }
 
     #[test]
     fn a_resumed_run_at_page_zero_probes_the_endpoint_itself() {
-        let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Videos, 0);
+        let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Media, 0);
 
-        assert_eq!(processor.seeds(), [endpoint_url(Endpoint::Videos)]);
+        assert_eq!(processor.seeds(), [endpoint_url(Endpoint::Media)]);
         assert_eq!(processor.extras(), None);
         assert_eq!(
             processor.checkpoint(),
             Checkpoint::Resume {
-                endpoint: Endpoint::Videos,
+                endpoint: Endpoint::Media,
                 last_page: 0
             }
         );

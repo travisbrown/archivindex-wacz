@@ -20,8 +20,9 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
-use archivindex_wordpress::archive::{ArchiveProcessor, Checkpoint, Endpoint, Site};
+use archivindex_wordpress::archive::{ArchiveProcessor, Checkpoint, Site};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
+use archivindex_wordpress::endpoint::Endpoint;
 use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
@@ -1000,7 +1001,8 @@ mod tests {
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
     use archivindex_wordpress::CommentCaptureProcessor;
-    use archivindex_wordpress::archive::{ArchiveProcessor, Endpoint, Site};
+    use archivindex_wordpress::archive::{ArchiveProcessor, Site};
+    use archivindex_wordpress::endpoint::Endpoint;
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
     use chrono::{DateTime, Utc};
     use clap::{CommandFactory, Parser};
@@ -1654,7 +1656,7 @@ mod tests {
     #[test]
     fn an_archive_pages_each_exposed_collection_after_the_probes()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(14)?;
+        let (port, server) = serve_site(18)?;
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("archives");
         let options = archive_options(port, &output, "site-archive");
@@ -1678,6 +1680,11 @@ mod tests {
             "/wp-json".to_owned(),
             "/wp-json/wp/v2".to_owned(),
             "/wp-json/wp/v2/types".to_owned(),
+            "/wp-json/wp/v2/taxonomies".to_owned(),
+            "/wp-json/wp/v2/block-types".to_owned(),
+            "/wp-json/wp/v2/block-patterns/categories".to_owned(),
+            "/wp-json/wp/v2/block-patterns/patterns".to_owned(),
+            "/wp-json/wp/v2/menu-locations".to_owned(),
         ];
         expected.extend(
             Endpoint::ALL
@@ -1694,10 +1701,10 @@ mod tests {
         assert!(std::fs::read(&warc)?.starts_with(b"WARC/"));
         let vias = metadata_vias(&warc)?;
         let seeds = vias.iter().filter(|(_, via)| via.is_none()).count();
-        assert_eq!(seeds, 11);
-        let last_probe = format!("{root}wp-json/wp/v2/videos");
+        assert_eq!(seeds, 15);
+        let last_probe = format!("{root}wp-json/wp/v2/media");
         assert_eq!(
-            vias[11..],
+            vias[15..],
             [
                 (page("pages", 1), Some(last_probe.clone())),
                 (page("pages", 2), Some(page("pages", 1))),
@@ -1711,7 +1718,7 @@ mod tests {
     #[test]
     fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(3)?;
+        let (port, server) = serve_site(2)?;
         let directory = tempfile::tempdir()?;
         let options = archive_options(port, directory.path(), "site-resumed");
         let comments = |page: usize| {
@@ -1730,20 +1737,13 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::Success);
         let requests = server.join().expect("the local server");
-        assert_eq!(requests.len(), 3);
-        assert_eq!(
-            requests[1..],
-            ["/wp-json/wp/v2/media", "/wp-json/wp/v2/videos"]
-        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1..], ["/wp-json/wp/v2/media"]);
         assert_eq!(
             metadata_vias(&directory.path().join("site-resumed.warc"))?,
             [
                 (comments(2), Some(comments(1))),
                 (format!("http://127.0.0.1:{port}/wp-json/wp/v2/media"), None),
-                (
-                    format!("http://127.0.0.1:{port}/wp-json/wp/v2/videos"),
-                    None
-                ),
             ]
         );
 
