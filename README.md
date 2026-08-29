@@ -60,6 +60,11 @@ that advertised it (`types` when both did), a collection's first page follows it
 validation pass's first page follows the last page read before it, and every other page follows
 the preceding page. No capture carries a title.
 
+While the roots and collection probes run, the command shows its current probing position. After
+the final probe it replaces that indicator with one progress bar for each exposed collection,
+using the probe's `X-WP-TotalPages` value as the bar length. A bar resets to page zero and is
+labeled as validation while the collection's second pass runs.
+
 `--base` names the site as a host with an optional path and no scheme, such as `example.com` or
 `example.com/blog` (a trailing slash is removed); requests use HTTPS. `--output` names a directory,
 which is created if needed. The session is written uncompressed to `<output>/<session name>.warc`,

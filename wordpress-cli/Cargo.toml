@@ -28,6 +28,7 @@ archivindex-wordpress = { version = "0.1.0", path = "../wordpress/" }
 chrono.workspace = true
 clap.workspace = true
 humantime = "2"
+indicatif.workspace = true
 log.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

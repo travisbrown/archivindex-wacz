@@ -30,6 +30,7 @@ use archivindex_wordpress::read::{
 use archivindex_wordpress::{CommentDriver, CommentProgress};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 fn main() -> ExitCode {
     let opts = Opts::parse();
@@ -104,8 +105,8 @@ fn run_archive(
     }
 
     let state = Rc::new(RefCell::new(ArchiveRunState::new(driver)));
-    let progress = spinner(format!("Archiving {}", options.base.base()), None);
-    let event_progress = progress.clone();
+    let progress = Rc::new(RefCell::new(ArchiveProgress::new(options.base.base())));
+    let event_progress = Rc::clone(&progress);
     let event_state = Rc::clone(&state);
     // An interrupt ends the session cleanly, so its captures are published and the checkpoint
     // reported instead of abandoning a partial file.
@@ -121,7 +122,7 @@ fn run_archive(
             CaptureEvent::Written { url } => {
                 let mut state = event_state.borrow_mut();
                 state.written(url);
-                event_progress.set_message(state.driver.to_string());
+                event_progress.borrow_mut().update(&state.driver);
                 if interrupted.load(Ordering::Relaxed) {
                     CaptureControl::Cancel
                 } else {
@@ -151,7 +152,7 @@ fn run_archive(
     }
 
     let summary = session.run()?;
-    progress.finish_and_clear();
+    progress.borrow().finish();
 
     let state = state.borrow();
     report_archive_problems(&summary, &state.driver, options);
@@ -185,6 +186,72 @@ fn run_archive(
             Ok(CommandOutcome::ReportedProblems)
         }
         Checkpoint::Initial => Err(Error::InitialRequestsIncomplete(output)),
+    }
+}
+
+/// Probe spinner followed by one progress bar per exposed collection with a reported page count.
+struct ArchiveProgress {
+    multi: MultiProgress,
+    probing: ProgressBar,
+    pagination: BTreeMap<String, ProgressBar>,
+    initialized: bool,
+}
+
+impl ArchiveProgress {
+    fn new(base: &str) -> Self {
+        let multi = MultiProgress::new();
+        let probing = multi.add(spinner(format!("Archiving {base}"), None));
+
+        Self {
+            multi,
+            probing,
+            pagination: BTreeMap::new(),
+            initialized: false,
+        }
+    }
+
+    fn update(&mut self, driver: &ArchiveDriver) {
+        if !driver.probes_finished() {
+            self.probing.set_message(driver.to_string());
+            return;
+        }
+        let progress = driver.pagination_progress();
+        if !self.initialized {
+            self.probing.finish_and_clear();
+            let style = ProgressStyle::with_template(
+                "{msg:24} [{bar:40.cyan/blue}] {pos:>3}/{len:3} pages",
+            )
+            .expect("invariant violation: the archive progress template is well formed")
+            .progress_chars("=>-");
+            for endpoint in &progress {
+                let bar = self.multi.add(ProgressBar::new(
+                    u64::try_from(endpoint.total_pages).unwrap_or(u64::MAX),
+                ));
+                bar.set_style(style.clone());
+                self.pagination
+                    .insert(endpoint.collection.name().to_owned(), bar);
+            }
+            self.initialized = true;
+        }
+
+        for endpoint in progress {
+            if let Some(bar) = self.pagination.get(endpoint.collection.name()) {
+                let message = if endpoint.validating {
+                    format!("{} (validation)", endpoint.collection)
+                } else {
+                    endpoint.collection.to_string()
+                };
+                bar.set_message(message);
+                bar.set_position(u64::try_from(endpoint.page).unwrap_or(u64::MAX));
+            }
+        }
+    }
+
+    fn finish(&self) {
+        self.probing.finish_and_clear();
+        for bar in self.pagination.values() {
+            bar.finish_and_clear();
+        }
     }
 }
 
@@ -1232,9 +1299,22 @@ mod tests {
             let reply = match path.strip_prefix("/wp-json/wp/v2/") {
                 Some("types") => response("200 OK", &json, &registry("videos")),
                 Some("taxonomies") => response("200 OK", &json, &registry("series")),
-                Some("pages" | "comments" | "videos") if query.is_empty() => {
-                    response("200 OK", &json, "[]")
-                }
+                Some("pages") if query.is_empty() => response(
+                    "200 OK",
+                    &[
+                        ("content-type", "application/json"),
+                        ("x-wp-totalpages", "2"),
+                    ],
+                    "[]",
+                ),
+                Some("comments" | "videos") if query.is_empty() => response(
+                    "200 OK",
+                    &[
+                        ("content-type", "application/json"),
+                        ("x-wp-totalpages", "1"),
+                    ],
+                    "[]",
+                ),
                 Some("pages") => response(
                     "200 OK",
                     &[

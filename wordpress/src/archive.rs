@@ -149,6 +149,19 @@ pub struct Resumption {
     pub total_pages: Option<usize>,
 }
 
+/// Progress through one exposed collection whose probe advertised a page count.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginationProgress {
+    /// The collection being paged.
+    pub collection: Collection,
+    /// Pages completed in the current pass.
+    pub page: usize,
+    /// Page count advertised by the collection's probe.
+    pub total_pages: usize,
+    /// Whether the collection is being read for its validation pass.
+    pub validating: bool,
+}
+
 /// Archive a site's collections one endpoint at a time through a session.
 ///
 /// An archive begins with the API root resources and a bare probe of every [`Endpoint`], all
@@ -179,6 +192,8 @@ pub struct ArchiveDriver {
     /// Index into `endpoints` of the next collection to probe.
     next_probe: usize,
     probed: Vec<(Collection, u16)>,
+    /// Exposed collections whose probes advertised a page count, in probe order.
+    pagination: Vec<(Collection, usize)>,
     /// Endpoints whose probe succeeded, awaiting paging in order.
     pending: VecDeque<Series>,
     current: Option<Series>,
@@ -334,6 +349,7 @@ impl ArchiveDriver {
             endpoints: Endpoint::ALL.map(Collection::Known).to_vec(),
             next_probe: 0,
             probed: Vec::new(),
+            pagination: Vec::new(),
             pending: VecDeque::new(),
             current: None,
             resume_total_pages: None,
@@ -423,6 +439,40 @@ impl ArchiveDriver {
         &self.probed
     }
 
+    /// Whether every collection probe for this run has been inspected.
+    #[must_use]
+    pub const fn probes_finished(&self) -> bool {
+        self.next_root == ROOT_ENDPOINTS.len() && self.next_probe == self.endpoints.len()
+    }
+
+    /// Progress for exposed collections whose probes advertised `X-WP-TotalPages`.
+    ///
+    /// The position resets to zero when a collection begins its validation pass. A collection no
+    /// longer current or pending is reported at its advertised total.
+    #[must_use]
+    pub fn pagination_progress(&self) -> Vec<PaginationProgress> {
+        self.pagination
+            .iter()
+            .map(|(collection, total_pages)| {
+                let series = self
+                    .current
+                    .iter()
+                    .chain(&self.pending)
+                    .find(|series| series.endpoint.name() == collection.name());
+                let (page, validating) = series.map_or((*total_pages, false), |series| {
+                    (series.page.min(*total_pages), !series.is_primary())
+                });
+
+                PaginationProgress {
+                    collection: collection.clone(),
+                    page,
+                    total_pages: *total_pages,
+                    validating,
+                }
+            })
+            .collect()
+    }
+
     /// The request for a series' next page, via the page its position follows from.
     fn page_request(&self, series: &Series) -> Request {
         let endpoint = series.endpoint.name();
@@ -486,16 +536,24 @@ impl ArchiveDriver {
     }
 
     /// Record a probe's answer and, after the last probe, begin paging the exposed collections.
-    fn inspect_probe(&mut self, endpoint: Collection, status: u16) {
+    fn inspect_probe(&mut self, endpoint: Collection, capture: &Capture<'_>) {
         self.next_probe += 1;
-        // A bare probe uses WordPress's default page size, not the 100-item page size below, so
-        // only a count carried from an earlier paged response is applicable here.
+        // A bare probe uses WordPress's default page size, not the 100-item page size below. Its
+        // advertised count is retained for UI progress only; only a count carried from an earlier
+        // paged response can drive the resumed series itself.
         let total_pages = self.resume_total_pages.take();
-        if (200..300).contains(&status) || status == 304 {
+        if (200..300).contains(&capture.status) || capture.status == 304 {
+            if let Some(advertised) = capture
+                .header("x-wp-totalpages")
+                .and_then(|value| value.parse::<usize>().ok())
+                .or(total_pages)
+            {
+                self.pagination.push((endpoint.clone(), advertised));
+            }
             self.pending
                 .push_back(Series::new(endpoint.clone(), total_pages));
         }
-        self.probed.push((endpoint, status));
+        self.probed.push((endpoint, capture.status));
         if self.next_probe == self.endpoints.len() {
             self.current = self.pending.pop_front();
         }
@@ -563,7 +621,7 @@ impl Driver for ArchiveDriver {
             && capture.url == self.site.endpoint_url(endpoint.name())
         {
             let endpoint = endpoint.clone();
-            self.inspect_probe(endpoint, capture.status);
+            self.inspect_probe(endpoint, capture);
             return Inspection::default();
         }
 
@@ -600,7 +658,7 @@ mod tests {
     use archivindex_archiver::session::{Capture, Driver, Inspection, Request};
     use chrono::{DateTime, Utc};
 
-    use super::{ArchiveDriver, Checkpoint, Resumption, Site};
+    use super::{ArchiveDriver, Checkpoint, PaginationProgress, Resumption, Site};
     use crate::endpoint::{Collection, Endpoint, ROOT_ENDPOINTS, Registry};
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -861,6 +919,57 @@ mod tests {
         assert_eq!(driver.next(), None);
         assert_eq!(driver.checkpoint(), Checkpoint::Finished);
         assert_eq!(driver.to_string(), "example.com/blog: finished");
+    }
+
+    #[test]
+    fn pagination_progress_uses_probe_totals_and_tracks_each_pass() {
+        let mut driver = ArchiveDriver::new(site(), before());
+        capture_roots(&mut driver);
+        probe_all(
+            &mut driver,
+            [
+                TWO_PAGES, NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND, ONE_PAGE, NOT_FOUND,
+                NOT_FOUND,
+            ],
+        );
+
+        assert!(driver.probes_finished());
+        assert_eq!(
+            driver.pagination_progress(),
+            [
+                PaginationProgress {
+                    collection: Endpoint::Pages.into(),
+                    page: 0,
+                    total_pages: 2,
+                    validating: false,
+                },
+                PaginationProgress {
+                    collection: Endpoint::Comments.into(),
+                    page: 0,
+                    total_pages: 1,
+                    validating: false,
+                },
+            ]
+        );
+
+        let _ = inspect(&mut driver, &page_url("pages", 1), TWO_PAGES);
+        assert_eq!(driver.pagination_progress()[0].page, 1);
+        let _ = inspect(&mut driver, &page_url("pages", 2), TWO_PAGES);
+        assert_eq!(
+            driver.pagination_progress()[0],
+            PaginationProgress {
+                collection: Endpoint::Pages.into(),
+                page: 0,
+                total_pages: 2,
+                validating: true,
+            }
+        );
+
+        for page in 1..=2 {
+            let _ = inspect(&mut driver, &page_url("pages", page), TWO_PAGES);
+        }
+        assert_eq!(driver.pagination_progress()[0].page, 2);
+        assert_eq!(driver.pagination_progress()[1].page, 0);
     }
 
     #[test]
