@@ -2,8 +2,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -19,13 +20,14 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
+use archivindex_wordpress::archive::{ArchiveProcessor, Checkpoint, Endpoint, Site};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
 use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
 };
 use archivindex_wordpress::{CommentCaptureProcessor, CommentProgress};
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
 
 fn main() -> ExitCode {
@@ -39,72 +41,186 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
     let quiet = opts.verbosity.is_quiet();
 
     match opts.command {
-        Command::Archive(options) => archive_comments(&options, quiet),
+        Command::Archive(options) => archive_site(&options, quiet),
         Command::Check(options) => check_wp_comments(&options, quiet),
         Command::Complete(options) => complete_wp_comments(&options, quiet),
         Command::Read(options) => read_wp_comments(options),
-        Command::Resume(options) => resume_comments(&options, quiet),
+        Command::ResumeArchive(options) => resume_archive(&options, quiet),
         Command::Update(options) => update_comments(&options, quiet),
     }
 }
 
-/// Archive the comments exposed by a site's `WordPress` REST API v2 endpoint.
-///
-/// Captures that fail or a session that ends early leave a partial archive behind, which is
-/// reported through the exit status rather than treated as an error.
-fn archive_comments(
-    options: &ArchiveCommentsOptions,
-    quiet: bool,
-) -> Result<CommandOutcome, Error> {
-    capture_comment_run(
-        vec![CommentRun {
-            site_url: options.base_url.clone(),
-            processor: CommentCaptureProcessor::new(&options.base_url)?,
-        }],
-        CommentRunOptions {
-            config: options.config.as_deref(),
-            cookie: options.cookie.as_deref(),
-            output: &options.output,
-            session_name: &options.session_name,
-            revisit_index: options.revisit_index.as_deref(),
-            limit: options.limit,
-            second_sweep: options.second_sweep,
-        },
+/// Archive every collection a site exposes, beginning with the API roots and endpoint probes.
+fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let before = Utc::now();
+
+    run_archive(
+        ArchiveProcessor::new(options.base.clone(), before),
+        options,
+        before,
         quiet,
     )
 }
 
-/// Continue comment traversals from the pages an earlier session left unrequested or failed.
+/// Continue an archive from the checkpoint an earlier run reported.
+fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let processor = ArchiveProcessor::resume(
+        options.run.base.clone(),
+        options.before,
+        options.endpoint,
+        options.last_page,
+    );
+
+    run_archive(processor, &options.run, options.before, quiet)
+}
+
+/// Run an archiving session to a new plain WARC in the output directory.
 ///
-/// Each page resumes its own snapshot cutoff, and one that follows page one is requested via the
-/// preceding page, so the chain of pages continues from the earlier session's WARC.
-fn resume_comments(options: &ResumeCommentsOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let runs = options
-        .urls
-        .iter()
-        .map(|url| {
-            let processor = CommentCaptureProcessor::resume(url)?;
+/// A run that stops after the initial requests reports the command that continues it; one that
+/// stops during them is an error, since there is nothing to continue.
+fn run_archive(
+    processor: ArchiveProcessor,
+    options: &ArchiveRunOptions,
+    before: DateTime<Utc>,
+    quiet: bool,
+) -> Result<CommandOutcome, Error> {
+    let session_name = options
+        .session_name
+        .clone()
+        .unwrap_or_else(|| options.base.session_name(Utc::now()));
+    std::fs::create_dir_all(&options.output)?;
+    let output = options.output.join(format!("{session_name}.warc"));
+    // The directory accumulates one plain WARC per run, to be merged later.
+    let mut config: Config = load_config(options.config.as_deref())?;
+    config.gzip_warc = false;
+    let mut archiver = Archiver::new(config)?;
+    if let Some(cookie) = &options.cookie {
+        archiver = archiver.cookie_for(options.base.root().as_str(), cookie)?;
+    }
 
-            Ok(CommentRun {
-                site_url: processor.endpoint().to_owned(),
-                processor,
-            })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let seeds = processor.seeds();
+    let extras = processor.extras();
+    let processor = Rc::new(RefCell::new(processor));
+    let progress = spinner(format!("Archiving {}", options.base.base()), None);
+    let event_progress = progress.clone();
+    let event_processor = Rc::clone(&processor);
+    // An interrupt ends the session cleanly, so its captures are published and the checkpoint
+    // reported instead of abandoning a partial file.
+    let interrupted = interrupt_flag();
+    let mut session = Session::new(archiver, &session_name, seeds, &output)?
+        .extras(extras)
+        .processor(SharedArchiveProcessor(Rc::clone(&processor)))
+        .events(move |event: CaptureEvent<'_>| {
+            if interrupted.load(Ordering::Relaxed) {
+                return CaptureControl::Cancel;
+            }
+            match event {
+                // Every later request depends on the failed one, so the run stops at its
+                // checkpoint rather than continuing with the collections still waiting.
+                CaptureEvent::Failed { .. } => CaptureControl::Cancel,
+                CaptureEvent::Written { .. } => {
+                    event_progress.set_message(event_processor.borrow().to_string());
+                    CaptureControl::Continue
+                }
+                CaptureEvent::Started { .. }
+                | CaptureEvent::Retrying { .. }
+                | CaptureEvent::Captured { .. } => CaptureControl::Continue,
+            }
+        });
 
-    capture_comment_run(
-        runs,
-        CommentRunOptions {
-            config: options.config.as_deref(),
-            cookie: options.cookie.as_deref(),
-            output: &options.output,
-            session_name: &options.session_name,
-            revisit_index: options.revisit_index.as_deref(),
-            limit: options.limit,
-            second_sweep: options.second_sweep,
-        },
-        quiet,
-    )
+    if let Some(revisit_index) = &options.revisit_index {
+        session = session.revisit_index(revisit_index);
+    }
+    if let Some(limit) = options.limit {
+        session = session.limit(limit);
+    }
+
+    let summary = session.run()?;
+    progress.finish_and_clear();
+
+    for failure in &summary.failures {
+        log::warn!("Failed to capture {}: {}", failure.url, failure.error);
+    }
+    if let Some(error) = &summary.fatal_error {
+        log::warn!("The session ended early: {error}");
+    }
+    let processor = processor.borrow();
+    for &(endpoint, status) in processor.probed() {
+        if status == 404 {
+            log::info!("{} does not expose {endpoint}", options.base.base());
+        } else if !(200..300).contains(&status) && status != 304 {
+            log::warn!(
+                "{} answered the {endpoint} probe with status {status}; the endpoint was skipped",
+                options.base.base()
+            );
+        }
+    }
+
+    match processor.checkpoint() {
+        Checkpoint::Finished => {
+            if !quiet {
+                println!(
+                    "Archived {} captures from {} to {}",
+                    summary.seed_captures.len() + summary.extra_captures.len(),
+                    options.base.base(),
+                    output.display()
+                );
+            }
+            Ok(CommandOutcome::Success)
+        }
+        Checkpoint::Resume {
+            endpoint,
+            last_page,
+        } => {
+            log::warn!("a partial archive was published at {}", output.display());
+            println!(
+                "Continue the archive with: {}",
+                resume_command(options, before, endpoint, last_page)
+            );
+            Ok(CommandOutcome::ReportedProblems)
+        }
+        Checkpoint::Initial => Err(Error::InitialRequestsIncomplete(output)),
+    }
+}
+
+/// The command continuing an archive after `last_page` of `endpoint` with this run's settings.
+///
+/// A cookie is not repeated, since it is a secret; the session name is left to default to a new
+/// timestamp.
+fn resume_command(
+    options: &ArchiveRunOptions,
+    before: DateTime<Utc>,
+    endpoint: Endpoint,
+    last_page: usize,
+) -> String {
+    let mut command = format!(
+        "archivindex-wordpress resume-archive --output {} --base {} --endpoint {endpoint} \
+         --last-page {last_page} --before {}",
+        options.output.display(),
+        options.base.base(),
+        before.to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    let optional = [
+        ("--config", &options.config),
+        ("--revisit-index", &options.revisit_index),
+    ];
+    for (flag, path) in optional {
+        if let Some(path) = path {
+            // Writing to a `String` cannot fail, so the `fmt::Result` carries nothing.
+            let _ = write!(command, " {flag} {}", path.display());
+        }
+    }
+
+    command
+}
+
+/// The session's processor, shared with the event sink that reports its position.
+struct SharedArchiveProcessor(Rc<RefCell<ArchiveProcessor>>);
+
+impl CaptureProcessor for SharedArchiveProcessor {
+    fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
+        self.0.borrow_mut().inspect(capture)
+    }
 }
 
 /// Capture comments newer than an overlap before the last archived comment.
@@ -281,32 +397,24 @@ fn capture_comment_run(
     options: CommentRunOptions<'_>,
     quiet: bool,
 ) -> Result<CommandOutcome, Error> {
-    // A site's page one is a seed with no `via`; a resumed page is an extra whose `via` is the
-    // page the earlier session read before it. Every later page is a link from the preceding page.
-    let mut seeds = Vec::new();
-    let mut extras = Vec::new();
-    let mut seen_first_urls = HashSet::with_capacity(runs.len());
+    // A site's page one is a seed with no `via`; every later page is a link from the preceding
+    // page.
+    let mut seeds = Vec::with_capacity(runs.len());
     let mut scheduled = Vec::with_capacity(runs.len());
     let site_urls = runs
         .into_iter()
         .map(|run| {
             let processor = run.processor.second_sweep(options.second_sweep);
             let first_url = processor.first_comment_url();
-            if !seen_first_urls.insert(first_url.clone()) {
-                return Err(Error::DuplicateRunUrl(first_url));
-            }
-            match processor.first_comment_via() {
-                Some(via) => extras.push((first_url.clone(), via)),
-                None => seeds.push(first_url.clone()),
-            }
+            seeds.push(first_url.clone());
             scheduled.push(ScheduledCommentProcessor {
                 processor,
                 next_url: Some(first_url),
             });
 
-            Ok(run.site_url)
+            run.site_url
         })
-        .collect::<Result<Vec<_>, Error>>()?;
+        .collect::<Vec<_>>();
     let comment_progress = Rc::new(RefCell::new(CommentRunProgress {
         site_urls: site_urls.clone(),
         snapshots: vec![None; site_urls.len()],
@@ -331,7 +439,6 @@ fn capture_comment_run(
     let interrupted = interrupt_flag();
     // Validation sweeps repeat pages already read, which a deduplicating session would skip.
     let mut session = Session::new(archiver, options.session_name, seeds, options.output)?
-        .extras(extras)
         .dedupe_discoveries(false)
         .processor(processor)
         .events(move |event: CaptureEvent<'_>| {
@@ -364,7 +471,7 @@ fn capture_comment_run(
     ))
 }
 
-/// Report a finished session's failures, per-site progress, and the pages left to continue.
+/// Report a finished session's failures and per-site progress.
 fn report_comment_run(
     summary: &SessionSummary,
     comment_progress: &CommentRunProgress,
@@ -402,16 +509,6 @@ fn report_comment_run(
         }
     }
 
-    // A failed page is the link to every page after it, so it is continued like an unrequested one.
-    let unfinished = summary
-        .failures
-        .iter()
-        .map(|failure| failure.url.as_str())
-        .chain(summary.unrequested.iter().map(|(url, _)| url.as_str()));
-    if let Some(hint) = resume_hint(unfinished) {
-        log::warn!("{hint}");
-    }
-
     if summary.is_complete() {
         CommandOutcome::Success
     } else {
@@ -419,23 +516,6 @@ fn report_comment_run(
 
         CommandOutcome::ReportedProblems
     }
-}
-
-/// Suggest the `resume-comments` invocation that continues the pages a session did not finish.
-fn resume_hint<'a>(unfinished: impl Iterator<Item = &'a str>) -> Option<String> {
-    let arguments = unfinished.fold(String::new(), |mut arguments, url| {
-        arguments.push_str(" --url '");
-        arguments.push_str(url);
-        arguments.push('\'');
-        arguments
-    });
-
-    (!arguments.is_empty()).then(|| {
-        format!(
-            "Continue the unfinished pages in a new session with: resume-comments \
-             --output NEW.warc.gz --session-name NAME{arguments}"
-        )
-    })
 }
 
 /// Load the archiver settings, making the output filename authoritative for WARC compression.
@@ -709,8 +789,6 @@ enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid WordPress base URL: {0}")]
     Url(#[from] url::ParseError),
-    #[error("invalid WordPress resume URL: {0}")]
-    Resume(#[from] archivindex_wordpress::CommentResumeError),
     #[error("invalid cookie: {0}")]
     Cookie(#[from] archivindex_archiver::CookieError),
     #[error("archiving error: {0}")]
@@ -741,8 +819,12 @@ enum Error {
         #[source]
         source: Box<archivindex_wordpress::read::Error>,
     },
-    #[error("more than one comment run starts at the same URL: {0}")]
-    DuplicateRunUrl(String),
+    #[error(
+        "the session stopped before its initial requests were finished, so a new archive must \
+         start over; a partial archive was published at {}",
+        .0.display()
+    )]
+    InitialRequestsIncomplete(PathBuf),
     #[error("comment update overlap is out of range: {0:?}")]
     OverlapOutOfRange(Duration),
     #[error("comment update window starts at {after}, which is not before {before}")]
@@ -763,15 +845,15 @@ struct Opts {
     command: Command,
 }
 
-/// The comment-capture workflow to run.
+/// The workflow to run.
 #[derive(Debug, clap::Subcommand)]
 // One value of this enum exists per process, so the size difference between its variants costs
 // nothing, and boxing a variant would only obscure the derived argument parsing.
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Archive comments iteratively through a site's `WordPress` REST API v2 endpoint.
-    #[clap(name = "archive-comments")]
-    Archive(ArchiveCommentsOptions),
+    /// Archive every collection a site exposes through its `WordPress` REST API v2.
+    #[clap(name = "archive")]
+    Archive(ArchiveRunOptions),
     /// Check that every advertised comments page has a qualifying response or revisit record.
     #[clap(name = "check-comments")]
     Check(CheckCommentsOptions),
@@ -781,46 +863,62 @@ enum Command {
     /// Read comments captured from the `WordPress` REST API in a WARC file.
     #[clap(name = "read-comments")]
     Read(ReadCommentsOptions),
-    /// Continue comment pages an earlier session left unrequested or failed.
-    #[clap(name = "resume-comments")]
-    Resume(ResumeCommentsOptions),
+    /// Continue an archive from the checkpoint an earlier run reported.
+    #[clap(name = "resume-archive")]
+    ResumeArchive(ResumeArchiveOptions),
     /// Capture new comments in a window overlapping an existing comments WARC.
     #[clap(name = "update-comments")]
     Update(UpdateCommentsOptions),
 }
 
-/// Options for archiving comments from the `WordPress` REST API.
+/// Options shared by archiving a site and resuming its archive.
 #[derive(Debug, clap::Args)]
-struct ArchiveCommentsOptions {
+struct ArchiveRunOptions {
     /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
     /// optional and takes its default when absent.
     #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     config: Option<PathBuf>,
-    /// Base URL of the `WordPress` site.
-    #[clap(long)]
-    base_url: String,
-    /// Path of the WARC file to write; a `.gz` suffix enables gzip compression (an existing file
-    /// is not overwritten).
-    #[clap(long)]
+    /// The site's host with an optional path and no scheme, such as `example.com` or
+    /// `example.com/blog`; a trailing slash is ignored, and HTTPS is used unless the base begins
+    /// with `http://`.
+    #[clap(long, value_name = "BASE")]
+    base: Site,
+    /// Directory the session's plain WARC file, named after the session, is written to; it is
+    /// created when missing (an existing file is not overwritten).
+    #[clap(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     output: PathBuf,
-    /// URL-safe name identifying the session and its WARC file.
+    /// URL-safe name of the session and its WARC file; defaults to the base, with hyphens for its
+    /// slashes, followed by a hyphen and the current epoch second.
     #[clap(long)]
-    session_name: String,
+    session_name: Option<String>,
     /// Persistent payload-revisit and conditional-request state database.
     #[clap(long)]
     revisit_index: Option<PathBuf>,
-    /// Stop successfully after capturing this many comment batches.
+    /// Stop after this many captures, reporting the command that continues the archive.
     #[clap(long)]
     limit: Option<usize>,
-    /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
-    #[clap(long)]
-    second_sweep: bool,
-    /// Cookie header obtained from a browser, scoped to the base URL's host.
+    /// Cookie header obtained from a browser, scoped to the site's host.
     ///
     /// The value is sent with every request to that host and recorded in the WARC request records.
     /// Quote values containing semicolons.
     #[clap(long)]
     cookie: Option<String>,
+}
+
+/// Options for continuing an archive from its checkpoint.
+#[derive(Debug, clap::Args)]
+struct ResumeArchiveOptions {
+    #[clap(flatten)]
+    run: ArchiveRunOptions,
+    /// The endpoint to continue, by its lowercase name.
+    #[clap(long, value_name = "ENDPOINT")]
+    endpoint: Endpoint,
+    /// The last page of that endpoint the earlier run captured, or 0 to probe the endpoint again.
+    #[clap(long, value_name = "PAGE")]
+    last_page: usize,
+    /// The cutoff the archive started with, as reported by the earlier run.
+    #[clap(long, value_name = "TIMESTAMP")]
+    before: DateTime<Utc>,
 }
 
 /// Options for reading comments from a WARC file.
@@ -849,37 +947,6 @@ struct CompleteCommentsOptions {
     /// Path of the completion WARC to write; a `.gz` suffix enables gzip compression (an existing
     /// file is not overwritten).
     output: PathBuf,
-}
-
-/// Options for continuing comment pages an earlier session did not finish.
-#[derive(Debug, clap::Args)]
-struct ResumeCommentsOptions {
-    /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
-    /// optional and takes its default when absent.
-    #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
-    config: Option<PathBuf>,
-    /// A comments page URL reported unfinished by an earlier session; repeat for several sites.
-    #[clap(long = "url", value_name = "URL", required = true)]
-    urls: Vec<String>,
-    /// Path of the WARC file to write; a `.gz` suffix enables gzip compression (an existing file
-    /// is not overwritten).
-    #[clap(long)]
-    output: PathBuf,
-    /// URL-safe name identifying the session and its WARC file.
-    #[clap(long)]
-    session_name: String,
-    /// Persistent payload-revisit and conditional-request state database.
-    #[clap(long)]
-    revisit_index: Option<PathBuf>,
-    /// Stop successfully after capturing this many comment batches.
-    #[clap(long)]
-    limit: Option<usize>,
-    /// Always perform a second complete sweep, even when the first sweep's totals are consistent.
-    #[clap(long)]
-    second_sweep: bool,
-    /// Cookie header obtained from a browser, scoped to every resumed page's host.
-    #[clap(long)]
-    cookie: Option<String>,
 }
 
 /// Options for incrementally updating an archived comments collection.
@@ -926,24 +993,79 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use archivindex_cli_support::load_config;
-    use archivindex_test_support::http::{response, serve_with};
+    use archivindex_cli_support::{CommandOutcome, load_config};
+    use archivindex_test_support::http::{dead_port, response, serve_with};
     use archivindex_warc::io::read::WarcReader;
     use archivindex_warc::io::write::WarcWriter;
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
     use archivindex_wordpress::CommentCaptureProcessor;
+    use archivindex_wordpress::archive::{ArchiveProcessor, Endpoint, Site};
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use clap::{CommandFactory, Parser};
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
     use super::{
-        CheckCommentsOptions, Command, CommentRun, CommentRunOptions, Config, Error, Opts,
-        capture_comment_run, check_wp_comments, comment_update_inputs, load_config_for_output,
-        page_total_change_warning, resume_hint,
+        ArchiveRunOptions, CheckCommentsOptions, Command, CommentRun, CommentRunOptions, Config,
+        Error, Opts, capture_comment_run, check_wp_comments, comment_update_inputs,
+        load_config_for_output, page_total_change_warning, resume_command, run_archive,
     };
+
+    const BEFORE: &str = "2026-08-20T00:00:00Z";
+
+    fn before() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(BEFORE)
+            .map(|date| date.with_timezone(&Utc))
+            .expect("a test timestamp")
+    }
+
+    /// Serve `requests` of a site exposing two pages of `pages` and one page of `comments`.
+    ///
+    /// The roots and those two probes are answered with 200, every other probe with 404, and each
+    /// note is the request's path.
+    fn serve_site(requests: usize) -> std::io::Result<(u16, thread::JoinHandle<Vec<String>>)> {
+        serve_with(requests, |request| {
+            let target = request.path();
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
+            let json = [("content-type", "application/json")];
+            let reply = match path.strip_prefix("/wp-json/wp/v2/") {
+                Some("pages" | "comments") if query.is_empty() => response("200 OK", &json, "[]"),
+                Some("pages") => response(
+                    "200 OK",
+                    &[
+                        ("content-type", "application/json"),
+                        ("x-wp-totalpages", "2"),
+                    ],
+                    "[]",
+                ),
+                Some("comments") => response(
+                    "200 OK",
+                    &[
+                        ("content-type", "application/json"),
+                        ("x-wp-totalpages", "1"),
+                    ],
+                    "[]",
+                ),
+                Some(_) => response("404 Not Found", &json, "{}"),
+                None => response("200 OK", &json, "{}"),
+            };
+            (reply, target.to_owned())
+        })
+    }
+
+    fn archive_options(port: u16, output: &Path, session_name: &str) -> ArchiveRunOptions {
+        ArchiveRunOptions {
+            config: None,
+            base: Site::parse(&format!("http://127.0.0.1:{port}")).expect("a site"),
+            output: output.to_owned(),
+            session_name: Some(session_name.to_owned()),
+            revisit_index: None,
+            limit: None,
+            cookie: None,
+        }
+    }
 
     fn write_update_warc(
         path: &Path,
@@ -1016,20 +1138,19 @@ mod tests {
     fn archive_command_reads_workflow_and_config_options() {
         let options = Opts::try_parse_from([
             "archivindex-wordpress",
-            "archive-comments",
+            "archive",
             "--config",
             "capture.toml",
-            "--base-url",
-            "https://example.com/",
+            "--base",
+            "example.com/blog/",
             "--output",
-            "comments.warc.gz",
+            "archives",
             "--session-name",
-            "comments-2026",
+            "blog-2026",
             "--revisit-index",
-            "comments-state.sqlite3",
+            "state.sqlite3",
             "--limit",
             "12",
-            "--second-sweep",
             "--cookie",
             "cf_clearance=test-clearance; __cf_bm=test-bot-cookie",
         ])
@@ -1039,76 +1160,134 @@ mod tests {
             panic!("expected the archiving command");
         };
 
-        assert_eq!(options.base_url, "https://example.com/");
-        assert_eq!(options.output, PathBuf::from("comments.warc.gz"));
-        assert_eq!(options.session_name, "comments-2026");
+        assert_eq!(options.base.base(), "example.com/blog");
+        assert_eq!(options.output, PathBuf::from("archives"));
+        assert_eq!(options.session_name.as_deref(), Some("blog-2026"));
         assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
-        assert_eq!(
-            options.revisit_index,
-            Some(PathBuf::from("comments-state.sqlite3"))
-        );
+        assert_eq!(options.revisit_index, Some(PathBuf::from("state.sqlite3")));
         assert_eq!(options.limit, Some(12));
-        assert!(options.second_sweep);
         assert_eq!(
             options.cookie.as_deref(),
             Some("cf_clearance=test-clearance; __cf_bm=test-bot-cookie")
         );
-    }
 
-    #[test]
-    fn resume_command_requires_the_pages_to_continue() {
-        let first = "https://example.com/wp-json/wp/v2/comments?\
-            before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=8&per_page=100";
-        let second = "https://other.example/wp-json/wp/v2/comments?\
-            before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=1&per_page=100";
-        let options = Opts::try_parse_from([
+        let defaults = Opts::try_parse_from([
             "archivindex-wordpress",
-            "resume-comments",
-            "--url",
-            first,
+            "archive",
+            "--base",
+            "example.com",
             "--output",
-            "comments-continued.warc.gz",
-            "--session-name",
-            "comments-2026-continued",
-            "--url",
-            second,
+            "archives",
         ])
         .expect("valid options");
-
-        let Command::Resume(options) = options.command else {
-            panic!("expected the resuming command");
+        let Command::Archive(defaults) = defaults.command else {
+            panic!("expected the archiving command");
         };
-
-        assert_eq!(options.urls, [first, second]);
-        assert_eq!(options.output, PathBuf::from("comments-continued.warc.gz"));
-        assert_eq!(options.session_name, "comments-2026-continued");
-        assert_eq!(options.limit, None);
-        assert!(!options.second_sweep);
-
+        assert_eq!(defaults.session_name, None);
         assert!(
-            Opts::try_parse_from([
-                "archivindex-wordpress",
-                "resume-comments",
-                "--output",
-                "comments-continued.warc.gz",
-                "--session-name",
-                "comments-2026-continued",
-            ])
-            .is_err()
+            defaults
+                .base
+                .session_name(before())
+                .starts_with("example.com-")
         );
     }
 
     #[test]
-    fn unfinished_pages_are_suggested_as_resume_arguments() {
-        assert_eq!(resume_hint(std::iter::empty()), None);
+    fn resume_command_requires_the_checkpoint() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "resume-archive",
+            "--output",
+            "archives",
+            "--base",
+            "example.com",
+            "--endpoint",
+            "comments",
+            "--last-page",
+            "7",
+            "--before",
+            BEFORE,
+        ])
+        .expect("valid options");
+
+        let Command::ResumeArchive(options) = options.command else {
+            panic!("expected the resuming command");
+        };
+
+        assert_eq!(options.run.base.base(), "example.com");
+        assert_eq!(options.run.output, PathBuf::from("archives"));
+        assert_eq!(options.run.session_name, None);
+        assert_eq!(options.endpoint, Endpoint::Comments);
+        assert_eq!(options.last_page, 7);
+        assert_eq!(options.before, before());
+
+        let arguments = [
+            "archivindex-wordpress",
+            "resume-archive",
+            "--output",
+            "archives",
+            "--base",
+            "example.com",
+            "--endpoint",
+            "comments",
+            "--last-page",
+            "7",
+            "--before",
+            BEFORE,
+        ];
+        // Endpoint names are exact, and each checkpoint argument is required.
+        let rejected = [
+            arguments.map(|argument| {
+                if argument == "comments" {
+                    "Comments"
+                } else {
+                    argument
+                }
+            }),
+            arguments.map(|argument| if argument == "7" { "-1" } else { argument }),
+            arguments.map(|argument| {
+                if argument == BEFORE {
+                    "yesterday"
+                } else {
+                    argument
+                }
+            }),
+        ];
+        for arguments in rejected {
+            assert!(Opts::try_parse_from(arguments).is_err(), "{arguments:?}");
+        }
+        for skipped in [6, 8, 10] {
+            let mut incomplete = arguments.to_vec();
+            incomplete.drain(skipped..skipped + 2);
+            assert!(Opts::try_parse_from(incomplete).is_err());
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_is_printed_as_a_resume_command() {
+        let mut options = ArchiveRunOptions {
+            config: None,
+            base: Site::parse("example.com/blog").expect("a site"),
+            output: PathBuf::from("archives"),
+            session_name: Some("ignored".to_owned()),
+            revisit_index: None,
+            limit: Some(3),
+            cookie: Some("secret=yes".to_owned()),
+        };
+
         assert_eq!(
-            resume_hint(["https://example.com/a?page=2", "https://other.example/b"].into_iter())
-                .as_deref(),
-            Some(
-                "Continue the unfinished pages in a new session with: resume-comments \
-                 --output NEW.warc.gz --session-name NAME \
-                 --url 'https://example.com/a?page=2' --url 'https://other.example/b'"
-            )
+            resume_command(&options, before(), Endpoint::Comments, 7),
+            "archivindex-wordpress resume-archive --output archives --base example.com/blog \
+             --endpoint comments --last-page 7 --before 2026-08-20T00:00:00Z"
+        );
+
+        options.config = Some(PathBuf::from("capture.toml"));
+        options.revisit_index = Some(PathBuf::from("state.sqlite3"));
+        assert_eq!(
+            resume_command(&options, before(), Endpoint::Media, 0),
+            "archivindex-wordpress resume-archive --output archives --base example.com/blog \
+             --endpoint media --last-page 0 --before 2026-08-20T00:00:00Z \
+             --config capture.toml --revisit-index state.sqlite3"
         );
     }
 
@@ -1116,8 +1295,8 @@ mod tests {
     fn archive_command_does_not_duplicate_configuration_fields() {
         let command = Opts::command();
         let archive = command
-            .find_subcommand("archive-comments")
-            .expect("the archive-comments command");
+            .find_subcommand("archive")
+            .expect("the archive command");
         let argument_ids = archive
             .get_arguments()
             .map(|argument| argument.get_id().as_str())
@@ -1473,44 +1652,145 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_page_is_an_extra_via_the_preceding_page() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let (port, server) = serve_comment_pages(1)?;
-        let first = format!(
-            "http://127.0.0.1:{port}/wp-json/wp/v2/comments?\
-             before=2026-08-21T00:00:00Z&orderby=id&order=asc&page=1&per_page=100"
-        );
-        let second = first.replace("&page=1&", "&page=2&");
+    fn an_archive_pages_each_exposed_collection_after_the_probes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_site(14)?;
         let directory = tempfile::tempdir()?;
-        let output = directory.path().join("continued.warc.gz");
+        let output = directory.path().join("archives");
+        let options = archive_options(port, &output, "site-archive");
+        let root = format!("http://127.0.0.1:{port}/");
+        let page = |endpoint: &str, page: usize| {
+            format!(
+                "{root}wp-json/wp/v2/{endpoint}?before={BEFORE}&orderby=id&order=asc&page={page}\
+                 &per_page=100"
+            )
+        };
 
-        let outcome = capture_comment_run(
-            vec![CommentRun {
-                site_url: format!("http://127.0.0.1:{port}/"),
-                processor: CommentCaptureProcessor::resume(&second)?,
-            }],
-            CommentRunOptions {
-                config: None,
-                cookie: None,
-                output: &output,
-                session_name: "continued",
-                revisit_index: None,
-                limit: None,
-                second_sweep: false,
-            },
+        let outcome = run_archive(
+            ArchiveProcessor::new(options.base.clone(), before()),
+            &options,
+            before(),
             true,
         )?;
-        assert_eq!(outcome, archivindex_cli_support::CommandOutcome::Success);
-        assert_eq!(
-            server.join().expect("the local server"),
-            [second[second.find("/wp-json").expect("a path")..].to_owned()]
-        );
-        assert_eq!(&std::fs::read(&output)?[..2], &[0x1f, 0x8b]);
 
-        assert_eq!(metadata_vias(&output)?, [(second, Some(first))]);
-        let collections = check_comment_collections(&output)?;
-        assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].coverage.captured_pages, [2]);
+        assert_eq!(outcome, CommandOutcome::Success);
+        let mut expected = vec![
+            "/wp-json".to_owned(),
+            "/wp-json/wp/v2".to_owned(),
+            "/wp-json/wp/v2/types".to_owned(),
+        ];
+        expected.extend(
+            Endpoint::ALL
+                .iter()
+                .map(|endpoint| format!("/wp-json/wp/v2/{endpoint}")),
+        );
+        expected.extend(
+            [("pages", 1), ("pages", 2), ("comments", 1)]
+                .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
+        );
+        assert_eq!(server.join().expect("the local server"), expected);
+
+        let warc = output.join("site-archive.warc");
+        assert!(std::fs::read(&warc)?.starts_with(b"WARC/"));
+        let vias = metadata_vias(&warc)?;
+        let seeds = vias.iter().filter(|(_, via)| via.is_none()).count();
+        assert_eq!(seeds, 11);
+        let last_probe = format!("{root}wp-json/wp/v2/videos");
+        assert_eq!(
+            vias[11..],
+            [
+                (page("pages", 1), Some(last_probe.clone())),
+                (page("pages", 2), Some(page("pages", 1))),
+                (page("comments", 1), Some(last_probe)),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_site(3)?;
+        let directory = tempfile::tempdir()?;
+        let options = archive_options(port, directory.path(), "site-resumed");
+        let comments = |page: usize| {
+            format!(
+                "http://127.0.0.1:{port}/wp-json/wp/v2/comments?before={BEFORE}&orderby=id\
+                 &order=asc&page={page}&per_page=100"
+            )
+        };
+
+        let outcome = run_archive(
+            ArchiveProcessor::resume(options.base.clone(), before(), Endpoint::Comments, 1),
+            &options,
+            before(),
+            true,
+        )?;
+
+        assert_eq!(outcome, CommandOutcome::Success);
+        let requests = server.join().expect("the local server");
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[1..],
+            ["/wp-json/wp/v2/media", "/wp-json/wp/v2/videos"]
+        );
+        assert_eq!(
+            metadata_vias(&directory.path().join("site-resumed.warc"))?,
+            [
+                (comments(2), Some(comments(1))),
+                (format!("http://127.0.0.1:{port}/wp-json/wp/v2/media"), None),
+                (
+                    format!("http://127.0.0.1:{port}/wp-json/wp/v2/videos"),
+                    None
+                ),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_limited_archive_reports_problems_at_its_checkpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_site(12)?;
+        let directory = tempfile::tempdir()?;
+        let mut options = archive_options(port, directory.path(), "site-limited");
+        options.limit = Some(12);
+
+        let outcome = run_archive(
+            ArchiveProcessor::new(options.base.clone(), before()),
+            &options,
+            before(),
+            true,
+        )?;
+
+        assert_eq!(outcome, CommandOutcome::ReportedProblems);
+        assert_eq!(server.join().expect("the local server").len(), 12);
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_during_the_initial_requests_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let config = directory.path().join("capture.toml");
+        std::fs::write(&config, "[session.retry]\nattempts = 1\n")?;
+        let mut options = archive_options(dead_port()?, directory.path(), "site-unreachable");
+        options.config = Some(config);
+
+        let result = run_archive(
+            ArchiveProcessor::new(options.base.clone(), before()),
+            &options,
+            before(),
+            true,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::InitialRequestsIncomplete(output))
+                if output == directory.path().join("site-unreachable.warc")
+        ));
 
         Ok(())
     }
