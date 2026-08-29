@@ -1,9 +1,10 @@
-//! Archiving a site's `WordPress` REST API v2 collections one endpoint at a time.
+//! Archiving a site's supported `WordPress` REST API v2 collections one endpoint at a time.
 //!
 //! [`ArchiveProcessor`] drives an `archivindex-archiver` crawl session. A run captures the API's
-//! root resources, probes every [`Endpoint`] with a bare request, and then pages each exposed
-//! collection to its end, in [`Endpoint::ALL`] order. Its [`Checkpoint`] names the page a stopped
-//! run is continued from.
+//! root resources, probes every supported [`Endpoint`] with a bare request, and then pages each
+//! exposed collection twice, in [`Endpoint::ALL`] order. The second pass detects records shifted
+//! onto earlier pages by concurrent deletions. Its [`Checkpoint`] names the page a stopped run is
+//! continued from.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -38,7 +39,7 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
-    /// Every endpoint, in the order they are probed and paged.
+    /// Every endpoint this processor supports, in the order they are probed and paged.
     pub const ALL: [Self; 8] = [
         Self::Pages,
         Self::Posts,
@@ -213,12 +214,14 @@ pub enum Checkpoint {
         endpoint: Endpoint,
         /// The last page of that endpoint captured so far.
         last_page: usize,
+        /// The most recently observed page count, if one was available.
+        total_pages: Option<usize>,
     },
-    /// Every exposed collection was paged to its end.
+    /// Every supported, exposed collection completed both paging passes.
     Finished,
 }
 
-/// Archive a site's collections one endpoint at a time through a crawl session.
+/// Archive a site's supported collections one endpoint at a time through a crawl session.
 ///
 /// The processor's [`seeds`](Self::seeds) and [`extras`](Self::extras) start the session. An
 /// archive begins with the API root resources and a bare probe of every [`Endpoint`]; a resumed
@@ -227,7 +230,9 @@ pub enum Checkpoint {
 /// the greatest `X-WP-TotalPages` value seen, all pages carrying the run's `before` cutoff; any
 /// other answer, such as a 404 for a collection the site lacks, skips the endpoint. Each exposed
 /// collection's first page is discovered on the last probe, together, so the session's
-/// depth-first order pages one collection to its end before the next begins.
+/// depth-first order pages one collection to its end before the next begins. After reaching that
+/// end, the processor re-reads the collection from page one with a stable advertised page count;
+/// this validation pass captures records shifted earlier by deletions during the first pass.
 ///
 /// An unexpected page response ends the session with an error, and [`checkpoint`](Self::checkpoint)
 /// then names the page to continue from.
@@ -240,8 +245,10 @@ pub struct ArchiveProcessor {
     next_probe: usize,
     probed: Vec<(Endpoint, u16)>,
     /// Endpoints whose probe succeeded, awaiting paging in order.
-    pending: VecDeque<Endpoint>,
+    pending: VecDeque<Series>,
     current: Option<Series>,
+    /// Page count carried by a page-zero resume until its probe is inspected.
+    resume_total_pages: Option<(Endpoint, usize)>,
 }
 
 /// Progress through one exposed collection.
@@ -251,24 +258,64 @@ struct Series {
     page: usize,
     /// The greatest page count advertised so far.
     total_pages: Option<usize>,
+    /// The page count established during the validation pass.
+    validation_total_pages: Option<usize>,
+    phase: SeriesPhase,
 }
 
 /// What a collection page's response means for the series.
 enum PageOutcome {
     /// A further page follows.
     Next,
+    /// Re-read the collection from its first page to catch shifted records.
+    Validate,
     /// The page was the collection's last.
     Last,
-    /// The page no longer exists, so the collection ended before it.
-    Gone,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SeriesPhase {
+    Primary,
+    Validation,
 }
 
 impl Series {
-    const fn new(endpoint: Endpoint) -> Self {
+    const fn new(endpoint: Endpoint, total_pages: Option<usize>) -> Self {
         Self {
             endpoint,
             page: 0,
-            total_pages: None,
+            total_pages,
+            validation_total_pages: None,
+            phase: SeriesPhase::Primary,
+        }
+    }
+
+    const fn resume(endpoint: Endpoint, page: usize, total_pages: Option<usize>) -> Self {
+        Self {
+            endpoint,
+            page,
+            total_pages,
+            validation_total_pages: None,
+            phase: SeriesPhase::Primary,
+        }
+    }
+
+    const fn begin_validation(&mut self) {
+        self.page = 0;
+        self.validation_total_pages = None;
+        self.phase = SeriesPhase::Validation;
+    }
+
+    const fn checkpoint(&self) -> Checkpoint {
+        Checkpoint::Resume {
+            endpoint: self.endpoint,
+            // A validation pass is deliberately replayed as a fresh primary pass after a stop.
+            last_page: if matches!(self.phase, SeriesPhase::Primary) {
+                self.page
+            } else {
+                0
+            },
+            total_pages: self.total_pages,
         }
     }
 
@@ -278,7 +325,14 @@ impl Series {
         // A page can disappear between requests when deletions reduce the page count, which some
         // WordPress endpoints report with this posts-controller error code.
         if capture.status == 400 && page > 1 && crate::is_invalid_page_error(capture.payload) {
-            return Ok(PageOutcome::Gone);
+            return if self.phase == SeriesPhase::Primary {
+                Ok(PageOutcome::Validate)
+            } else {
+                Err(format!(
+                    "{} page {page} disappeared during its validation pass",
+                    self.endpoint
+                ))
+            };
         }
         if !matches!(capture.status, 200 | 304) {
             return Err(format!(
@@ -286,14 +340,28 @@ impl Series {
                 capture.status, self.endpoint
             ));
         }
-        if let Some(total_pages) = capture
+        if let Some(advertised) = capture
             .header("x-wp-totalpages")
             .and_then(|value| value.parse::<usize>().ok())
         {
-            self.total_pages = Some(
-                self.total_pages
-                    .map_or(total_pages, |known| known.max(total_pages)),
-            );
+            if self.phase == SeriesPhase::Validation {
+                if self
+                    .validation_total_pages
+                    .is_some_and(|known| known != advertised)
+                {
+                    return Err(format!(
+                        "X-WP-TotalPages changed during the {} validation pass",
+                        self.endpoint
+                    ));
+                }
+                self.validation_total_pages = Some(advertised);
+                self.total_pages = Some(advertised);
+            } else {
+                self.total_pages = Some(
+                    self.total_pages
+                        .map_or(advertised, |known| known.max(advertised)),
+                );
+            }
         }
         let Some(total_pages) = self.total_pages else {
             return Err(format!(
@@ -305,6 +373,8 @@ impl Series {
 
         Ok(if page < total_pages {
             PageOutcome::Next
+        } else if self.phase == SeriesPhase::Primary {
+            PageOutcome::Validate
         } else {
             PageOutcome::Last
         })
@@ -325,6 +395,7 @@ impl ArchiveProcessor {
             probed: Vec::new(),
             pending: VecDeque::new(),
             current: None,
+            resume_total_pages: None,
         }
     }
 
@@ -338,18 +409,19 @@ impl ArchiveProcessor {
         before: DateTime<Utc>,
         endpoint: Endpoint,
         last_page: usize,
+        total_pages: Option<usize>,
     ) -> Self {
         let mut processor = Self::new(site, before);
         processor.initial = false;
         if last_page == 0 {
             processor.next_probe = endpoint as usize;
+            processor.resume_total_pages = match total_pages {
+                Some(total_pages) => Some((endpoint, total_pages)),
+                None => None,
+            };
         } else {
             processor.next_probe = endpoint as usize + 1;
-            processor.current = Some(Series {
-                endpoint,
-                page: last_page,
-                total_pages: None,
-            });
+            processor.current = Some(Series::resume(endpoint, last_page, total_pages));
         }
 
         processor
@@ -388,10 +460,7 @@ impl ArchiveProcessor {
     #[must_use]
     pub fn checkpoint(&self) -> Checkpoint {
         if let Some(series) = &self.current {
-            return Checkpoint::Resume {
-                endpoint: series.endpoint,
-                last_page: series.page,
-            };
+            return series.checkpoint();
         }
         let next_probe = Endpoint::ALL.get(self.next_probe).copied();
         if self.initial && next_probe.is_some() {
@@ -402,12 +471,18 @@ impl ArchiveProcessor {
         // run must probe them again to reach them.
         self.pending
             .front()
-            .copied()
-            .or(next_probe)
-            .map_or(Checkpoint::Finished, |endpoint| Checkpoint::Resume {
-                endpoint,
-                last_page: 0,
+            .map(Series::checkpoint)
+            .or_else(|| {
+                next_probe.map(|endpoint| Checkpoint::Resume {
+                    endpoint,
+                    last_page: 0,
+                    total_pages: self
+                        .resume_total_pages
+                        .filter(|(resume_endpoint, _)| *resume_endpoint == endpoint)
+                        .map(|(_, total_pages)| total_pages),
+                })
             })
+            .unwrap_or(Checkpoint::Finished)
     }
 
     /// Every endpoint probed so far with the status of its bare response, in order.
@@ -417,11 +492,23 @@ impl ArchiveProcessor {
     }
 
     /// Record a probe's answer and, after the last probe, discover every exposed first page.
-    fn inspect_probe(&mut self, endpoint: Endpoint, status: u16) -> Inspection {
+    fn inspect_probe(&mut self, endpoint: Endpoint, capture: &Capture<'_>) -> Inspection {
         self.next_probe += 1;
-        self.probed.push((endpoint, status));
-        if (200..300).contains(&status) || status == 304 {
-            self.pending.push_back(endpoint);
+        self.probed.push((endpoint, capture.status));
+        if (200..300).contains(&capture.status) || capture.status == 304 {
+            // A bare probe uses WordPress's default page size, not the 100-item page size below,
+            // so only a count carried from an earlier paged response is applicable here.
+            let total_pages = self
+                .resume_total_pages
+                .filter(|(resume_endpoint, _)| *resume_endpoint == endpoint)
+                .map(|(_, total_pages)| total_pages);
+            self.pending.push_back(Series::new(endpoint, total_pages));
+        }
+        if self
+            .resume_total_pages
+            .is_some_and(|(resume_endpoint, _)| resume_endpoint == endpoint)
+        {
+            self.resume_total_pages = None;
         }
         if self.next_probe < Endpoint::ALL.len() {
             return Inspection::default();
@@ -430,9 +517,9 @@ impl ArchiveProcessor {
         let links = self
             .pending
             .iter()
-            .map(|&endpoint| self.site.page_url(endpoint, self.before, 1))
+            .map(|series| self.site.page_url(series.endpoint, self.before, 1))
             .collect();
-        self.current = self.pending.pop_front().map(Series::new);
+        self.current = self.pending.pop_front();
 
         Inspection {
             links,
@@ -455,13 +542,15 @@ impl CaptureProcessor for ArchiveProcessor {
         {
             return match series.record(capture) {
                 Ok(outcome) => {
-                    let title = Some(format!(
-                        "{} {} page {} of {}",
-                        self.site.base,
-                        series.endpoint,
-                        series.page,
-                        series.total_pages.unwrap_or(series.page)
-                    ));
+                    let title = matches!(capture.status, 200 | 304).then(|| {
+                        format!(
+                            "{} {} page {} of {}",
+                            self.site.base,
+                            series.endpoint,
+                            series.page,
+                            series.total_pages.unwrap_or(series.page)
+                        )
+                    });
                     match outcome {
                         PageOutcome::Next => Inspection {
                             links: vec![self.site.page_url(
@@ -472,11 +561,17 @@ impl CaptureProcessor for ArchiveProcessor {
                             title,
                             error: None,
                         },
-                        PageOutcome::Last | PageOutcome::Gone => {
-                            let title = matches!(outcome, PageOutcome::Last)
-                                .then_some(title)
-                                .flatten();
-                            self.current = self.pending.pop_front().map(Series::new);
+                        PageOutcome::Validate => {
+                            let endpoint = series.endpoint;
+                            series.begin_validation();
+                            Inspection {
+                                links: vec![self.site.page_url(endpoint, self.before, 1)],
+                                title,
+                                error: None,
+                            }
+                        }
+                        PageOutcome::Last => {
+                            self.current = self.pending.pop_front();
                             Inspection {
                                 title,
                                 ..Inspection::default()
@@ -491,7 +586,7 @@ impl CaptureProcessor for ArchiveProcessor {
         if let Some(&endpoint) = Endpoint::ALL.get(self.next_probe)
             && capture.url == self.site.endpoint_url(endpoint)
         {
-            return self.inspect_probe(endpoint, capture.status);
+            return self.inspect_probe(endpoint, capture);
         }
 
         if self.initial && ROOTS.iter().any(|root| capture.url == self.site.url(root)) {
@@ -536,6 +631,7 @@ mod tests {
     const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 101\r\nX-WP-TotalPages: 2\r\n\r\n";
     const THREE_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 201\r\nX-WP-TotalPages: 3\r\n\r\n";
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
+    const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
     const INVALID_PAGE_ERROR: &[u8] =
         br#"{"code": "rest_post_invalid_page_number", "message": "", "data": {"status": 400}}"#;
 
@@ -685,7 +781,8 @@ mod tests {
             processor.checkpoint(),
             Checkpoint::Resume {
                 endpoint: Endpoint::Pages,
-                last_page: 0
+                last_page: 0,
+                total_pages: None,
             }
         );
 
@@ -701,7 +798,7 @@ mod tests {
         let second = inspect(&mut processor, &page_url(Endpoint::Pages, 2), THREE_PAGES);
         assert_eq!(second.links, [page_url(Endpoint::Pages, 3)]);
         let third = inspect(&mut processor, &page_url(Endpoint::Pages, 3), TWO_PAGES);
-        assert_eq!(third.links, Vec::<String>::new());
+        assert_eq!(third.links, [page_url(Endpoint::Pages, 1)]);
         assert_eq!(
             third.title.as_deref(),
             Some("example.com/blog pages page 3 of 3")
@@ -709,15 +806,38 @@ mod tests {
         assert_eq!(
             processor.checkpoint(),
             Checkpoint::Resume {
-                endpoint: Endpoint::Categories,
-                last_page: 0
+                endpoint: Endpoint::Pages,
+                last_page: 0,
+                total_pages: Some(3),
             }
         );
 
+        for page in 1..=3 {
+            let validation = inspect(
+                &mut processor,
+                &page_url(Endpoint::Pages, page),
+                THREE_PAGES,
+            );
+            assert_eq!(
+                validation.links,
+                if page < 3 {
+                    vec![page_url(Endpoint::Pages, page + 1)]
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+
         let categories = inspect(&mut processor, &page_url(Endpoint::Categories, 1), ONE_PAGE);
-        assert_eq!(categories.links, Vec::<String>::new());
+        assert_eq!(categories.links, [page_url(Endpoint::Categories, 1)]);
+        let categories_validation =
+            inspect(&mut processor, &page_url(Endpoint::Categories, 1), ONE_PAGE);
+        assert_eq!(categories_validation.links, Vec::<String>::new());
         let comments = inspect(&mut processor, &page_url(Endpoint::Comments, 1), ONE_PAGE);
-        assert_eq!(comments.error, None);
+        assert_eq!(comments.links, [page_url(Endpoint::Comments, 1)]);
+        let comments_validation =
+            inspect(&mut processor, &page_url(Endpoint::Comments, 1), ONE_PAGE);
+        assert_eq!(comments_validation.error, None);
         assert_eq!(processor.checkpoint(), Checkpoint::Finished);
         assert_eq!(processor.to_string(), "example.com/blog: finished");
     }
@@ -734,7 +854,7 @@ mod tests {
 
     #[test]
     fn a_resumed_run_continues_the_endpoint_and_probes_the_rest() {
-        let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Comments, 7);
+        let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Comments, 7, Some(8));
 
         assert_eq!(
             processor.seeds(),
@@ -754,7 +874,8 @@ mod tests {
             processor.checkpoint(),
             Checkpoint::Resume {
                 endpoint: Endpoint::Comments,
-                last_page: 7
+                last_page: 7,
+                total_pages: Some(8),
             }
         );
 
@@ -764,14 +885,22 @@ mod tests {
             &page_url(Endpoint::Comments, 8),
             b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 8\r\n\r\n",
         );
-        assert_eq!(last.links, Vec::<String>::new());
+        assert_eq!(last.links, [page_url(Endpoint::Comments, 1)]);
         assert_eq!(
             processor.checkpoint(),
             Checkpoint::Resume {
-                endpoint: Endpoint::Media,
-                last_page: 0
+                endpoint: Endpoint::Comments,
+                last_page: 0,
+                total_pages: Some(8),
             }
         );
+        for page in 1..=8 {
+            let _ = inspect(
+                &mut processor,
+                &page_url(Endpoint::Comments, page),
+                b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 8\r\n\r\n",
+            );
+        }
 
         // An endpoint found exposed is paged only after the remaining probes, so a run stopped
         // during those probes resumes by probing it again.
@@ -781,7 +910,8 @@ mod tests {
             processor.checkpoint(),
             Checkpoint::Resume {
                 endpoint: Endpoint::Media,
-                last_page: 0
+                last_page: 0,
+                total_pages: None,
             }
         );
         let videos = inspect(&mut processor, &endpoint_url(Endpoint::Videos), OK);
@@ -793,7 +923,7 @@ mod tests {
 
     #[test]
     fn a_resumed_run_at_page_zero_probes_the_endpoint_itself() {
-        let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Videos, 0);
+        let processor = ArchiveProcessor::resume(site(), before(), Endpoint::Videos, 0, None);
 
         assert_eq!(processor.seeds(), [endpoint_url(Endpoint::Videos)]);
         assert_eq!(processor.extras(), None);
@@ -801,14 +931,69 @@ mod tests {
             processor.checkpoint(),
             Checkpoint::Resume {
                 endpoint: Endpoint::Videos,
-                last_page: 0
+                last_page: 0,
+                total_pages: None,
             }
         );
     }
 
     #[test]
-    fn a_vanished_page_ends_the_collection_without_a_title() {
-        let mut processor = ArchiveProcessor::resume(site(), before(), Endpoint::Posts, 4);
+    fn a_carried_page_count_makes_not_modified_responses_resumable() {
+        let mut processor =
+            ArchiveProcessor::resume(site(), before(), Endpoint::Videos, 0, Some(2));
+
+        let probe = inspect(
+            &mut processor,
+            &endpoint_url(Endpoint::Videos),
+            NOT_MODIFIED,
+        );
+        assert_eq!(probe.links, [page_url(Endpoint::Videos, 1)]);
+        assert_eq!(
+            processor.checkpoint(),
+            Checkpoint::Resume {
+                endpoint: Endpoint::Videos,
+                last_page: 0,
+                total_pages: Some(2),
+            }
+        );
+
+        let page = inspect(&mut processor, &page_url(Endpoint::Videos, 1), NOT_MODIFIED);
+        assert_eq!(page.links, [page_url(Endpoint::Videos, 2)]);
+        assert_eq!(
+            processor.checkpoint(),
+            Checkpoint::Resume {
+                endpoint: Endpoint::Videos,
+                last_page: 1,
+                total_pages: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn a_page_count_change_during_validation_stops_the_run() {
+        let mut processor = ArchiveProcessor::resume(site(), before(), Endpoint::Posts, 1, Some(2));
+        let _ = inspect(&mut processor, &page_url(Endpoint::Posts, 2), TWO_PAGES);
+        let _ = inspect(&mut processor, &page_url(Endpoint::Posts, 1), TWO_PAGES);
+
+        let changed = inspect(&mut processor, &page_url(Endpoint::Posts, 2), ONE_PAGE);
+
+        assert_eq!(
+            changed.error.as_deref(),
+            Some("X-WP-TotalPages changed during the posts validation pass")
+        );
+        assert_eq!(
+            processor.checkpoint(),
+            Checkpoint::Resume {
+                endpoint: Endpoint::Posts,
+                last_page: 0,
+                total_pages: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn a_vanished_page_restarts_the_collection_for_validation() {
+        let mut processor = ArchiveProcessor::resume(site(), before(), Endpoint::Posts, 4, None);
 
         let gone = inspect_payload(
             &mut processor,
@@ -817,22 +1002,27 @@ mod tests {
             BAD_REQUEST,
         );
 
-        assert_eq!(gone, super::Inspection::default());
+        assert_eq!(gone.links, [page_url(Endpoint::Posts, 1)]);
+        assert_eq!(gone.title, None);
         assert_eq!(
             processor.checkpoint(),
             Checkpoint::Resume {
-                endpoint: Endpoint::Categories,
-                last_page: 0
+                endpoint: Endpoint::Posts,
+                last_page: 0,
+                total_pages: None,
             }
         );
+        let validation = inspect(&mut processor, &page_url(Endpoint::Posts, 1), ONE_PAGE);
+        assert_eq!(validation.links, Vec::<String>::new());
     }
 
     #[test]
     fn unexpected_page_responses_stop_the_run_at_the_last_good_page() {
-        let mut processor = ArchiveProcessor::resume(site(), before(), Endpoint::Posts, 4);
+        let mut processor = ArchiveProcessor::resume(site(), before(), Endpoint::Posts, 4, None);
         let checkpoint = Checkpoint::Resume {
             endpoint: Endpoint::Posts,
             last_page: 4,
+            total_pages: None,
         };
 
         let forbidden = inspect(&mut processor, &page_url(Endpoint::Posts, 5), FORBIDDEN);

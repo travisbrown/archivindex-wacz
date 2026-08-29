@@ -2,7 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::Write;
@@ -50,7 +50,7 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
     }
 }
 
-/// Archive every collection a site exposes, beginning with the API roots and endpoint probes.
+/// Archive every supported collection a site exposes, beginning with the API roots and probes.
 fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutcome, Error> {
     let before = Utc::now();
 
@@ -69,6 +69,7 @@ fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<Command
         options.before,
         options.endpoint,
         options.last_page,
+        options.total_pages,
     );
 
     run_archive(processor, &options.run, options.before, quiet)
@@ -100,7 +101,7 @@ fn run_archive(
 
     let seeds = processor.seeds();
     let extras = processor.extras();
-    let processor = Rc::new(RefCell::new(processor));
+    let processor = Rc::new(RefCell::new(ArchiveRunState::new(processor)));
     let progress = spinner(format!("Archiving {}", options.base.base()), None);
     let event_progress = progress.clone();
     let event_processor = Rc::clone(&processor);
@@ -110,21 +111,33 @@ fn run_archive(
     let mut session = Session::new(archiver, &session_name, seeds, &output)?
         .extras(extras)
         .processor(SharedArchiveProcessor(Rc::clone(&processor)))
+        // A collection's validation pass intentionally requests the same page URLs again.
+        .dedupe_discoveries(false)
         .events(move |event: CaptureEvent<'_>| {
-            if interrupted.load(Ordering::Relaxed) {
-                return CaptureControl::Cancel;
-            }
             match event {
                 // Every later request depends on the failed one, so the run stops at its
                 // checkpoint rather than continuing with the collections still waiting.
                 CaptureEvent::Failed { .. } => CaptureControl::Cancel,
-                CaptureEvent::Written { .. } => {
-                    event_progress.set_message(event_processor.borrow().to_string());
-                    CaptureControl::Continue
+                CaptureEvent::Written { url } => {
+                    let mut processor = event_processor.borrow_mut();
+                    processor.written(url);
+                    event_progress.set_message(processor.processor.to_string());
+                    if interrupted.load(Ordering::Relaxed) {
+                        CaptureControl::Cancel
+                    } else {
+                        CaptureControl::Continue
+                    }
                 }
-                CaptureEvent::Started { .. }
-                | CaptureEvent::Retrying { .. }
-                | CaptureEvent::Captured { .. } => CaptureControl::Continue,
+                // Once a response has been captured, let inspection and recording finish before
+                // honoring an interrupt so the reported checkpoint is durable.
+                CaptureEvent::Captured { .. } => CaptureControl::Continue,
+                CaptureEvent::Started { .. } | CaptureEvent::Retrying { .. } => {
+                    if interrupted.load(Ordering::Relaxed) {
+                        CaptureControl::Cancel
+                    } else {
+                        CaptureControl::Continue
+                    }
+                }
             }
         });
 
@@ -138,26 +151,12 @@ fn run_archive(
     let summary = session.run()?;
     progress.finish_and_clear();
 
-    for failure in &summary.failures {
-        log::warn!("Failed to capture {}: {}", failure.url, failure.error);
-    }
-    if let Some(error) = &summary.fatal_error {
-        log::warn!("The session ended early: {error}");
-    }
     let processor = processor.borrow();
-    for &(endpoint, status) in processor.probed() {
-        if status == 404 {
-            log::info!("{} does not expose {endpoint}", options.base.base());
-        } else if !(200..300).contains(&status) && status != 304 {
-            log::warn!(
-                "{} answered the {endpoint} probe with status {status}; the endpoint was skipped",
-                options.base.base()
-            );
-        }
-    }
+    report_archive_problems(&summary, &processor.processor, options);
+    let checkpoint = processor.checkpoint_for_summary(&summary);
 
-    match processor.checkpoint() {
-        Checkpoint::Finished => {
+    match checkpoint {
+        Checkpoint::Finished if summary.is_complete() => {
             if !quiet {
                 println!(
                     "Archived {} captures from {} to {}",
@@ -168,18 +167,58 @@ fn run_archive(
             }
             Ok(CommandOutcome::Success)
         }
+        Checkpoint::Finished => {
+            log::warn!(
+                "the archive session reported problems after its final processor checkpoint; \
+                 start a new archive to guarantee completeness"
+            );
+            Ok(CommandOutcome::ReportedProblems)
+        }
         Checkpoint::Resume {
             endpoint,
             last_page,
+            total_pages,
         } => {
             log::warn!("a partial archive was published at {}", output.display());
             println!(
                 "Continue the archive with: {}",
-                resume_command(options, before, endpoint, last_page)
+                resume_command(options, before, endpoint, last_page, total_pages)
             );
             Ok(CommandOutcome::ReportedProblems)
         }
         Checkpoint::Initial => Err(Error::InitialRequestsIncomplete(output)),
+    }
+}
+
+fn report_archive_problems(
+    summary: &SessionSummary,
+    processor: &ArchiveProcessor,
+    options: &ArchiveRunOptions,
+) {
+    for failure in &summary.failures {
+        log::warn!("Failed to capture {}: {}", failure.url, failure.error);
+    }
+    if let Some(error) = &summary.fatal_error {
+        log::warn!("The session ended early: {error}");
+    }
+    if summary.cancelled {
+        log::warn!("the session was cancelled before all requested captures were completed");
+    }
+    if summary.partial_captures() > 0 {
+        log::warn!(
+            "{} capture(s) were unexpectedly truncated",
+            summary.partial_captures()
+        );
+    }
+    for &(endpoint, status) in processor.probed() {
+        if status == 404 {
+            log::info!("{} does not expose {endpoint}", options.base.base());
+        } else if !(200..300).contains(&status) && status != 304 {
+            log::warn!(
+                "{} answered the {endpoint} probe with status {status}; the endpoint was skipped",
+                options.base.base()
+            );
+        }
     }
 }
 
@@ -192,34 +231,112 @@ fn resume_command(
     before: DateTime<Utc>,
     endpoint: Endpoint,
     last_page: usize,
+    total_pages: Option<usize>,
 ) -> String {
     let mut command = format!(
         "archivindex-wordpress resume-archive --output {} --base {} --endpoint {endpoint} \
          --last-page {last_page} --before {}",
-        options.output.display(),
-        options.base.base(),
-        before.to_rfc3339_opts(SecondsFormat::Secs, true)
+        shell_word(&options.output.to_string_lossy()),
+        shell_word(options.base.base()),
+        shell_word(&before.to_rfc3339_opts(SecondsFormat::Secs, true))
     );
-    let optional = [
-        ("--config", &options.config),
-        ("--revisit-index", &options.revisit_index),
-    ];
+    if let Some(total_pages) = total_pages {
+        let _ = write!(command, " --total-pages {total_pages}");
+    }
+    let optional = [("--config", &options.config)];
     for (flag, path) in optional {
         if let Some(path) = path {
             // Writing to a `String` cannot fail, so the `fmt::Result` carries nothing.
-            let _ = write!(command, " {flag} {}", path.display());
+            let _ = write!(command, " {flag} {}", shell_word(&path.to_string_lossy()));
         }
+    }
+    // An unknown page count plus conditional 304 responses cannot establish where a collection
+    // ends. Carry the revisit index only when the checkpoint also carries the needed count.
+    if total_pages.is_some()
+        && let Some(path) = &options.revisit_index
+    {
+        let _ = write!(
+            command,
+            " --revisit-index {}",
+            shell_word(&path.to_string_lossy())
+        );
     }
 
     command
 }
 
-/// The session's processor, shared with the event sink that reports its position.
-struct SharedArchiveProcessor(Rc<RefCell<ArchiveProcessor>>);
+/// Quote one command-line argument for a POSIX-compatible shell.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+/// Processor progress paired with the latest checkpoint known to have reached the WARC.
+struct ArchiveRunState {
+    processor: ArchiveProcessor,
+    durable: Checkpoint,
+    pending: Option<(String, Checkpoint)>,
+    transitions: Vec<(String, Checkpoint)>,
+}
+
+impl ArchiveRunState {
+    fn new(processor: ArchiveProcessor) -> Self {
+        let durable = processor.checkpoint();
+        Self {
+            processor,
+            durable,
+            pending: None,
+            transitions: Vec::new(),
+        }
+    }
+
+    fn written(&mut self, url: &str) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending_url, _)| pending_url == url)
+        {
+            let (_, checkpoint) = self.pending.take().expect("checked pending transition");
+            self.durable = checkpoint;
+        }
+    }
+
+    /// Roll back before the first unexpectedly partial response; otherwise use durable progress.
+    fn checkpoint_for_summary(&self, summary: &SessionSummary) -> Checkpoint {
+        let partial_urls = summary
+            .seed_captures
+            .iter()
+            .chain(&summary.extra_captures)
+            .filter(|capture| capture.is_partial())
+            .map(|capture| capture.url.as_str())
+            .collect::<HashSet<_>>();
+
+        self.transitions
+            .iter()
+            .find(|(url, _)| partial_urls.contains(url.as_str()))
+            .map_or(self.durable, |(_, before)| *before)
+    }
+}
+
+/// The session's processor, shared with the event sink that commits written progress.
+struct SharedArchiveProcessor(Rc<RefCell<ArchiveRunState>>);
 
 impl CaptureProcessor for SharedArchiveProcessor {
     fn inspect(&mut self, capture: &Capture<'_>) -> Inspection {
-        self.0.borrow_mut().inspect(capture)
+        let mut state = self.0.borrow_mut();
+        let before = state.processor.checkpoint();
+        let inspection = state.processor.inspect(capture);
+        let after = state.processor.checkpoint();
+        state.transitions.push((capture.url.to_owned(), before));
+        state.pending = Some((capture.url.to_owned(), after));
+        inspection
     }
 }
 
@@ -851,7 +968,7 @@ struct Opts {
 // nothing, and boxing a variant would only obscure the derived argument parsing.
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Archive every collection a site exposes through its `WordPress` REST API v2.
+    /// Archive every supported collection a site exposes through its `WordPress` REST API v2.
     #[clap(name = "archive")]
     Archive(ArchiveRunOptions),
     /// Check that every advertised comments page has a qualifying response or revisit record.
@@ -916,6 +1033,9 @@ struct ResumeArchiveOptions {
     /// The last page of that endpoint the earlier run captured, or 0 to probe the endpoint again.
     #[clap(long, value_name = "PAGE")]
     last_page: usize,
+    /// The most recently advertised page count, when the earlier run reported one.
+    #[clap(long, value_name = "PAGES")]
+    total_pages: Option<usize>,
     /// The cutoff the archive started with, as reported by the earlier run.
     #[clap(long, value_name = "TIMESTAMP")]
     before: DateTime<Utc>,
@@ -988,11 +1108,15 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::thread;
     use std::time::Duration;
 
+    use archivindex_archiver::capture::Origin;
+    use archivindex_archiver::session::{Capture, CaptureProcessor};
     use archivindex_cli_support::{CommandOutcome, load_config};
     use archivindex_test_support::http::{dead_port, response, serve_with};
     use archivindex_warc::io::read::WarcReader;
@@ -1000,7 +1124,7 @@ mod tests {
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
     use archivindex_wordpress::CommentCaptureProcessor;
-    use archivindex_wordpress::archive::{ArchiveProcessor, Endpoint, Site};
+    use archivindex_wordpress::archive::{ArchiveProcessor, Checkpoint, Endpoint, Site};
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
     use chrono::{DateTime, Utc};
     use clap::{CommandFactory, Parser};
@@ -1008,9 +1132,10 @@ mod tests {
     use flate2::write::GzEncoder;
 
     use super::{
-        ArchiveRunOptions, CheckCommentsOptions, Command, CommentRun, CommentRunOptions, Config,
-        Error, Opts, capture_comment_run, check_wp_comments, comment_update_inputs,
-        load_config_for_output, page_total_change_warning, resume_command, run_archive,
+        ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, Command, CommentRun,
+        CommentRunOptions, Config, Error, Opts, SharedArchiveProcessor, capture_comment_run,
+        check_wp_comments, comment_update_inputs, load_config_for_output,
+        page_total_change_warning, resume_command, run_archive,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1219,6 +1344,7 @@ mod tests {
         assert_eq!(options.run.session_name, None);
         assert_eq!(options.endpoint, Endpoint::Comments);
         assert_eq!(options.last_page, 7);
+        assert_eq!(options.total_pages, None);
         assert_eq!(options.before, before());
 
         let arguments = [
@@ -1276,7 +1402,7 @@ mod tests {
         };
 
         assert_eq!(
-            resume_command(&options, before(), Endpoint::Comments, 7),
+            resume_command(&options, before(), Endpoint::Comments, 7, None),
             "archivindex-wordpress resume-archive --output archives --base example.com/blog \
              --endpoint comments --last-page 7 --before 2026-08-20T00:00:00Z"
         );
@@ -1284,10 +1410,68 @@ mod tests {
         options.config = Some(PathBuf::from("capture.toml"));
         options.revisit_index = Some(PathBuf::from("state.sqlite3"));
         assert_eq!(
-            resume_command(&options, before(), Endpoint::Media, 0),
+            resume_command(&options, before(), Endpoint::Media, 0, Some(12)),
             "archivindex-wordpress resume-archive --output archives --base example.com/blog \
-             --endpoint media --last-page 0 --before 2026-08-20T00:00:00Z \
+             --endpoint media --last-page 0 --before 2026-08-20T00:00:00Z --total-pages 12 \
              --config capture.toml --revisit-index state.sqlite3"
+        );
+
+        options.output = PathBuf::from("archive output/it's here");
+        options.config = Some(PathBuf::from("capture files/site's.toml"));
+        assert_eq!(
+            resume_command(&options, before(), Endpoint::Media, 0, None),
+            "archivindex-wordpress resume-archive --output 'archive output/it'\"'\"'s here' \
+             --base example.com/blog --endpoint media --last-page 0 \
+             --before 2026-08-20T00:00:00Z \
+             --config 'capture files/site'\"'\"'s.toml'"
+        );
+    }
+
+    #[test]
+    fn archive_progress_becomes_durable_only_after_the_written_event() {
+        let processor = ArchiveProcessor::resume(
+            Site::parse("example.com").expect("a site"),
+            before(),
+            Endpoint::Comments,
+            1,
+            Some(2),
+        );
+        let state = Rc::new(RefCell::new(ArchiveRunState::new(processor)));
+        let mut shared = SharedArchiveProcessor(Rc::clone(&state));
+        let url = format!(
+            "https://example.com/wp-json/wp/v2/comments?before={BEFORE}&orderby=id&order=asc\
+             &page=2&per_page=100"
+        );
+        let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 2\r\n\r\n";
+        let capture =
+            Capture::new(&url, &url, Origin::Extra, b"[]", response).expect("a complete response");
+
+        let inspection = shared.inspect(&capture);
+
+        assert_eq!(
+            state.borrow().durable,
+            Checkpoint::Resume {
+                endpoint: Endpoint::Comments,
+                last_page: 1,
+                total_pages: Some(2),
+            }
+        );
+        assert_eq!(
+            inspection.links,
+            [
+                "https://example.com/wp-json/wp/v2/comments?before=2026-08-20T00:00:00Z&orderby=id&order=asc&page=1&per_page=100"
+            ]
+        );
+
+        state.borrow_mut().written(&url);
+
+        assert_eq!(
+            state.borrow().durable,
+            Checkpoint::Resume {
+                endpoint: Endpoint::Comments,
+                last_page: 0,
+                total_pages: Some(2),
+            }
         );
     }
 
@@ -1654,7 +1838,7 @@ mod tests {
     #[test]
     fn an_archive_pages_each_exposed_collection_after_the_probes()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(14)?;
+        let (port, server) = serve_site(17)?;
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("archives");
         let options = archive_options(port, &output, "site-archive");
@@ -1685,8 +1869,15 @@ mod tests {
                 .map(|endpoint| format!("/wp-json/wp/v2/{endpoint}")),
         );
         expected.extend(
-            [("pages", 1), ("pages", 2), ("comments", 1)]
-                .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
+            [
+                ("pages", 1),
+                ("pages", 2),
+                ("pages", 1),
+                ("pages", 2),
+                ("comments", 1),
+                ("comments", 1),
+            ]
+            .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
         );
         assert_eq!(server.join().expect("the local server"), expected);
 
@@ -1701,7 +1892,10 @@ mod tests {
             [
                 (page("pages", 1), Some(last_probe.clone())),
                 (page("pages", 2), Some(page("pages", 1))),
+                (page("pages", 1), Some(page("pages", 2))),
+                (page("pages", 2), Some(page("pages", 1))),
                 (page("comments", 1), Some(last_probe)),
+                (page("comments", 1), Some(page("comments", 1))),
             ]
         );
 
@@ -1711,7 +1905,7 @@ mod tests {
     #[test]
     fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(3)?;
+        let (port, server) = serve_site(4)?;
         let directory = tempfile::tempdir()?;
         let options = archive_options(port, directory.path(), "site-resumed");
         let comments = |page: usize| {
@@ -1722,7 +1916,13 @@ mod tests {
         };
 
         let outcome = run_archive(
-            ArchiveProcessor::resume(options.base.clone(), before(), Endpoint::Comments, 1),
+            ArchiveProcessor::resume(
+                options.base.clone(),
+                before(),
+                Endpoint::Comments,
+                1,
+                Some(2),
+            ),
             &options,
             before(),
             true,
@@ -1730,15 +1930,16 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::Success);
         let requests = server.join().expect("the local server");
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         assert_eq!(
-            requests[1..],
+            requests[2..],
             ["/wp-json/wp/v2/media", "/wp-json/wp/v2/videos"]
         );
         assert_eq!(
             metadata_vias(&directory.path().join("site-resumed.warc"))?,
             [
                 (comments(2), Some(comments(1))),
+                (comments(1), Some(comments(2))),
                 (format!("http://127.0.0.1:{port}/wp-json/wp/v2/media"), None),
                 (
                     format!("http://127.0.0.1:{port}/wp-json/wp/v2/videos"),

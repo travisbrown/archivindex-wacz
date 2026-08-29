@@ -7,7 +7,7 @@
 //!
 //! # Modules
 //!
-//! * [`archive`]: archiving every collection a site exposes
+//! * [`archive`]: archiving the supported collections a site exposes
 //! * [`complete`]: capturing pages missing from an archived comment collection
 //! * [`read`]: reading archived comments and checking page coverage
 #![cfg_attr(docsrs, feature(doc_cfg))]

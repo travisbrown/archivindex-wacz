@@ -38,15 +38,19 @@ archive was published. Operational failures use status 2.
 
 ### WordPress sites
 
-The `archive` command captures a WordPress site's REST API into a crawl session. Every run begins
-with eleven requests that are never paged: the API roots `wp-json`, `wp-json/wp/v2`, and
-`wp-json/wp/v2/types`, then a bare request of each collection endpoint in the order `pages`,
+The `archive` command captures a fixed, supported set of a WordPress site's REST API collections
+into a crawl session. Every run begins with eleven requests that are never paged: the API roots
+`wp-json`, `wp-json/wp/v2`, and `wp-json/wp/v2/types`, then a bare request of each supported
+collection endpoint in the order `pages`,
 `posts`, `categories`, `tags`, `users`, `comments`, `media`, `videos`. Each endpoint whose bare
 request succeeded is then paged to its end, in that same order, with the time the archive started
 as its `before` cutoff, ascending by ID, one hundred items per page; an endpoint answering 404 is
 skipped. If a collection's `X-WP-TotalPages` changes while it is being paged, the largest value seen
-decides when it ends. The eleven initial captures and each collection's first page are session
-seeds; every later page is discovered from the page before it, which its metadata `via` names.
+decides when the first pass ends. Every collection is then read once more from page one. This
+validation pass catches records shifted onto earlier pages by concurrent deletions and fails if
+the advertised page count changes during the pass. The eleven initial captures are session seeds;
+collection pages are discovered from the last probe or preceding page, which their metadata `via`
+names.
 
 `--base` names the site as a host with an optional path and no scheme, such as `example.com` or
 `example.com/blog` (a trailing slash is removed); requests use HTTPS. `--output` names a directory,
@@ -85,13 +89,15 @@ A run that stops after the initial eleven captures—at the capture limit, after
 retries, or on an interrupt (`Ctrl-C`), which finishes the capture in progress and publishes the
 WARC—prints the `resume-archive` command that continues it. A failure before those eleven captures
 are finished is fatal; the partial WARC is published, but a new `archive` must start over. The
-resumption is identified by the endpoint being paged, the last page captured (zero when the
-endpoint had yet to be probed), and the original `before` cutoff, so a resumed run requests the
-same page URLs. It continues that endpoint, probes and pages the endpoints after it, and writes a
-new file in the output directory under a fresh default session name. The first resumed page is a
-session extra whose metadata `via` names the last page of the earlier run, so the chain of pages
-continues across WARC files. The printed command repeats `--config` and `--revisit-index` but never
-`--cookie`, which must be added again by hand:
+resumption is identified by the endpoint being paged, the last durably written page (zero when the
+endpoint must restart), the most recently advertised page count when known, and the original
+`before` cutoff, so a resumed run requests the same page URLs. It continues that endpoint, probes
+and pages the endpoints after it, and writes a new file in the output directory under a fresh
+default session name. The first resumed page is a session extra whose metadata `via` names the last
+page of the earlier run, so the chain of pages continues across WARC files. The printed command is
+shell-quoted and repeats `--config`. It repeats `--revisit-index` only when it also has a page count
+that makes conditional 304 responses resumable. It never repeats `--cookie`, which must be added
+again by hand:
 
 ```bash
 cargo run --bin archivindex-wordpress -- resume-archive \
@@ -101,6 +107,7 @@ cargo run --bin archivindex-wordpress -- resume-archive \
   --revisit-index site-state.sqlite3 \
   --endpoint comments \
   --last-page 11 \
+  --total-pages 19 \
   --before 2026-08-20T00:00:00Z
 ```
 
