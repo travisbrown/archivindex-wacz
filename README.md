@@ -143,6 +143,17 @@ no recoverable `before` cutoff and must be restarted with `archive`:
 cargo run --bin archivindex-wordpress -- resume-info archives/example.com-1787995936.warc
 ```
 
+The `lint` command validates a completed collection archive. It accepts plain and gzip-compressed
+WARCs, checks the required API roots and known probes, reconstructs custom probes from the type and
+taxonomy registries, and verifies that successful probes have correctly ordered page and
+validation passes linked through metadata `via` fields. Missing or incorrect WordPress `prev` and
+`next` response links are warnings. Its final report lists each paginated endpoint with its
+advertised page and item counts; any error or warning produces exit status 1:
+
+```bash
+cargo run --bin archivindex-wordpress -- lint archives/example.com-1787995936.warc.gz
+```
+
 ### WordPress comments
 
 The `read-comments` command writes the archived comments as JSON Lines in ascending comment ID

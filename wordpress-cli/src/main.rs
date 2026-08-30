@@ -23,6 +23,7 @@ use archivindex_cli_support::{
 use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
 use archivindex_wordpress::endpoint::{Collection, Registry};
+use archivindex_wordpress::lint::{Severity, lint_archive};
 use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
@@ -47,11 +48,47 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
         Command::Archive(options) => archive_site(&options, quiet),
         Command::Check(options) => check_wp_comments(&options, quiet),
         Command::Complete(options) => complete_wp_comments(&options, quiet),
+        Command::Lint(options) => lint_wp_archive(&options, quiet),
         Command::Read(options) => read_wp_comments(options),
         Command::ResumeArchive(options) => resume_archive(&options, quiet),
         Command::ResumeInfo(options) => resume_info(&options, quiet),
         Command::Update(options) => update_comments(&options, quiet),
     }
+}
+
+/// Validate the capture graph and collection pagination protocol of an archive WARC.
+fn lint_wp_archive(options: &LintOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let report = lint_archive(&options.warc)?;
+    for finding in &report.findings {
+        match finding.severity {
+            Severity::Error => log::error!("{}", finding.message),
+            Severity::Warning => log::warn!("{}", finding.message),
+        }
+    }
+
+    if !quiet {
+        for pagination in &report.pagination {
+            let pages = pagination
+                .pages
+                .map_or_else(|| "unknown".to_owned(), |pages| pages.to_string());
+            let items = pagination
+                .items
+                .map_or_else(|| "unknown".to_owned(), |items| items.to_string());
+            println!("{}: {pages} pages, {items} items", pagination.endpoint);
+        }
+        println!(
+            "{}: {} roots, {} known probes, {} custom probes, {} paginated endpoints; {} errors, {} warnings",
+            options.warc.display(),
+            report.roots,
+            report.known_probes,
+            report.custom_probes,
+            report.pagination.len(),
+            report.error_count(),
+            report.warning_count(),
+        );
+    }
+
+    Ok(CommandOutcome::from_reported_problems(!report.is_clean()))
 }
 
 /// Archive every supported collection a site exposes, beginning with the API roots and probes.
@@ -1051,6 +1088,8 @@ enum Error {
     CompleteComments(#[from] archivindex_wordpress::complete::Error),
     #[error("WordPress archive resume inspection error: {0}")]
     ResumeInfo(#[from] archivindex_wordpress::resume::Error),
+    #[error("WordPress archive lint error: {0}")]
+    Lint(#[from] archivindex_wordpress::lint::Error),
     #[error("cannot read comment update input {}: {source}", path.display())]
     UpdateInputRead {
         path: PathBuf,
@@ -1122,6 +1161,9 @@ enum Command {
     /// Capture pages missing from a comments WARC into a new WARC.
     #[clap(name = "complete-comments")]
     Complete(CompleteCommentsOptions),
+    /// Validate a collection archive's initial captures and pagination series.
+    #[clap(name = "lint")]
+    Lint(LintOptions),
     /// Read comments captured from the `WordPress` REST API in a WARC file.
     #[clap(name = "read-comments")]
     Read(ReadCommentsOptions),
@@ -1239,6 +1281,14 @@ struct CheckCommentsOptions {
     warc: PathBuf,
 }
 
+/// Options for linting a `WordPress` collection archive.
+#[derive(Debug, clap::Args)]
+struct LintOptions {
+    /// Path of the plain or gzip-compressed WARC file to lint.
+    #[clap(value_hint = clap::ValueHint::FilePath)]
+    warc: PathBuf,
+}
+
 /// Options for capturing pages missing from a comments WARC.
 #[derive(Debug, clap::Args)]
 struct CompleteCommentsOptions {
@@ -1309,6 +1359,7 @@ mod tests {
     use archivindex_wordpress::CommentDriver;
     use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
     use archivindex_wordpress::endpoint::{Collection, Endpoint, Registry};
+    use archivindex_wordpress::lint::{Severity, lint_archive};
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
     use archivindex_wordpress::resume::inspect_archive;
     use chrono::{DateTime, Utc};
@@ -1471,6 +1522,43 @@ mod tests {
     /// A metadata record's target URL and `via`.
     type MetadataVia = (String, Option<String>);
 
+    fn assert_archive_lint(warc: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let lint = lint_archive(warc)?;
+        assert_eq!(
+            (lint.roots, lint.known_probes, lint.custom_probes),
+            (8, 8, 2)
+        );
+        assert_eq!(lint.error_count(), 0, "{:?}", lint.findings);
+        assert_eq!(lint.warning_count(), 4);
+        assert!(
+            lint.findings
+                .iter()
+                .all(|finding| finding.severity == Severity::Warning)
+        );
+        assert_eq!(
+            lint.pagination
+                .iter()
+                .map(|summary| (
+                    summary.endpoint.rsplit('/').next(),
+                    summary.pages,
+                    summary.items
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Some("pages"), Some(2), Some(101)),
+                (Some("comments"), Some(1), Some(3)),
+                (Some("videos"), Some(1), Some(3)),
+            ]
+        );
+
+        let gzip = output.join("site-archive.warc.gz");
+        let mut encoder = GzEncoder::new(std::fs::File::create(&gzip)?, Compression::default());
+        encoder.write_all(&std::fs::read(warc)?)?;
+        encoder.finish()?;
+        assert_eq!(lint_archive(gzip)?, lint);
+        Ok(())
+    }
+
     /// Serve `requests` of a two-page comments collection on a local port.
     fn serve_comment_pages(
         requests: usize,
@@ -1548,6 +1636,18 @@ mod tests {
                 .session_name(before())
                 .starts_with("example.com-")
         );
+    }
+
+    #[test]
+    fn lint_command_accepts_a_warc_path() {
+        let options =
+            Opts::try_parse_from(["archivindex-wordpress", "lint", "archives/site.warc.gz"])
+                .expect("valid options");
+        let Command::Lint(options) = options.command else {
+            panic!("expected the lint command");
+        };
+
+        assert_eq!(options.warc, PathBuf::from("archives/site.warc.gz"));
     }
 
     #[test]
@@ -2208,6 +2308,8 @@ mod tests {
                 ),
             ]
         );
+
+        assert_archive_lint(&warc, &output)?;
 
         Ok(())
     }

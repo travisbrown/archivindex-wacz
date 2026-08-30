@@ -10,6 +10,7 @@
 //! * [`archive`]: archiving the supported collections a site exposes
 //! * [`complete`]: capturing pages missing from an archived comment collection
 //! * [`endpoint`]: names of REST API v2 collection endpoints
+//! * [`lint`]: validating a collection archive's capture and pagination structure
 //! * [`read`]: reading archived comments and checking page coverage
 //! * [`resume`]: recovering an archive checkpoint from a WARC file
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -17,6 +18,7 @@
 pub mod archive;
 pub mod complete;
 pub mod endpoint;
+pub mod lint;
 pub mod read;
 pub mod resume;
 
