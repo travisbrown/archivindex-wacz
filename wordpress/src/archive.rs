@@ -149,14 +149,14 @@ pub struct Resumption {
     pub total_pages: Option<usize>,
 }
 
-/// Progress through one exposed collection whose probe advertised a page count.
+/// Progress through one exposed collection whose probe advertised an item count.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaginationProgress {
     /// The collection being paged.
     pub collection: Collection,
     /// Pages completed in the current pass.
     pub page: usize,
-    /// Page count advertised by the collection's probe.
+    /// Page count derived from the collection probe's item total at the paging size.
     pub total_pages: usize,
     /// Whether the collection is being read for its validation pass.
     pub validating: bool,
@@ -192,7 +192,7 @@ pub struct ArchiveDriver {
     /// Index into `endpoints` of the next collection to probe.
     next_probe: usize,
     probed: Vec<(Collection, u16)>,
-    /// Exposed collections whose probes advertised a page count, in probe order.
+    /// Exposed collections whose probes advertised an item count, in probe order.
     pagination: Vec<(Collection, usize)>,
     /// Endpoints whose probe succeeded, awaiting paging in order.
     pending: VecDeque<Series>,
@@ -445,7 +445,7 @@ impl ArchiveDriver {
         self.next_root == ROOT_ENDPOINTS.len() && self.next_probe == self.endpoints.len()
     }
 
-    /// Progress for exposed collections whose probes advertised `X-WP-TotalPages`.
+    /// Progress for exposed collections whose probes advertised `X-WP-Total`.
     ///
     /// The position resets to zero when a collection begins its validation pass. A collection no
     /// longer current or pending is reported at its advertised total.
@@ -538,14 +538,15 @@ impl ArchiveDriver {
     /// Record a probe's answer and, after the last probe, begin paging the exposed collections.
     fn inspect_probe(&mut self, endpoint: Collection, capture: &Capture<'_>) {
         self.next_probe += 1;
-        // A bare probe uses WordPress's default page size, not the 100-item page size below. Its
-        // advertised count is retained for UI progress only; only a count carried from an earlier
-        // paged response can drive the resumed series itself.
+        // The bare probe's X-WP-TotalPages reflects WordPress's smaller default page size. Derive
+        // UI progress from its item total at our 100-item page size instead; only a count carried
+        // from an earlier paged response can drive the resumed series itself.
         let total_pages = self.resume_total_pages.take();
         if (200..300).contains(&capture.status) || capture.status == 304 {
             if let Some(advertised) = capture
-                .header("x-wp-totalpages")
+                .header("x-wp-total")
                 .and_then(|value| value.parse::<usize>().ok())
+                .map(|total| total.div_ceil(crate::PER_PAGE))
                 .or(total_pages)
             {
                 self.pagination.push((endpoint.clone(), advertised));

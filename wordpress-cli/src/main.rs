@@ -1303,6 +1303,7 @@ mod tests {
                     "200 OK",
                     &[
                         ("content-type", "application/json"),
+                        ("x-wp-total", "101"),
                         ("x-wp-totalpages", "2"),
                     ],
                     "[]",
@@ -1311,6 +1312,7 @@ mod tests {
                     "200 OK",
                     &[
                         ("content-type", "application/json"),
+                        ("x-wp-total", "3"),
                         ("x-wp-totalpages", "1"),
                     ],
                     "[]",
