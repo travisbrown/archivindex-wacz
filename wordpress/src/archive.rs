@@ -3,9 +3,8 @@
 //! [`ArchiveDriver`] drives an `archivindex-archiver` session. A run captures the API's root
 //! resources, discovers custom collections from the type and taxonomy registries among them,
 //! probes every supported [`Endpoint`] and then every custom collection with a bare request, and
-//! finally pages each exposed collection in that order, twice when it spans more than one page.
-//! The second pass detects records shifted onto earlier pages by concurrent deletions. Its
-//! [`Checkpoint`] names the page a stopped run is continued from.
+//! finally pages each exposed collection in that order. Its [`Checkpoint`] names the page a
+//! stopped run is continued from.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -158,8 +157,6 @@ pub struct PaginationProgress {
     pub page: usize,
     /// Page count derived from the collection probe's item total at the paging size.
     pub total_pages: usize,
-    /// Whether the collection is being read for its validation pass.
-    pub validating: bool,
 }
 
 /// Archive a site's collections one endpoint at a time through a session.
@@ -174,9 +171,7 @@ pub struct PaginationProgress {
 /// such as a 404 for a collection the site lacks, skips the endpoint. Exposed collections are
 /// paged one at a time after the last probe, a collection's first page requested via its probe
 /// and every later page via the page before it. After reaching the end of a collection spanning
-/// more than one page, the driver re-reads it from page one, via the last page read, with a stable
-/// advertised page count; this validation pass captures records shifted earlier by deletions
-/// during the first pass.
+/// more than one page, the driver continues until its final advertised page.
 ///
 /// An unexpected page response or unreadable registry ends the session with an error, and a
 /// failed capture ends the driver's requests; [`checkpoint`](Self::checkpoint) then names the page
@@ -211,27 +206,14 @@ struct Series {
     page: usize,
     /// The greatest page count advertised so far.
     total_pages: Option<usize>,
-    /// The page count established during the validation pass.
-    validation_total_pages: Option<usize>,
-    phase: SeriesPhase,
 }
 
 /// What a collection page's response means for the series.
 enum PageOutcome {
     /// A further page follows.
     Next,
-    /// Re-read the collection from its first page to catch shifted records.
-    Validate,
     /// The page was the collection's last.
     Last,
-}
-
-enum SeriesPhase {
-    Primary,
-    /// A second pass from page one, whose first page is requested via primary page `after`.
-    Validation {
-        after: usize,
-    },
 }
 
 impl Series {
@@ -240,8 +222,6 @@ impl Series {
             endpoint,
             page: 0,
             total_pages,
-            validation_total_pages: None,
-            phase: SeriesPhase::Primary,
         }
     }
 
@@ -250,26 +230,13 @@ impl Series {
             endpoint,
             page,
             total_pages,
-            validation_total_pages: None,
-            phase: SeriesPhase::Primary,
         }
-    }
-
-    const fn begin_validation(&mut self, after: usize) {
-        self.page = 0;
-        self.validation_total_pages = None;
-        self.phase = SeriesPhase::Validation { after };
-    }
-
-    const fn is_primary(&self) -> bool {
-        matches!(self.phase, SeriesPhase::Primary)
     }
 
     fn checkpoint(&self) -> Checkpoint {
         Checkpoint::Resume(Resumption {
             endpoint: self.endpoint.clone(),
-            // A validation pass is deliberately replayed as a fresh primary pass after a stop.
-            last_page: if self.is_primary() { self.page } else { 0 },
+            last_page: self.page,
             total_pages: self.total_pages,
         })
     }
@@ -280,14 +247,7 @@ impl Series {
         // A page can disappear between requests when deletions reduce the page count, which some
         // WordPress endpoints report with this posts-controller error code.
         if capture.status == 400 && page > 1 && crate::is_invalid_page_error(capture.payload) {
-            return if self.is_primary() {
-                Ok(PageOutcome::Validate)
-            } else {
-                Err(format!(
-                    "{} page {page} disappeared during its validation pass",
-                    self.endpoint
-                ))
-            };
+            return Ok(PageOutcome::Last);
         }
         if !matches!(capture.status, 200 | 304) {
             return Err(format!(
@@ -299,24 +259,10 @@ impl Series {
             .header("x-wp-totalpages")
             .and_then(|value| value.parse::<usize>().ok())
         {
-            if self.is_primary() {
-                self.total_pages = Some(
-                    self.total_pages
-                        .map_or(advertised, |known| known.max(advertised)),
-                );
-            } else {
-                if self
-                    .validation_total_pages
-                    .is_some_and(|known| known != advertised)
-                {
-                    return Err(format!(
-                        "X-WP-TotalPages changed during the {} validation pass",
-                        self.endpoint
-                    ));
-                }
-                self.validation_total_pages = Some(advertised);
-                self.total_pages = Some(advertised);
-            }
+            self.total_pages = Some(
+                self.total_pages
+                    .map_or(advertised, |known| known.max(advertised)),
+            );
         }
         let Some(total_pages) = self.total_pages else {
             return Err(format!(
@@ -326,12 +272,8 @@ impl Series {
         };
         self.page = page;
 
-        // Deletions can only shift records onto an earlier page of a collection that has one, so
-        // a collection read in a single page (or empty) is complete without a validation pass.
         Ok(if page < total_pages {
             PageOutcome::Next
-        } else if self.is_primary() && total_pages > 1 {
-            PageOutcome::Validate
         } else {
             PageOutcome::Last
         })
@@ -450,8 +392,7 @@ impl ArchiveDriver {
 
     /// Progress for exposed collections whose probes advertised `X-WP-Total`.
     ///
-    /// The position resets to zero when a collection begins its validation pass. A collection no
-    /// longer current or pending is reported at its advertised total.
+    /// A collection no longer current or pending is reported at its advertised total.
     #[must_use]
     pub fn pagination_progress(&self) -> Vec<PaginationProgress> {
         self.pagination
@@ -462,15 +403,12 @@ impl ArchiveDriver {
                     .iter()
                     .chain(&self.pending)
                     .find(|series| series.endpoint.name() == collection.name());
-                let (page, validating) = series.map_or((*total_pages, false), |series| {
-                    (series.page.min(*total_pages), !series.is_primary())
-                });
+                let page = series.map_or(*total_pages, |series| series.page.min(*total_pages));
 
                 PaginationProgress {
                     collection: collection.clone(),
                     page,
                     total_pages: *total_pages,
-                    validating,
                 }
             })
             .collect()
@@ -479,12 +417,9 @@ impl ArchiveDriver {
     /// The request for a series' next page, via the page its position follows from.
     fn page_request(&self, series: &Series) -> Request {
         let endpoint = series.endpoint.name();
-        let via = match (&series.phase, series.page) {
-            (SeriesPhase::Primary, 0) => self.site.endpoint_url(endpoint),
-            (SeriesPhase::Validation { after }, 0) => {
-                self.site.page_url(endpoint, self.before, *after)
-            }
-            (_, page) => self.site.page_url(endpoint, self.before, page),
+        let via = match series.page {
+            0 => self.site.endpoint_url(endpoint),
+            page => self.site.page_url(endpoint, self.before, page),
         };
 
         Request::extra(
@@ -569,12 +504,10 @@ impl ArchiveDriver {
             .current
             .as_mut()
             .expect("a page is inspected only while a series is current");
-        let requested = series.page + 1;
         match series.record(capture) {
             Ok(outcome) => {
                 match outcome {
                     PageOutcome::Next => {}
-                    PageOutcome::Validate => series.begin_validation(requested),
                     PageOutcome::Last => self.current = self.pending.pop_front(),
                 }
                 Inspection::default()
@@ -893,21 +826,7 @@ mod tests {
         assert_eq!(driver.next(), Some(page_request("pages", 3, "")));
         let third = inspect(&mut driver, &page_url("pages", 3), TWO_PAGES);
         assert_eq!(third, Inspection::default());
-        // The validation pass begins via the last page read, which prompted it.
-        assert_eq!(
-            driver.next(),
-            Some(page_request("pages", 1, &page_url("pages", 3)))
-        );
-        assert_eq!(driver.checkpoint(), resume(Endpoint::Pages, 0, Some(3)));
 
-        for page in 1..=3 {
-            let _ = inspect(&mut driver, &page_url("pages", page), THREE_PAGES);
-            if page < 3 {
-                assert_eq!(driver.next(), Some(page_request("pages", page + 1, "")));
-            }
-        }
-
-        // A collection read in a single page, or empty, needs no validation pass.
         for (endpoint, response) in [("comments", NO_PAGES), ("categories", ONE_PAGE)] {
             assert_eq!(
                 driver.next(),
@@ -922,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn pagination_progress_uses_probe_totals_and_tracks_each_pass() {
+    fn pagination_progress_uses_probe_totals_and_tracks_each_collection() {
         let mut driver = ArchiveDriver::new(site(), before());
         capture_roots(&mut driver);
         probe_all(
@@ -941,13 +860,11 @@ mod tests {
                     collection: Endpoint::Pages.into(),
                     page: 0,
                     total_pages: 2,
-                    validating: false,
                 },
                 PaginationProgress {
                     collection: Endpoint::Comments.into(),
                     page: 0,
                     total_pages: 1,
-                    validating: false,
                 },
             ]
         );
@@ -959,16 +876,10 @@ mod tests {
             driver.pagination_progress()[0],
             PaginationProgress {
                 collection: Endpoint::Pages.into(),
-                page: 0,
+                page: 2,
                 total_pages: 2,
-                validating: true,
             }
         );
-
-        for page in 1..=2 {
-            let _ = inspect(&mut driver, &page_url("pages", page), TWO_PAGES);
-        }
-        assert_eq!(driver.pagination_progress()[0].page, 2);
         assert_eq!(driver.pagination_progress()[1].page, 0);
     }
 
@@ -1084,14 +995,6 @@ mod tests {
         assert_eq!(driver.checkpoint(), resume(Endpoint::Comments, 7, Some(8)));
 
         let _ = inspect(&mut driver, &page_url("comments", 8), EIGHT_PAGES);
-        assert_eq!(
-            driver.next(),
-            Some(page_request("comments", 1, &page_url("comments", 8)))
-        );
-        assert_eq!(driver.checkpoint(), resume(Endpoint::Comments, 0, Some(8)));
-        for page in 1..=8 {
-            let _ = inspect(&mut driver, &page_url("comments", page), EIGHT_PAGES);
-        }
 
         // An endpoint found exposed is paged only after the remaining probes, so a run stopped
         // during those probes resumes by probing it again.
@@ -1210,27 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_count_change_during_validation_stops_the_run() {
-        let mut driver = ArchiveDriver::resume(
-            site(),
-            before(),
-            resumption(Endpoint::Posts, 1, Some(2)),
-            Vec::new(),
-        );
-        let _ = inspect(&mut driver, &page_url("posts", 2), TWO_PAGES);
-        let _ = inspect(&mut driver, &page_url("posts", 1), TWO_PAGES);
-
-        let changed = inspect(&mut driver, &page_url("posts", 2), ONE_PAGE);
-
-        assert_eq!(
-            changed.error.as_deref(),
-            Some("X-WP-TotalPages changed during the posts validation pass")
-        );
-        assert_eq!(driver.checkpoint(), resume(Endpoint::Posts, 0, Some(2)));
-    }
-
-    #[test]
-    fn a_vanished_page_restarts_the_collection_for_validation() {
+    fn a_vanished_page_ends_the_collection() {
         let mut driver = ArchiveDriver::resume(
             site(),
             before(),
@@ -1246,13 +1129,6 @@ mod tests {
         );
 
         assert_eq!(gone, Inspection::default());
-        assert_eq!(
-            driver.next(),
-            Some(page_request("posts", 1, &page_url("posts", 5)))
-        );
-        assert_eq!(driver.checkpoint(), resume(Endpoint::Posts, 0, None));
-        let validation = inspect(&mut driver, &page_url("posts", 1), ONE_PAGE);
-        assert_eq!(validation.error, None);
         assert_eq!(driver.next(), Some(Request::seed(endpoint_url("media"))));
     }
 

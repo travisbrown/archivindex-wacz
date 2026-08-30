@@ -51,21 +51,16 @@ exclusions are temporarily disabled. A registry that cannot be read as such ends
 endpoint whose bare request succeeded is then paged to its end, in that same order,
 with the time the archive started as its `before` cutoff, ascending by ID, one hundred items per
 page; an endpoint answering 404 is skipped. If a collection's `X-WP-TotalPages` changes while it
-is being paged, the largest value seen decides when the first pass ends. Every collection that
-spanned more than one page is then read once more from page one. This validation pass catches
-records shifted onto earlier pages by concurrent deletions and fails if the advertised page count
-changes during the pass; a collection read in a single page has no earlier page for records to
-shift onto, so it is complete after that page. The roots and
+is being paged, the largest value seen decides when pagination ends. The roots and
 the supported endpoints' bare requests are session seeds. Every other capture is a session extra
 whose metadata `via` names what led to it: a custom collection's bare request follows the registry
 that advertised it (`types` when both did), a collection's first page follows its bare request, a
-validation pass's first page follows the last page read before it, and every other page follows
-the preceding page. No capture carries a title.
+later page follows the preceding page. No capture carries a title.
 
 While the roots and collection probes run, the command shows its current probing position. After
 the final probe it replaces that indicator with one progress bar for each exposed collection,
 dividing the probe's `X-WP-Total` by the 100-item paging size and rounding up for the bar length. A
-bar resets to page zero and is labeled as validation while the collection's second pass runs.
+bar advances once through the collection's pages.
 
 `--base` names the site as a host with an optional path and no scheme, such as `example.com` or
 `example.com/blog` (a trailing slash is removed); requests use HTTPS. `--output` names a directory,
@@ -158,8 +153,8 @@ cargo run --bin archivindex-wordpress -- combine \
 The `lint` command validates a completed collection archive. It accepts plain and gzip-compressed
 WARCs, checks the required API roots and known probes, reconstructs custom probes from the type and
 taxonomy registries, and verifies that successful probes have correctly ordered page and
-validation passes linked through metadata `via` fields. Missing or incorrect WordPress `prev` and
-`next` response links are warnings. Its final report lists each paginated endpoint with its
+pagination captures linked through metadata `via` fields. Missing or incorrect WordPress `prev`
+and `next` response links are warnings. Its final report lists each paginated endpoint with its
 advertised page and item counts; any error or warning produces exit status 1:
 
 ```bash

@@ -37,7 +37,7 @@ pub struct Finding {
 pub struct PaginationSummary {
     /// Bare collection endpoint URI.
     pub endpoint: String,
-    /// Greatest page count advertised during the primary pagination pass.
+    /// Greatest page count advertised during pagination.
     pub pages: Option<usize>,
     /// Item count advertised by the endpoint probe.
     pub items: Option<usize>,
@@ -122,8 +122,7 @@ pub enum Error {
 /// Lint a plain or gzip-compressed `WordPress` collection WARC.
 ///
 /// The archive must begin with all API roots and known probes, followed by registry-advertised
-/// custom probes. Every successful probe must have one correctly linked pagination traversal;
-/// multi-page traversals must be followed by exactly one validation traversal.
+/// custom probes. Every successful probe must have one correctly linked pagination traversal.
 ///
 /// # Errors
 ///
@@ -857,8 +856,9 @@ fn lint_series(
         .enumerate()
         .skip(1)
         .find_map(|(index, capture)| (capture.page == Some(1)).then_some(index));
-    let (primary, validation) = split.map_or((captures, &[][..]), |index| captures.split_at(index));
-    let total_pages = primary
+    let (pagination, legacy_validation) =
+        split.map_or((captures, &[][..]), |index| captures.split_at(index));
+    let total_pages = pagination
         .iter()
         .filter_map(|capture| response_metadata(&groups[capture.group]))
         .filter_map(|metadata| numeric_header(&metadata, "x-wp-totalpages"))
@@ -867,39 +867,34 @@ fn lint_series(
     lint_pass(
         groups,
         name,
-        primary,
+        pagination,
         &probe.url,
         total_pages,
-        false,
+        "pagination",
         checked_shapes,
         report,
     );
-    let needs_validation = total_pages.is_some_and(|pages| pages > 1);
-    match (needs_validation, validation.is_empty()) {
-        (true, true) => error(
-            report,
-            format!("{name} pagination series is missing its validation pass"),
-        ),
-        (false, false) => error(
-            report,
-            format!("{name} pagination series has an unnecessary validation pass"),
-        ),
-        _ => {}
-    }
-    if !validation.is_empty() {
-        let via = primary.last().map_or(probe.url.as_str(), |capture| {
-            groups[capture.group].url.as_str()
-        });
-        lint_pass(
-            groups,
-            name,
-            validation,
-            via,
-            total_pages,
-            true,
-            checked_shapes,
-            report,
-        );
+    if !legacy_validation.is_empty() {
+        if total_pages.is_some_and(|pages| pages > 1) {
+            let via = pagination.last().map_or(probe.url.as_str(), |capture| {
+                groups[capture.group].url.as_str()
+            });
+            lint_pass(
+                groups,
+                name,
+                legacy_validation,
+                via,
+                total_pages,
+                "legacy validation",
+                checked_shapes,
+                report,
+            );
+        } else {
+            error(
+                report,
+                format!("{name} pagination series has an unnecessary second pass"),
+            );
+        }
     }
     total_pages
 }
@@ -911,12 +906,10 @@ fn lint_pass(
     captures: &[PageCapture],
     first_via: &str,
     expected_total: Option<usize>,
-    validation: bool,
+    pass: &str,
     checked_shapes: &mut HashSet<usize>,
     report: &mut LintReport,
 ) {
-    let pass = if validation { "validation" } else { "primary" };
-    let mut validation_total = None;
     for (position, capture) in captures.iter().enumerate() {
         let expected_via = if position == 0 {
             first_via
@@ -930,8 +923,6 @@ fn lint_pass(
             expected_via,
             name,
             pass,
-            validation,
-            &mut validation_total,
             checked_shapes,
             report,
         );
@@ -942,19 +933,9 @@ fn lint_pass(
             error(
                 report,
                 format!(
-                    "{name} {pass} pagination pass has {} captures, expected {} for {total} advertised pages",
+                    "{name} {pass} pass has {} captures, expected {} for {total} advertised pages",
                     captures.len(),
                     total.max(1)
-                ),
-            );
-        }
-        if validation && validation_total.is_some_and(|validation_total| validation_total != total)
-        {
-            error(
-                report,
-                format!(
-                    "{name} validation pass advertises {} pages, expected {total}",
-                    validation_total.expect("the condition requires a validation total")
                 ),
             );
         }
@@ -969,8 +950,6 @@ fn lint_page_capture(
     expected_via: &str,
     name: &str,
     pass: &str,
-    validation: bool,
-    validation_total: &mut Option<usize>,
     checked_shapes: &mut HashSet<usize>,
     report: &mut LintReport,
 ) {
@@ -1023,17 +1002,6 @@ fn lint_page_capture(
             report,
             format!("{name} {pass} page {expected_page} has missing or invalid X-WP-TotalPages"),
         );
-    }
-    if validation {
-        if let (Some(known), Some(advertised)) = (*validation_total, advertised)
-            && known != advertised
-        {
-            error(
-                report,
-                format!("X-WP-TotalPages changed during the {name} validation pass"),
-            );
-        }
-        *validation_total = validation_total.or(advertised);
     }
     check_json_array(
         groups,
@@ -1279,9 +1247,9 @@ mod tests {
 
     use super::{
         CaptureGroup, LintReport, PageCapture, Probe, StoredMetadata, StoredResponse,
-        expected_initial, lint_series, page_query, same_page_uri,
+        StoredRevisit, StoredRevisitProfile, expected_initial, lint_series, page_query,
+        same_page_uri,
     };
-    use super::{StoredRevisit, StoredRevisitProfile};
     use crate::archive::Site;
     use crate::endpoint::{Endpoint, ROOT_ENDPOINTS};
 
@@ -1421,12 +1389,10 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_page_series_requires_one_complete_validation_pass() {
+    fn a_multi_page_series_requires_one_complete_pagination_pass() {
         let probe = probe();
         let mut groups = vec![capture(1, &probe.url, 2)];
         groups.push(capture(2, &groups[0].url, 2));
-        groups.push(revisit(1, &groups[1].url, 2, 0));
-        groups.push(revisit(2, &groups[2].url, 2, 1));
         let captures = pages(&groups);
         let mut report = LintReport::default();
 
@@ -1436,21 +1402,24 @@ mod tests {
         );
         assert!(report.is_clean(), "{:?}", report.findings);
 
-        let mut incomplete = LintReport::default();
+        let mut repeated_groups = vec![capture(1, &probe.url, 2)];
+        repeated_groups.push(capture(2, &repeated_groups[0].url, 2));
+        repeated_groups.push(revisit(1, &repeated_groups[1].url, 2, 0));
+        repeated_groups.push(revisit(2, &repeated_groups[2].url, 2, 1));
+        let repeated_captures = pages(&repeated_groups);
+        let mut legacy = LintReport::default();
         lint_series(
-            &groups[..2],
+            &repeated_groups,
             &probe,
-            &captures[..2],
+            &repeated_captures,
             &mut HashSet::new(),
-            &mut incomplete,
+            &mut legacy,
         );
-        assert!(incomplete.findings.iter().any(|finding| {
-            finding.message == "posts pagination series is missing its validation pass"
-        }));
+        assert!(legacy.is_clean(), "{:?}", legacy.findings);
     }
 
     #[test]
-    fn an_empty_collection_still_has_page_one_and_no_validation() {
+    fn an_empty_collection_still_has_page_one() {
         let mut probe = probe();
         probe.items = Some(0);
         let groups = vec![capture(1, &probe.url, 0)];
@@ -1466,16 +1435,16 @@ mod tests {
         let mut groups = groups;
         groups.push(capture(1, &groups[0].url, 0));
         let captures = pages(&groups);
-        let mut unnecessary = LintReport::default();
+        let mut repeated = LintReport::default();
         lint_series(
             &groups,
             &probe,
             &captures,
             &mut HashSet::new(),
-            &mut unnecessary,
+            &mut repeated,
         );
-        assert!(unnecessary.findings.iter().any(|finding| {
-            finding.message == "posts pagination series has an unnecessary validation pass"
+        assert!(repeated.findings.iter().any(|finding| {
+            finding.message == "posts pagination series has an unnecessary second pass"
         }));
     }
 }

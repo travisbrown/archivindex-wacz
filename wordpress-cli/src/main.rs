@@ -342,12 +342,7 @@ impl ArchiveProgress {
 
         for endpoint in progress {
             if let Some(bar) = self.pagination.get(endpoint.collection.name()) {
-                let message = if endpoint.validating {
-                    format!("{} (validation)", endpoint.collection)
-                } else {
-                    endpoint.collection.to_string()
-                };
-                bar.set_message(message);
+                bar.set_message(endpoint.collection.to_string());
                 bar.set_position(u64::try_from(endpoint.page).unwrap_or(u64::MAX));
             }
         }
@@ -1556,7 +1551,7 @@ mod tests {
             (8, 8, 2)
         );
         assert_eq!(lint.error_count(), 0, "{:?}", lint.findings);
-        assert_eq!(lint.warning_count(), 4);
+        assert_eq!(lint.warning_count(), 2);
         assert!(
             lint.findings
                 .iter()
@@ -1951,14 +1946,14 @@ mod tests {
         assert_eq!(inspection.error, None);
         assert_eq!(
             shared.next(),
-            Some(Request::extra(url.replace("&page=2&", "&page=1&"), &url))
+            Some(Request::seed("https://example.com/wp-json/wp/v2/users"))
         );
 
         state.borrow_mut().written(&url);
 
         assert_eq!(
             state.borrow().durable,
-            Checkpoint::Resume(resumption(Endpoint::Comments, 0, Some(2)))
+            Checkpoint::Resume(resumption(Endpoint::Users, 0, None))
         );
     }
 
@@ -2323,7 +2318,7 @@ mod tests {
     #[test]
     fn an_archive_pages_each_exposed_collection_after_the_probes()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(24)?;
+        let (port, server) = serve_site(22)?;
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("archives");
         let options = archive_options(port, &output, "site-archive");
@@ -2361,15 +2356,8 @@ mod tests {
         // The custom collections are probed after the supported endpoints, in registry order.
         expected.extend(["/wp-json/wp/v2/videos", "/wp-json/wp/v2/series"].map(str::to_owned));
         expected.extend(
-            [
-                ("pages", 1),
-                ("pages", 2),
-                ("pages", 1),
-                ("pages", 2),
-                ("comments", 1),
-                ("videos", 1),
-            ]
-            .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
+            [("pages", 1), ("pages", 2), ("comments", 1), ("videos", 1)]
+                .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
         );
         assert_eq!(server.join().expect("the local server"), expected);
 
@@ -2402,8 +2390,6 @@ mod tests {
                 ),
                 (page("pages", 1), Some(format!("{root}wp-json/wp/v2/pages"))),
                 (page("pages", 2), Some(page("pages", 1))),
-                (page("pages", 1), Some(page("pages", 2))),
-                (page("pages", 2), Some(page("pages", 1))),
                 (
                     page("comments", 1),
                     Some(format!("{root}wp-json/wp/v2/comments"))
@@ -2423,7 +2409,7 @@ mod tests {
     #[test]
     fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(8)?;
+        let (port, server) = serve_site(7)?;
         let directory = tempfile::tempdir()?;
         let options = archive_options(port, directory.path(), "site-resumed");
         let root = format!("http://127.0.0.1:{port}/wp-json/wp/v2/");
@@ -2447,9 +2433,9 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::Success);
         let requests = server.join().expect("the local server");
-        assert_eq!(requests.len(), 8);
+        assert_eq!(requests.len(), 7);
         assert_eq!(
-            requests[2..7],
+            requests[1..6],
             [
                 "/wp-json/wp/v2/users",
                 "/wp-json/wp/v2/categories",
@@ -2462,7 +2448,6 @@ mod tests {
             metadata_vias(&directory.path().join("site-resumed.warc"))?,
             [
                 (page("comments", 2), Some(page("comments", 1))),
-                (page("comments", 1), Some(page("comments", 2))),
                 (format!("{root}users"), None),
                 (format!("{root}categories"), None),
                 (format!("{root}tags"), None),
