@@ -2117,7 +2117,7 @@ mod tests {
     #[test]
     fn an_archive_pages_each_exposed_collection_after_the_probes()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(26)?;
+        let (port, server) = serve_site(24)?;
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("archives");
         let options = archive_options(port, &output, "site-archive");
@@ -2161,8 +2161,6 @@ mod tests {
                 ("pages", 1),
                 ("pages", 2),
                 ("comments", 1),
-                ("comments", 1),
-                ("videos", 1),
                 ("videos", 1),
             ]
             .map(|(endpoint, number)| page(endpoint, number)[root.len() - 1..].to_owned()),
@@ -2204,12 +2202,10 @@ mod tests {
                     page("comments", 1),
                     Some(format!("{root}wp-json/wp/v2/comments"))
                 ),
-                (page("comments", 1), Some(page("comments", 1))),
                 (
                     page("videos", 1),
                     Some(format!("{root}wp-json/wp/v2/videos"))
                 ),
-                (page("videos", 1), Some(page("videos", 1))),
             ]
         );
 
@@ -2219,7 +2215,7 @@ mod tests {
     #[test]
     fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(7)?;
+        let (port, server) = serve_site(6)?;
         let directory = tempfile::tempdir()?;
         let options = archive_options(port, directory.path(), "site-resumed");
         let root = format!("http://127.0.0.1:{port}/wp-json/wp/v2/");
@@ -2243,7 +2239,7 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::Success);
         let requests = server.join().expect("the local server");
-        assert_eq!(requests.len(), 7);
+        assert_eq!(requests.len(), 6);
         assert_eq!(
             requests[2..5],
             [
@@ -2261,7 +2257,6 @@ mod tests {
                 (format!("{root}navigation"), None),
                 (format!("{root}videos"), Some(format!("{root}types"))),
                 (page("videos", 1), Some(format!("{root}videos"))),
-                (page("videos", 1), Some(page("videos", 1))),
             ]
         );
         let resume = inspect_archive(directory.path().join("site-resumed.warc"))?;

@@ -3,9 +3,9 @@
 //! [`ArchiveDriver`] drives an `archivindex-archiver` session. A run captures the API's root
 //! resources, discovers custom collections from the type and taxonomy registries among them,
 //! probes every supported [`Endpoint`] and then every custom collection with a bare request, and
-//! finally pages each exposed collection twice, in that order. The second pass detects records
-//! shifted onto earlier pages by concurrent deletions. Its [`Checkpoint`] names the page a
-//! stopped run is continued from.
+//! finally pages each exposed collection in that order, twice when it spans more than one page.
+//! The second pass detects records shifted onto earlier pages by concurrent deletions. Its
+//! [`Checkpoint`] names the page a stopped run is continued from.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -173,9 +173,10 @@ pub struct PaginationProgress {
 /// `X-WP-TotalPages` value seen, all pages carrying the run's `before` cutoff; any other answer,
 /// such as a 404 for a collection the site lacks, skips the endpoint. Exposed collections are
 /// paged one at a time after the last probe, a collection's first page requested via its probe
-/// and every later page via the page before it. After reaching a collection's end, the driver
-/// re-reads it from page one, via the last page read, with a stable advertised page count; this
-/// validation pass captures records shifted earlier by deletions during the first pass.
+/// and every later page via the page before it. After reaching the end of a collection spanning
+/// more than one page, the driver re-reads it from page one, via the last page read, with a stable
+/// advertised page count; this validation pass captures records shifted earlier by deletions
+/// during the first pass.
 ///
 /// An unexpected page response or unreadable registry ends the session with an error, and a
 /// failed capture ends the driver's requests; [`checkpoint`](Self::checkpoint) then names the page
@@ -325,9 +326,11 @@ impl Series {
         };
         self.page = page;
 
+        // Deletions can only shift records onto an earlier page of a collection that has one, so
+        // a collection read in a single page (or empty) is complete without a validation pass.
         Ok(if page < total_pages {
             PageOutcome::Next
-        } else if self.is_primary() {
+        } else if self.is_primary() && total_pages > 1 {
             PageOutcome::Validate
         } else {
             PageOutcome::Last
@@ -670,6 +673,7 @@ mod tests {
     const TWO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 101\r\nX-WP-TotalPages: 2\r\n\r\n";
     const THREE_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 201\r\nX-WP-TotalPages: 3\r\n\r\n";
     const EIGHT_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 8\r\n\r\n";
+    const NO_PAGES: &[u8] = b"HTTP/1.1 200 OK\r\nX-WP-Total: 0\r\nX-WP-TotalPages: 0\r\n\r\n";
     const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\r\n";
     const NOT_MODIFIED: &[u8] = b"HTTP/1.1 304 Not Modified\r\n\r\n";
     const INVALID_PAGE_ERROR: &[u8] =
@@ -903,19 +907,14 @@ mod tests {
             }
         }
 
-        // A one-page collection is validated via that page, then the next collection begins.
-        for endpoint in ["categories", "comments"] {
+        // A collection read in a single page, or empty, needs no validation pass.
+        for (endpoint, response) in [("categories", ONE_PAGE), ("comments", NO_PAGES)] {
             assert_eq!(
                 driver.next(),
                 Some(page_request(endpoint, 1, &endpoint_url(endpoint)))
             );
-            let _ = inspect(&mut driver, &page_url(endpoint, 1), ONE_PAGE);
-            assert_eq!(
-                driver.next(),
-                Some(page_request(endpoint, 1, &page_url(endpoint, 1)))
-            );
-            let validation = inspect(&mut driver, &page_url(endpoint, 1), ONE_PAGE);
-            assert_eq!(validation.error, None);
+            let only = inspect(&mut driver, &page_url(endpoint, 1), response);
+            assert_eq!(only, Inspection::default());
         }
         assert_eq!(driver.next(), None);
         assert_eq!(driver.checkpoint(), Checkpoint::Finished);

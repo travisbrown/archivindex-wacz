@@ -51,9 +51,11 @@ response order with the types before the taxonomies. A registry that cannot be r
 the run. Each endpoint whose bare request succeeded is then paged to its end, in that same order,
 with the time the archive started as its `before` cutoff, ascending by ID, one hundred items per
 page; an endpoint answering 404 is skipped. If a collection's `X-WP-TotalPages` changes while it
-is being paged, the largest value seen decides when the first pass ends. Every collection is then
-read once more from page one. This validation pass catches records shifted onto earlier pages by
-concurrent deletions and fails if the advertised page count changes during the pass. The roots and
+is being paged, the largest value seen decides when the first pass ends. Every collection that
+spanned more than one page is then read once more from page one. This validation pass catches
+records shifted onto earlier pages by concurrent deletions and fails if the advertised page count
+changes during the pass; a collection read in a single page has no earlier page for records to
+shift onto, so it is complete after that page. The roots and
 the supported endpoints' bare requests are session seeds. Every other capture is a session extra
 whose metadata `via` names what led to it: a custom collection's bare request follows the registry
 that advertised it (`types` when both did), a collection's first page follows its bare request, a
