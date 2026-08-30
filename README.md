@@ -43,12 +43,12 @@ run begins with requests that are never paged: the API roots `wp-json`, `wp-json
 `wp-json/wp/v2/types`, `wp-json/wp/v2/taxonomies`, `wp-json/wp/v2/block-types`,
 `wp-json/wp/v2/block-patterns/categories`, `wp-json/wp/v2/block-patterns/patterns`, and
 `wp-json/wp/v2/menu-locations`, then a bare request of each supported collection endpoint in the
-order `pages`, `posts`, `categories`, `tags`, `users`, `comments`, `media`, `navigation`, then a
+order `pages`, `posts`, `media`, `comments`, `users`, `categories`, `tags`, `navigation`, then a
 bare request of each custom collection. The custom collections are the `wp/v2` entries of the
-`types` and `taxonomies` responses that are neither supported endpoints nor WordPress internals
-(`template-parts`, `templates`, `menus`, `menu-items`, `global-styles`, `font-families`), in
-response order with the types before the taxonomies. A registry that cannot be read as such ends
-the run. Each endpoint whose bare request succeeded is then paged to its end, in that same order,
+`types` and `taxonomies` responses that are neither supported endpoints nor parameterized route
+patterns, in response order with the types before the taxonomies. The enumerated internal endpoint
+exclusions are temporarily disabled. A registry that cannot be read as such ends the run. Each
+endpoint whose bare request succeeded is then paged to its end, in that same order,
 with the time the archive started as its `before` cutoff, ascending by ID, one hundred items per
 page; an endpoint answering 404 is skipped. If a collection's `X-WP-TotalPages` changes while it
 is being paged, the largest value seen decides when the first pass ends. Every collection that

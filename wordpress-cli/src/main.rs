@@ -2423,7 +2423,7 @@ mod tests {
     #[test]
     fn a_resumed_archive_continues_the_endpoint_via_its_last_page()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (port, server) = serve_site(6)?;
+        let (port, server) = serve_site(8)?;
         let directory = tempfile::tempdir()?;
         let options = archive_options(port, directory.path(), "site-resumed");
         let root = format!("http://127.0.0.1:{port}/wp-json/wp/v2/");
@@ -2447,11 +2447,13 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::Success);
         let requests = server.join().expect("the local server");
-        assert_eq!(requests.len(), 6);
+        assert_eq!(requests.len(), 8);
         assert_eq!(
-            requests[2..5],
+            requests[2..7],
             [
-                "/wp-json/wp/v2/media",
+                "/wp-json/wp/v2/users",
+                "/wp-json/wp/v2/categories",
+                "/wp-json/wp/v2/tags",
                 "/wp-json/wp/v2/navigation",
                 "/wp-json/wp/v2/videos"
             ]
@@ -2461,7 +2463,9 @@ mod tests {
             [
                 (page("comments", 2), Some(page("comments", 1))),
                 (page("comments", 1), Some(page("comments", 2))),
-                (format!("{root}media"), None),
+                (format!("{root}users"), None),
+                (format!("{root}categories"), None),
+                (format!("{root}tags"), None),
                 (format!("{root}navigation"), None),
                 (format!("{root}videos"), Some(format!("{root}types"))),
                 (page("videos", 1), Some(format!("{root}videos"))),

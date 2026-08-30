@@ -1278,11 +1278,12 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        CaptureGroup, LintReport, PageCapture, Probe, StoredMetadata, StoredResponse, lint_series,
-        page_query, same_page_uri,
+        CaptureGroup, LintReport, PageCapture, Probe, StoredMetadata, StoredResponse,
+        expected_initial, lint_series, page_query, same_page_uri,
     };
     use super::{StoredRevisit, StoredRevisitProfile};
-    use crate::endpoint::Endpoint;
+    use crate::archive::Site;
+    use crate::endpoint::{Endpoint, ROOT_ENDPOINTS};
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
 
@@ -1370,6 +1371,35 @@ mod tests {
             status: Some(200),
             items: Some(101),
         }
+    }
+
+    #[test]
+    fn initial_capture_order_uses_the_supported_endpoint_order() {
+        let site = Site::parse("example.com").expect("a site");
+        let initial = expected_initial(&site, &[]);
+        let endpoints = initial[ROOT_ENDPOINTS.len()..]
+            .iter()
+            .map(|(_, collection)| {
+                collection
+                    .as_ref()
+                    .expect("an endpoint follows the roots")
+                    .name()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            endpoints,
+            [
+                "pages",
+                "posts",
+                "media",
+                "comments",
+                "users",
+                "categories",
+                "tags",
+                "navigation",
+            ]
+        );
     }
 
     #[test]

@@ -861,7 +861,7 @@ mod tests {
         probe_all(
             &mut driver,
             [
-                OK, NOT_FOUND, OK, FORBIDDEN, NOT_FOUND, OK, NOT_FOUND, NOT_FOUND,
+                OK, NOT_FOUND, NOT_FOUND, OK, NOT_FOUND, OK, FORBIDDEN, NOT_FOUND,
             ],
         );
 
@@ -872,11 +872,11 @@ mod tests {
             [
                 (Endpoint::Pages.into(), 200),
                 (Endpoint::Posts.into(), 404),
+                (Endpoint::Media.into(), 404),
+                (Endpoint::Comments.into(), 200),
+                (Endpoint::Users.into(), 404),
                 (Endpoint::Categories.into(), 200),
                 (Endpoint::Tags.into(), 403),
-                (Endpoint::Users.into(), 404),
-                (Endpoint::Comments.into(), 200),
-                (Endpoint::Media.into(), 404),
                 (Endpoint::Navigation.into(), 404),
             ]
         );
@@ -908,7 +908,7 @@ mod tests {
         }
 
         // A collection read in a single page, or empty, needs no validation pass.
-        for (endpoint, response) in [("categories", ONE_PAGE), ("comments", NO_PAGES)] {
+        for (endpoint, response) in [("comments", NO_PAGES), ("categories", ONE_PAGE)] {
             assert_eq!(
                 driver.next(),
                 Some(page_request(endpoint, 1, &endpoint_url(endpoint)))
@@ -928,7 +928,7 @@ mod tests {
         probe_all(
             &mut driver,
             [
-                TWO_PAGES, NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND, ONE_PAGE, NOT_FOUND,
+                TWO_PAGES, NOT_FOUND, NOT_FOUND, ONE_PAGE, NOT_FOUND, NOT_FOUND, NOT_FOUND,
                 NOT_FOUND,
             ],
         );
@@ -1095,16 +1095,16 @@ mod tests {
 
         // An endpoint found exposed is paged only after the remaining probes, so a run stopped
         // during those probes resumes by probing it again.
-        let media_probe = endpoint_url("media");
-        assert_eq!(driver.next(), Some(Request::seed(&media_probe)));
-        let _ = inspect(&mut driver, &media_probe, OK);
-        assert_eq!(driver.checkpoint(), resume(Endpoint::Media, 0, None));
-        assert_eq!(
-            driver.next(),
-            Some(Request::seed(endpoint_url("navigation")))
-        );
-        let _ = inspect(&mut driver, &endpoint_url("navigation"), NOT_FOUND);
-        assert_eq!(driver.next(), Some(page_request("media", 1, &media_probe)));
+        let users_probe = endpoint_url("users");
+        assert_eq!(driver.next(), Some(Request::seed(&users_probe)));
+        let _ = inspect(&mut driver, &users_probe, OK);
+        assert_eq!(driver.checkpoint(), resume(Endpoint::Users, 0, None));
+        for endpoint in [Endpoint::Categories, Endpoint::Tags, Endpoint::Navigation] {
+            let probe = endpoint_url(endpoint.name());
+            assert_eq!(driver.next(), Some(Request::seed(&probe)));
+            let _ = inspect(&mut driver, &probe, NOT_FOUND);
+        }
+        assert_eq!(driver.next(), Some(page_request("users", 1, &users_probe)));
     }
 
     #[test]
@@ -1190,12 +1190,18 @@ mod tests {
         let media_probe = endpoint_url("media");
 
         let _ = inspect(&mut driver, &media_probe, NOT_MODIFIED);
-        assert_eq!(
-            driver.next(),
-            Some(Request::seed(endpoint_url("navigation")))
-        );
         assert_eq!(driver.checkpoint(), resume(Endpoint::Media, 0, Some(2)));
-        let _ = inspect(&mut driver, &endpoint_url("navigation"), NOT_FOUND);
+        for endpoint in [
+            Endpoint::Comments,
+            Endpoint::Users,
+            Endpoint::Categories,
+            Endpoint::Tags,
+            Endpoint::Navigation,
+        ] {
+            let probe = endpoint_url(endpoint.name());
+            assert_eq!(driver.next(), Some(Request::seed(&probe)));
+            let _ = inspect(&mut driver, &probe, NOT_FOUND);
+        }
         assert_eq!(driver.next(), Some(page_request("media", 1, &media_probe)));
 
         let _ = inspect(&mut driver, &page_url("media", 1), NOT_MODIFIED);
@@ -1247,10 +1253,7 @@ mod tests {
         assert_eq!(driver.checkpoint(), resume(Endpoint::Posts, 0, None));
         let validation = inspect(&mut driver, &page_url("posts", 1), ONE_PAGE);
         assert_eq!(validation.error, None);
-        assert_eq!(
-            driver.next(),
-            Some(Request::seed(endpoint_url("categories")))
-        );
+        assert_eq!(driver.next(), Some(Request::seed(endpoint_url("media"))));
     }
 
     #[test]

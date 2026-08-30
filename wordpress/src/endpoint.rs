@@ -179,16 +179,16 @@ pub enum Endpoint {
     Pages,
     /// The `posts` collection.
     Posts,
+    /// The `media` collection.
+    Media,
+    /// The `comments` collection.
+    Comments,
+    /// The `users` collection.
+    Users,
     /// The `categories` collection.
     Categories,
     /// The `tags` collection.
     Tags,
-    /// The `users` collection.
-    Users,
-    /// The `comments` collection.
-    Comments,
-    /// The `media` collection.
-    Media,
     /// The `navigation` collection of block-theme navigation menus.
     Navigation,
 }
@@ -198,11 +198,11 @@ impl Endpoint {
     pub const ALL: [Self; 8] = [
         Self::Pages,
         Self::Posts,
+        Self::Media,
+        Self::Comments,
+        Self::Users,
         Self::Categories,
         Self::Tags,
-        Self::Users,
-        Self::Comments,
-        Self::Media,
         Self::Navigation,
     ];
 
@@ -212,11 +212,11 @@ impl Endpoint {
         match self {
             Self::Pages => "pages",
             Self::Posts => "posts",
+            Self::Media => "media",
+            Self::Comments => "comments",
+            Self::Users => "users",
             Self::Categories => "categories",
             Self::Tags => "tags",
-            Self::Users => "users",
-            Self::Comments => "comments",
-            Self::Media => "media",
             Self::Navigation => "navigation",
         }
     }
@@ -231,8 +231,8 @@ impl fmt::Display for Endpoint {
 /// A name that is not the lowercase name of an [`Endpoint`].
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "unknown WordPress endpoint {0:?}; expected one of pages, posts, categories, tags, users, \
-     comments, media, navigation"
+    "unknown WordPress endpoint {0:?}; expected one of pages, posts, media, comments, users, \
+     categories, tags, navigation"
 )]
 pub struct EndpointParseError(String);
 
