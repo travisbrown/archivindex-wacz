@@ -17,10 +17,10 @@ pub const ROOT_ENDPOINTS: [&str; 8] = [
     "wp-json/wp/v2/menu-locations",
 ];
 
-/// Collection `rest_base` values that endpoint discovery never treats as custom endpoints.
+/// Collection `rest_base` values intended to be excluded from custom endpoint discovery.
 ///
 /// These are the core editor and theme collections `WordPress` registers as post types or
-/// taxonomies but only serves to authenticated users.
+/// taxonomies but only serves to authenticated users. Applying this list is temporarily disabled.
 pub const ENDPOINT_EXCLUSIONS: [&str; 6] = [
     "template-parts",
     "templates",
@@ -108,9 +108,9 @@ impl EndpointType {
 
     /// The `rest_base` values of `entries` that name custom `wp/v2` collections, in order.
     ///
-    /// Entries for supported [`Endpoint`]s, for [`ENDPOINT_EXCLUSIONS`], parameterized route
-    /// patterns, and in other namespaces (whose routes are not under `wp-json/wp/v2/`) are
-    /// skipped. Repeated values are yielded each time they occur.
+    /// Entries for supported [`Endpoint`]s, parameterized route patterns, and other namespaces
+    /// (whose routes are not under `wp-json/wp/v2/`) are skipped. Repeated values are yielded each
+    /// time they occur.
     pub fn custom_endpoints<'a>(
         entries: impl IntoIterator<Item = &'a Self>,
     ) -> impl Iterator<Item = &'a str> {
@@ -119,7 +119,8 @@ impl EndpointType {
             .filter(|entry| {
                 entry.rest_namespace == "wp/v2"
                     && entry.rest_base.parse::<Endpoint>().is_err()
-                    && !ENDPOINT_EXCLUSIONS.contains(&entry.rest_base.as_str())
+                    // Temporarily probe the enumerated exclusions to determine which are public.
+                    // && !ENDPOINT_EXCLUSIONS.contains(&entry.rest_base.as_str())
                     && !entry.rest_base.contains("(?P<")
             })
             .map(|entry| entry.rest_base.as_str())
@@ -389,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_endpoints_keep_response_order_and_skip_known_and_excluded_entries() {
+    fn custom_endpoints_keep_response_order_and_skip_known_and_route_pattern_entries() {
         let response = format!(
             "{{\"video\": {}, \"post\": {}, \"template\": {}, \"product\": {}, \"again\": {}, \
              \"plugin\": {}, \"pattern\": {}, \"menu\": {}}}",
@@ -410,7 +411,7 @@ mod tests {
 
         assert_eq!(
             EndpointType::custom_endpoints(&entries).collect::<Vec<_>>(),
-            ["videos", "product", "videos"]
+            ["videos", "templates", "product", "videos"]
         );
     }
 

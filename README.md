@@ -143,6 +143,18 @@ no recoverable `before` cutoff and must be restarted with `archive`:
 cargo run --bin archivindex-wordpress -- resume-info archives/example.com-1787995936.warc
 ```
 
+After one or more resumed runs, `combine` joins the domain's direct `.warc` and `.warc.gz` files
+from the input directory in filename order. Files must begin with the domain followed by a hyphen,
+as archive session names do. The output is a new `.warc.gz` whose records are independently gzip
+compressed; an existing output is never overwritten:
+
+```bash
+cargo run --bin archivindex-wordpress -- combine \
+  --input archives \
+  --domain example.com \
+  --output example.com.warc.gz
+```
+
 The `lint` command validates a completed collection archive. It accepts plain and gzip-compressed
 WARCs, checks the required API roots and known probes, reconstructs custom probes from the type and
 taxonomy registries, and verifies that successful probes have correctly ordered page and

@@ -975,7 +975,8 @@ mod tests {
     #[test]
     fn registries_advertise_custom_endpoints_probed_via_them() {
         let mut driver = ArchiveDriver::new(site(), before());
-        // Supported and excluded entries are skipped; repeats keep their first registry.
+        // Supported entries are skipped; enumerated exclusions are temporarily kept, and repeats
+        // retain their first registry.
         capture_roots_with(
             &mut driver,
             &registry(&["posts", "videos", "templates", "product"]),
@@ -984,7 +985,15 @@ mod tests {
         let videos = custom("videos", Registry::Types);
         let product = custom("product", Registry::Types);
         let series = custom("series", Registry::Taxonomies);
-        assert_eq!(driver.endpoints()[8..], [videos.clone(), product, series]);
+        assert_eq!(
+            driver.endpoints()[8..],
+            [
+                videos.clone(),
+                custom("templates", Registry::Types),
+                product,
+                series
+            ]
+        );
 
         probe_all(&mut driver, [NOT_FOUND; 8]);
         assert_eq!(driver.to_string(), "example.com/blog: probing videos");
@@ -995,6 +1004,11 @@ mod tests {
         );
         assert_eq!(driver.checkpoint(), Checkpoint::Initial);
         let _ = inspect(&mut driver, &videos_probe, OK);
+        assert_eq!(
+            driver.next(),
+            Some(Request::extra(endpoint_url("templates"), TYPES_URL))
+        );
+        let _ = inspect(&mut driver, &endpoint_url("templates"), NOT_FOUND);
         assert_eq!(
             driver.next(),
             Some(Request::extra(endpoint_url("product"), TYPES_URL))

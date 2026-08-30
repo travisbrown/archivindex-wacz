@@ -25,6 +25,7 @@ bundled = ["archivindex-archiver/bundled"]
 archivindex-archiver.workspace = true
 archivindex-cli-support.workspace = true
 archivindex-wordpress = { version = "0.1.0", path = "../wordpress/" }
+archivindex-warc = { workspace = true, features = ["gzip"] }
 chrono.workspace = true
 clap.workspace = true
 humantime = "2"
@@ -36,6 +37,5 @@ url.workspace = true
 
 [dev-dependencies]
 archivindex-test-support.workspace = true
-archivindex-warc.workspace = true
 flate2.workspace = true
 tempfile.workspace = true

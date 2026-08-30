@@ -1,6 +1,8 @@
 //! A command-line front end for capturing and reading `WordPress` REST API resources.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod combine;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
@@ -34,6 +36,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+use crate::combine::{CombineOptions, combine_archives};
+
 fn main() -> ExitCode {
     let opts = Opts::parse();
     opts.verbosity.init_logging();
@@ -47,6 +51,7 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
     match opts.command {
         Command::Archive(options) => archive_site(&options, quiet),
         Command::Check(options) => check_wp_comments(&options, quiet),
+        Command::Combine(options) => combine_wp_archives(&options, quiet),
         Command::Complete(options) => complete_wp_comments(&options, quiet),
         Command::Lint(options) => lint_wp_archive(&options, quiet),
         Command::Read(options) => read_wp_comments(options),
@@ -54,6 +59,22 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
         Command::ResumeInfo(options) => resume_info(&options, quiet),
         Command::Update(options) => update_comments(&options, quiet),
     }
+}
+
+/// Combine a site's archive and resume-run segments into one gzip-compressed WARC.
+fn combine_wp_archives(options: &CombineOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let summary = combine_archives(options)?;
+    if !quiet {
+        println!(
+            "Combined {} records from {} files for {} into {}",
+            summary.records,
+            summary.files,
+            options.domain,
+            options.output.display()
+        );
+    }
+
+    Ok(CommandOutcome::Success)
 }
 
 /// Validate the capture graph and collection pagination protocol of an archive WARC.
@@ -1090,6 +1111,8 @@ enum Error {
     ResumeInfo(#[from] archivindex_wordpress::resume::Error),
     #[error("WordPress archive lint error: {0}")]
     Lint(#[from] archivindex_wordpress::lint::Error),
+    #[error(transparent)]
+    Combine(#[from] combine::Error),
     #[error("cannot read comment update input {}: {source}", path.display())]
     UpdateInputRead {
         path: PathBuf,
@@ -1158,6 +1181,9 @@ enum Command {
     /// Check that every advertised comments page has a qualifying response or revisit record.
     #[clap(name = "check-comments")]
     Check(CheckCommentsOptions),
+    /// Combine a site's archive and resume-run segments into one gzip-compressed WARC.
+    #[clap(name = "combine")]
+    Combine(CombineOptions),
     /// Capture pages missing from a comments WARC into a new WARC.
     #[clap(name = "complete-comments")]
     Complete(CompleteCommentsOptions),
@@ -1368,10 +1394,11 @@ mod tests {
     use flate2::write::GzEncoder;
 
     use super::{
-        ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, Command, CommentRun,
-        CommentRunOptions, Config, Error, Opts, ResumeInfoOptions, SharedArchiveDriver,
-        capture_comment_run, check_wp_comments, comment_update_inputs, load_config_for_output,
-        page_total_change_warning, resume_archive, resume_command, resume_info, run_archive,
+        ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, CombineOptions, Command,
+        CommentRun, CommentRunOptions, Config, Error, Opts, ResumeInfoOptions, SharedArchiveDriver,
+        capture_comment_run, check_wp_comments, combine_archives, comment_update_inputs,
+        load_config_for_output, page_total_change_warning, resume_archive, resume_command,
+        resume_info, run_archive,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1648,6 +1675,85 @@ mod tests {
         };
 
         assert_eq!(options.warc, PathBuf::from("archives/site.warc.gz"));
+    }
+
+    #[test]
+    fn combine_command_reads_its_domain_and_paths() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "combine",
+            "--input",
+            "archives",
+            "--domain",
+            "example.com",
+            "--output",
+            "example.com.warc.gz",
+        ])
+        .expect("valid options");
+        let Command::Combine(options) = options.command else {
+            panic!("expected the combine command");
+        };
+
+        assert_eq!(options.input, PathBuf::from("archives"));
+        assert_eq!(options.domain, "example.com");
+        assert_eq!(options.output, PathBuf::from("example.com.warc.gz"));
+    }
+
+    #[test]
+    fn combine_joins_plain_and_gzip_resume_segments_in_filename_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let input = directory.path().join("archives");
+        std::fs::create_dir(&input)?;
+        write_update_warc(
+            &input.join("example.com-200.warc.gz"),
+            "https://example.com/",
+            "2026-08-20T00:00:02",
+            true,
+        )?;
+        write_update_warc(
+            &input.join("example.com-100.warc"),
+            "https://example.com/",
+            "2026-08-20T00:00:01",
+            false,
+        )?;
+        write_update_warc(
+            &input.join("other.example-150.warc"),
+            "https://other.example/",
+            "2026-08-20T00:00:03",
+            false,
+        )?;
+        let output = directory.path().join("example.com.warc.gz");
+
+        let summary = combine_archives(&CombineOptions {
+            input,
+            domain: "example.com".to_owned(),
+            output: output.clone(),
+        })?;
+
+        assert_eq!((summary.files, summary.records), (2, 2));
+        assert_eq!(&std::fs::read(&output)?[..2], &[0x1f, 0x8b]);
+        let located = WarcReader::from_path_gzip(&output)?
+            .iter_raw_records()
+            .collect::<Vec<_>>();
+        assert!(located.iter().all(|record| record.frame().is_some()));
+        let bodies = located
+            .into_iter()
+            .map(|record| record.value.map(|record| record.body))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies[0]
+                .windows(19)
+                .any(|part| part == b"2026-08-20T00:00:01")
+        );
+        assert!(
+            bodies[1]
+                .windows(19)
+                .any(|part| part == b"2026-08-20T00:00:02")
+        );
+
+        Ok(())
     }
 
     #[test]
