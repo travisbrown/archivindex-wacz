@@ -130,6 +130,17 @@ cargo run --bin archivindex-wordpress -- resume-archive \
   --custom-taxonomy series
 ```
 
+If the continuation command from an earlier run is no longer available, `resume-info` recovers it
+from that run's plain or gzip-compressed WARC. It reconstructs the custom endpoint list from the
+registry captures and replays only capture groups with a linked request, response or revisit, and
+metadata record. Corrupted or truncated groups are warned about, while the printed command rolls
+back to the last complete capture. A WARC that stopped before recording any paginated request has
+no recoverable `before` cutoff and must be restarted with `archive`:
+
+```bash
+cargo run --bin archivindex-wordpress -- resume-info archives/example.com-1787995936.warc
+```
+
 ### WordPress comments
 
 The `read-comments` command writes the archived comments as JSON Lines in ascending comment ID

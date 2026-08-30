@@ -11,12 +11,14 @@
 //! * [`complete`]: capturing pages missing from an archived comment collection
 //! * [`endpoint`]: names of REST API v2 collection endpoints
 //! * [`read`]: reading archived comments and checking page coverage
+//! * [`resume`]: recovering an archive checkpoint from a WARC file
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod archive;
 pub mod complete;
 pub mod endpoint;
 pub mod read;
+pub mod resume;
 
 #[cfg(test)]
 mod strategies;

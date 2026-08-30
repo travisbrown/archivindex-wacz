@@ -27,6 +27,7 @@ use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
 };
+use archivindex_wordpress::resume::inspect_archive;
 use archivindex_wordpress::{CommentDriver, CommentProgress};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
@@ -48,6 +49,7 @@ fn run(opts: Opts) -> Result<CommandOutcome, Error> {
         Command::Complete(options) => complete_wp_comments(&options, quiet),
         Command::Read(options) => read_wp_comments(options),
         Command::ResumeArchive(options) => resume_archive(&options, quiet),
+        Command::ResumeInfo(options) => resume_info(&options, quiet),
         Command::Update(options) => update_comments(&options, quiet),
     }
 }
@@ -78,6 +80,52 @@ fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<Command
         ArchiveDriver::resume(options.run.base.clone(), options.before, resumption, custom);
 
     run_archive(driver, &options.run, options.before, quiet)
+}
+
+/// Recover and print the command continuing a collection archive WARC.
+fn resume_info(options: &ResumeInfoOptions, quiet: bool) -> Result<CommandOutcome, Error> {
+    let info = inspect_archive(&options.warc)?;
+    for warning in &info.warnings {
+        log::warn!("{warning}");
+    }
+
+    match info.checkpoint {
+        Checkpoint::Finished => {
+            if !quiet {
+                println!("{} is complete", options.warc.display());
+            }
+            if info.warnings.is_empty() {
+                Ok(CommandOutcome::Success)
+            } else {
+                Ok(CommandOutcome::ReportedProblems)
+            }
+        }
+        Checkpoint::Resume(resumption) => {
+            let before = info
+                .before
+                .ok_or_else(|| Error::MissingResumeCutoff(options.warc.clone()))?;
+            let parent = options
+                .warc
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let run = ArchiveRunOptions {
+                config: None,
+                base: info.site,
+                output: parent.to_owned(),
+                session_name: None,
+                revisit_index: None,
+                limit: None,
+                cookie: None,
+            };
+            println!(
+                "{}",
+                resume_command(&run, before, &resumption, &info.endpoints)
+            );
+            Ok(CommandOutcome::ReportedProblems)
+        }
+        Checkpoint::Initial => Err(Error::InitialArchiveCannotResume(options.warc.clone())),
+    }
 }
 
 /// Run an archiving session to a new plain WARC in the output directory.
@@ -1001,6 +1049,8 @@ enum Error {
     ReadComments(#[from] archivindex_wordpress::read::Error),
     #[error("WordPress comment completion error: {0}")]
     CompleteComments(#[from] archivindex_wordpress::complete::Error),
+    #[error("WordPress archive resume inspection error: {0}")]
+    ResumeInfo(#[from] archivindex_wordpress::resume::Error),
     #[error("cannot read comment update input {}: {source}", path.display())]
     UpdateInputRead {
         path: PathBuf,
@@ -1021,6 +1071,17 @@ enum Error {
         .0.display()
     )]
     InitialRequestsIncomplete(PathBuf),
+    #[error(
+        "the archive in {} stopped before its initial requests finished and cannot be resumed; \
+         start a new archive instead",
+        .0.display()
+    )]
+    InitialArchiveCannotResume(PathBuf),
+    #[error(
+        "cannot recover the original before cutoff from {}; no paginated request was recorded",
+        .0.display()
+    )]
+    MissingResumeCutoff(PathBuf),
     #[error(
         "unknown endpoint {0:?}; pass a supported endpoint name or one listed with --custom or \
          --custom-taxonomy"
@@ -1067,6 +1128,9 @@ enum Command {
     /// Continue an archive from the checkpoint an earlier run reported.
     #[clap(name = "resume-archive")]
     ResumeArchive(ResumeArchiveOptions),
+    /// Print the command continuing an incomplete collection-archive WARC.
+    #[clap(name = "resume-info")]
+    ResumeInfo(ResumeInfoOptions),
     /// Capture new comments in a window overlapping an existing comments WARC.
     #[clap(name = "update-comments")]
     Update(UpdateCommentsOptions),
@@ -1132,6 +1196,14 @@ struct ResumeArchiveOptions {
     /// reported order.
     #[clap(long, value_name = "ENDPOINT")]
     custom_taxonomy: Vec<String>,
+}
+
+/// Options for recovering continuation information from an archive WARC.
+#[derive(Debug, clap::Args)]
+struct ResumeInfoOptions {
+    /// Path of the plain or gzip-compressed WARC file to inspect.
+    #[clap(value_hint = clap::ValueHint::FilePath)]
+    warc: PathBuf,
 }
 
 impl ResumeArchiveOptions {
@@ -1238,6 +1310,7 @@ mod tests {
     use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
     use archivindex_wordpress::endpoint::{Collection, Endpoint, Registry};
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
+    use archivindex_wordpress::resume::inspect_archive;
     use chrono::{DateTime, Utc};
     use clap::{CommandFactory, Parser};
     use flate2::Compression;
@@ -1245,9 +1318,9 @@ mod tests {
 
     use super::{
         ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, Command, CommentRun,
-        CommentRunOptions, Config, Error, Opts, SharedArchiveDriver, capture_comment_run,
-        check_wp_comments, comment_update_inputs, load_config_for_output,
-        page_total_change_warning, resume_archive, resume_command, run_archive,
+        CommentRunOptions, Config, Error, Opts, ResumeInfoOptions, SharedArchiveDriver,
+        capture_comment_run, check_wp_comments, comment_update_inputs, load_config_for_output,
+        page_total_change_warning, resume_archive, resume_command, resume_info, run_archive,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1572,6 +1645,21 @@ mod tests {
                 Err(Error::UnknownEndpoint(name)) if name == endpoint
             ));
         }
+    }
+
+    #[test]
+    fn resume_info_command_takes_a_warc_path() {
+        let options = Opts::try_parse_from([
+            "archivindex-wordpress",
+            "resume-info",
+            "archives/site.warc.gz",
+        ])
+        .expect("valid options");
+
+        let Command::ResumeInfo(options) = options.command else {
+            panic!("expected the resume information command");
+        };
+        assert_eq!(options.warc, PathBuf::from("archives/site.warc.gz"));
     }
 
     #[test]
@@ -2083,6 +2171,17 @@ mod tests {
 
         let warc = output.join("site-archive.warc");
         assert!(std::fs::read(&warc)?.starts_with(b"WARC/"));
+        let resume = inspect_archive(&warc)?;
+        assert_eq!(resume.checkpoint, Checkpoint::Finished);
+        assert!(resume.warnings.is_empty());
+        assert_eq!(resume.before, Some(before()));
+        assert_eq!(
+            resume.endpoints[8..],
+            [
+                custom("videos", Registry::Types),
+                custom("series", Registry::Taxonomies),
+            ]
+        );
         let vias = metadata_vias(&warc)?;
         let seeds = vias.iter().filter(|(_, via)| via.is_none()).count();
         assert_eq!(seeds, 16);
@@ -2165,6 +2264,15 @@ mod tests {
                 (page("videos", 1), Some(page("videos", 1))),
             ]
         );
+        let resume = inspect_archive(directory.path().join("site-resumed.warc"))?;
+        assert_eq!(resume.checkpoint, Checkpoint::Finished);
+        assert!(resume.warnings.is_empty());
+        assert_eq!(resume.before, Some(before()));
+        assert!(
+            resume
+                .endpoints
+                .contains(&custom("videos", Registry::Types))
+        );
 
         Ok(())
     }
@@ -2186,6 +2294,88 @@ mod tests {
 
         assert_eq!(outcome, CommandOutcome::ReportedProblems);
         assert_eq!(server.join().expect("the local server").len(), 19);
+
+        let warc = directory.path().join("site-limited.warc");
+        let resume = inspect_archive(&warc)?;
+        assert_eq!(
+            resume.checkpoint,
+            Checkpoint::Resume(resumption(Endpoint::Pages, 1, Some(2)))
+        );
+        assert_eq!(resume.before, Some(before()));
+        assert!(resume.warnings.is_empty());
+        assert!(
+            resume
+                .endpoints
+                .contains(&custom("videos", Registry::Types))
+        );
+        assert!(
+            resume
+                .endpoints
+                .contains(&custom("series", Registry::Taxonomies))
+        );
+
+        assert_eq!(
+            resume_info(&ResumeInfoOptions { warc }, true)?,
+            CommandOutcome::ReportedProblems
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_info_warns_and_rolls_back_an_incomplete_capture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_site(19)?;
+        let directory = tempfile::tempdir()?;
+        let mut options = archive_options(port, directory.path(), "site-damaged");
+        options.limit = Some(19);
+        let _ = run_archive(
+            ArchiveDriver::new(options.base.clone(), before()),
+            &options,
+            before(),
+            true,
+        )?;
+        assert_eq!(server.join().expect("the local server").len(), 19);
+
+        let source = directory.path().join("site-damaged.warc");
+        let damaged = directory.path().join("request-only.warc");
+        let mut records = WarcReader::from_path(&source)?
+            .iter_records::<NoExtension>()
+            .records()
+            .collect::<Result<Vec<_>, _>>()?;
+        let last_request = records
+            .iter()
+            .rposition(|record| matches!(record, Record::Request { .. }))
+            .expect("a request record");
+        records.truncate(last_request + 1);
+        let mut bytes = Vec::new();
+        let mut writer = WarcWriter::new(&mut bytes);
+        for record in records {
+            writer.write(&record.into_raw()?)?;
+        }
+        writer.flush()?;
+        std::fs::write(&damaged, bytes)?;
+
+        let resume = inspect_archive(&damaged)?;
+        assert_eq!(
+            resume.checkpoint,
+            Checkpoint::Resume(resumption(Endpoint::Pages, 0, None))
+        );
+        assert_eq!(resume.before, Some(before()));
+        assert!(resume.warnings.iter().any(|warning| {
+            warning.contains("missing response or revisit and metadata")
+                && warning.contains("pages")
+        }));
+        assert!(
+            resume
+                .endpoints
+                .contains(&custom("videos", Registry::Types))
+        );
+        assert!(
+            resume
+                .endpoints
+                .contains(&custom("series", Registry::Taxonomies))
+        );
 
         Ok(())
     }
