@@ -22,7 +22,9 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
-use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
+use archivindex_wordpress::archive::{
+    ArchiveDriver, Checkpoint, PaginationProgress, Resumption, Site,
+};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
 use archivindex_wordpress::endpoint::{Collection, Registry};
 use archivindex_wordpress::lint::{Severity, lint_archive};
@@ -210,8 +212,8 @@ fn run_archive(
         archiver = archiver.cookie_for(options.base.root().as_str(), cookie)?;
     }
 
+    let progress = Rc::new(RefCell::new(ArchiveProgress::new(&driver)));
     let state = Rc::new(RefCell::new(ArchiveRunState::new(driver)));
-    let progress = Rc::new(RefCell::new(ArchiveProgress::new(options.base.base())));
     let event_progress = Rc::clone(&progress);
     let event_state = Rc::clone(&state);
     // An interrupt ends the session cleanly, so its captures are published and the checkpoint
@@ -300,36 +302,42 @@ struct ArchiveProgress {
     multi: MultiProgress,
     probing: ProgressBar,
     pagination: BTreeMap<String, ProgressBar>,
-    initialized: bool,
 }
 
 impl ArchiveProgress {
-    fn new(base: &str) -> Self {
+    fn new(driver: &ArchiveDriver) -> Self {
         let multi = MultiProgress::new();
-        let probing = multi.add(spinner(format!("Archiving {base}"), None));
-
-        Self {
+        let probing = multi.add(spinner(driver.to_string(), None));
+        let mut progress = Self {
             multi,
             probing,
             pagination: BTreeMap::new(),
-            initialized: false,
-        }
+        };
+        let initial = driver.pagination_progress();
+        progress.add_bars(&initial);
+        progress.update_bars(initial);
+
+        progress
     }
 
     fn update(&mut self, driver: &ArchiveDriver) {
-        if !driver.probes_finished() {
-            self.probing.set_message(driver.to_string());
-            return;
-        }
         let progress = driver.pagination_progress();
-        if !self.initialized {
+        if driver.probes_finished() {
             self.probing.finish_and_clear();
-            let style = ProgressStyle::with_template(
-                "{msg:24} [{bar:40.cyan/blue}] {pos:>3}/{len:3} pages",
-            )
-            .expect("invariant violation: the archive progress template is well formed")
-            .progress_chars("=>-");
-            for endpoint in &progress {
+            self.add_bars(&progress);
+        } else {
+            self.probing.set_message(driver.to_string());
+        }
+        self.update_bars(progress);
+    }
+
+    fn add_bars(&mut self, progress: &[PaginationProgress]) {
+        let style =
+            ProgressStyle::with_template("{msg:24} [{bar:40.cyan/blue}] {pos:>3}/{len:3} pages")
+                .expect("invariant violation: the archive progress template is well formed")
+                .progress_chars("=>-");
+        for endpoint in progress {
+            if !self.pagination.contains_key(endpoint.collection.name()) {
                 let bar = self.multi.add(ProgressBar::new(
                     u64::try_from(endpoint.total_pages).unwrap_or(u64::MAX),
                 ));
@@ -337,9 +345,10 @@ impl ArchiveProgress {
                 self.pagination
                     .insert(endpoint.collection.name().to_owned(), bar);
             }
-            self.initialized = true;
         }
+    }
 
+    fn update_bars(&self, progress: impl IntoIterator<Item = PaginationProgress>) {
         for endpoint in progress {
             if let Some(bar) = self.pagination.get(endpoint.collection.name()) {
                 bar.set_message(endpoint.collection.to_string());
@@ -1389,11 +1398,11 @@ mod tests {
     use flate2::write::GzEncoder;
 
     use super::{
-        ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, CombineOptions, Command,
-        CommentRun, CommentRunOptions, Config, Error, Opts, ResumeInfoOptions, SharedArchiveDriver,
-        capture_comment_run, check_wp_comments, combine_archives, comment_update_inputs,
-        load_config_for_output, page_total_change_warning, resume_archive, resume_command,
-        resume_info, run_archive,
+        ArchiveProgress, ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, CombineOptions,
+        Command, CommentRun, CommentRunOptions, Config, Error, Opts, ResumeInfoOptions,
+        SharedArchiveDriver, capture_comment_run, check_wp_comments, combine_archives,
+        comment_update_inputs, load_config_for_output, page_total_change_warning, resume_archive,
+        resume_command, resume_info, run_archive,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1955,6 +1964,43 @@ mod tests {
             state.borrow().durable,
             Checkpoint::Resume(resumption(Endpoint::Users, 0, None))
         );
+    }
+
+    #[test]
+    fn resumed_archive_progress_starts_at_its_checkpoint() {
+        let mut driver = ArchiveDriver::resume(
+            Site::parse("example.com").expect("a site"),
+            before(),
+            resumption(Endpoint::Comments, 7, Some(8)),
+            Vec::new(),
+        );
+
+        let mut progress = ArchiveProgress::new(&driver);
+        let comments = progress
+            .pagination
+            .get("comments")
+            .expect("the resumed collection has a progress bar");
+        assert_eq!(comments.position(), 7);
+        assert_eq!(comments.length(), Some(8));
+
+        let url = format!(
+            "https://example.com/wp-json/wp/v2/comments?before={BEFORE}&orderby=id&order=asc\
+             &page=8&per_page=100"
+        );
+        let response = b"HTTP/1.1 200 OK\r\nX-WP-TotalPages: 8\r\n\r\n";
+        let capture = Capture::new(&url, &url, b"[]", response).expect("a complete response");
+        let _ = driver.inspect(&capture);
+        progress.update(&driver);
+
+        assert_eq!(
+            progress
+                .pagination
+                .get("comments")
+                .expect("the resumed progress bar remains present")
+                .position(),
+            8
+        );
+        progress.finish();
     }
 
     #[test]

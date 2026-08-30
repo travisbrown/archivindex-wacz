@@ -148,14 +148,15 @@ pub struct Resumption {
     pub total_pages: Option<usize>,
 }
 
-/// Progress through one exposed collection whose probe advertised an item count.
+/// Progress through one exposed collection whose probe or resume checkpoint supplied a page
+/// count.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaginationProgress {
     /// The collection being paged.
     pub collection: Collection,
     /// Pages completed in the current pass.
     pub page: usize,
-    /// Page count derived from the collection probe's item total at the paging size.
+    /// Page count derived from the collection probe's item total or carried by a resume checkpoint.
     pub total_pages: usize,
 }
 
@@ -188,7 +189,7 @@ pub struct ArchiveDriver {
     /// Index into `endpoints` of the next collection to probe.
     next_probe: usize,
     probed: Vec<(Collection, u16)>,
-    /// Exposed collections whose probes advertised an item count, in probe order.
+    /// Exposed collections whose probes or resume checkpoints supplied a page count, in order.
     pagination: Vec<(Collection, usize)>,
     /// Endpoints whose probe succeeded, awaiting paging in order.
     pending: VecDeque<Series>,
@@ -337,6 +338,9 @@ impl ArchiveDriver {
             driver.resume_total_pages = total_pages;
         } else {
             driver.next_probe = index + 1;
+            if let Some(total_pages) = total_pages {
+                driver.pagination.push((endpoint.clone(), total_pages));
+            }
             driver.current = Some(Series::resume(endpoint, last_page, total_pages));
         }
 
@@ -390,7 +394,7 @@ impl ArchiveDriver {
         self.next_root == ROOT_ENDPOINTS.len() && self.next_probe == self.endpoints.len()
     }
 
-    /// Progress for exposed collections whose probes advertised `X-WP-Total`.
+    /// Progress for exposed collections whose probes or resume checkpoints supplied a page count.
     ///
     /// A collection no longer current or pending is reported at its advertised total.
     #[must_use]
@@ -881,6 +885,25 @@ mod tests {
             }
         );
         assert_eq!(driver.pagination_progress()[1].page, 0);
+    }
+
+    #[test]
+    fn a_resumed_series_reports_its_checkpoint_as_pagination_progress() {
+        let driver = ArchiveDriver::resume(
+            site(),
+            before(),
+            resumption(Endpoint::Comments, 7, Some(8)),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            driver.pagination_progress(),
+            [PaginationProgress {
+                collection: Endpoint::Comments.into(),
+                page: 7,
+                total_pages: 8,
+            }]
+        );
     }
 
     #[test]

@@ -928,17 +928,17 @@ fn lint_pass(
         );
     }
 
-    if let Some(total) = expected_total {
-        if captures.len() != total.max(1) {
-            error(
-                report,
-                format!(
-                    "{name} {pass} pass has {} captures, expected {} for {total} advertised pages",
-                    captures.len(),
-                    total.max(1)
-                ),
-            );
-        }
+    if let Some(total) = expected_total
+        && captures.len() != total.max(1)
+    {
+        error(
+            report,
+            format!(
+                "{name} {pass} pass has {} captures, expected {} for {total} advertised pages",
+                captures.len(),
+                total.max(1)
+            ),
+        );
     }
 }
 
