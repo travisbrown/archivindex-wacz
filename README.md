@@ -99,40 +99,42 @@ load a published WARC into it with `archivindex-warc load-revisit-index`.
 A run that stops after the initial captures—at the capture limit, after a page exhausts its
 retries, or on an interrupt (`Ctrl-C`), which finishes the capture in progress and publishes the
 WARC—prints the `resume-archive` command that continues it. A failure before those captures are
-finished is fatal; the partial WARC is published, but a new `archive` must start over. The
-resumption is identified by the endpoint being paged, the last durably written page (zero when the
-endpoint must restart), the most recently advertised page count when known, and the original
-`before` cutoff, so a resumed run requests the same page URLs. It continues that endpoint, probes
-and pages the endpoints after it, and writes a new file in the output directory under a fresh
-default session name. The first resumed page is a session extra whose metadata `via` names the last
-page of the earlier run, so the chain of pages continues across WARC files. A resumed run does not
-read the registries again, so the printed command repeats each custom collection with `--custom`
-(from the types) or `--custom-taxonomy` (from the taxonomies) in the order they were discovered;
-`--endpoint` names a supported endpoint or one of those custom collections. The printed command is
-shell-quoted and repeats `--config`. It repeats `--revisit-index` only when it also has a page count
-that makes conditional 304 responses resumable. It never repeats `--cookie`, which must be added
-again by hand:
+finished is fatal; the partial WARC is published, but a new `archive` must start over.
+
+`resume-archive` reads every direct `.warc` and `.warc.gz` file in the output directory whose
+filename begins with `--session-name`, in lexicographic order. The first file supplies the roots,
+all known and custom endpoint probes, their statuses and counts, and the site; the paginated URLs
+supply the original `before` cutoff. Each later file advances the durable checkpoint. The
+continuation therefore does
+not repeat roots, registries, or endpoint probes: it requests the next page of the interrupted
+series, then pages the remaining endpoints whose original probes succeeded. Its first page has a
+metadata `via` link to the last page in the preceding file, so pagination chains remain continuous
+across segments. New continuation filenames begin with the same session name and sort after the
+older files.
+
+In the edge case where a run stops immediately after its probes and has no paginated URL yet, its
+printed command includes `--before` because that value cannot be reconstructed from the WARC.
+
+For a default archive session, the printed session name is the site's filename-safe base, which
+also matches legacy timestamp-named continuation files. When `archive --session-name` was used,
+that exact name is retained. The printed command is shell-quoted and repeats `--config` and
+`--revisit-index`; it never repeats `--cookie`, which must be added again by hand:
 
 ```bash
 cargo run --bin archivindex-wordpress -- resume-archive \
   --config site.toml \
-  --base example.com \
   --output archives \
+  --session-name example.com \
   --revisit-index site-state.sqlite3 \
-  --endpoint comments \
-  --last-page 11 \
-  --total-pages 19 \
-  --before 2026-08-20T00:00:00Z \
-  --custom videos \
-  --custom-taxonomy series
+  --cookie 'browser-cookie-here'
 ```
 
-If the continuation command from an earlier run is no longer available, `resume-info` recovers it
-from that run's plain or gzip-compressed WARC. It reconstructs the custom endpoint list from the
-registry captures and replays only capture groups with a linked request, response or revisit, and
-metadata record. Corrupted or truncated groups are warned about, while the printed command rolls
-back to the last complete capture. A WARC that stopped before recording any paginated request has
-no recoverable `before` cutoff and must be restarted with `archive`:
+If the continuation command from an earlier run is no longer available, `resume-info` prints the
+session-based command from a plain or gzip-compressed WARC. It replays only capture groups with a
+linked request, response or revisit, and metadata record. Corrupted or truncated groups are warned
+about, while the recovered checkpoint rolls back to the last complete capture. A WARC that stopped
+before recording any paginated request has no recoverable `before` cutoff and must be restarted
+with `archive`:
 
 ```bash
 cargo run --bin archivindex-wordpress -- resume-info archives/example.com-1787995936.warc

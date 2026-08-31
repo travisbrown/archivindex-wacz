@@ -160,6 +160,17 @@ pub struct PaginationProgress {
     pub total_pages: usize,
 }
 
+/// The archived result of one collection probe, sufficient to resume without probing it again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeResult {
+    /// The supported or registry-advertised collection that was probed.
+    pub collection: Collection,
+    /// The probe's HTTP response status.
+    pub status: u16,
+    /// Page count derived from `X-WP-Total`, when the probe supplied a valid item count.
+    pub total_pages: Option<usize>,
+}
+
 /// Archive a site's collections one endpoint at a time through a session.
 ///
 /// An archive begins with the API root resources and a bare probe of every [`Endpoint`], all
@@ -347,6 +358,70 @@ impl ArchiveDriver {
         driver
     }
 
+    /// Continue from a checkpoint using probe results recovered from the initial WARC.
+    ///
+    /// Unlike [`resume`](Self::resume), this constructor does not probe the checkpoint collection
+    /// or any collection after it. Successful later probes are restored directly as pending
+    /// pagination series.
+    #[must_use]
+    pub fn resume_with_probes(
+        site: Site,
+        before: DateTime<Utc>,
+        resumption: Resumption,
+        probes: Vec<ProbeResult>,
+    ) -> Self {
+        let Resumption {
+            endpoint,
+            last_page,
+            total_pages,
+        } = resumption;
+        let mut driver = Self::new(site, before);
+        driver.initial = false;
+        driver.next_root = ROOT_ENDPOINTS.len();
+        driver.endpoints = probes
+            .iter()
+            .map(|probe| probe.collection.clone())
+            .collect();
+        let index = driver
+            .endpoints
+            .iter()
+            .position(|collection| collection.name() == endpoint.name())
+            .unwrap_or_else(|| {
+                driver.endpoints.push(endpoint.clone());
+                driver.endpoints.len() - 1
+            });
+        driver.next_probe = driver.endpoints.len();
+        driver.pagination = probes
+            .iter()
+            .filter_map(|probe| {
+                probe
+                    .total_pages
+                    .filter(|_| probe_succeeded(probe.status))
+                    .map(|pages| (probe.collection.clone(), pages))
+            })
+            .collect();
+        if let Some(total_pages) = total_pages {
+            if let Some((_, pages)) = driver
+                .pagination
+                .iter_mut()
+                .find(|(collection, _)| collection.name() == endpoint.name())
+            {
+                *pages = total_pages;
+            } else {
+                driver.pagination.push((endpoint.clone(), total_pages));
+            }
+        }
+        driver.pending = probes
+            .into_iter()
+            .skip(index + 1)
+            .filter(|probe| probe_succeeded(probe.status))
+            .map(|probe| Series::new(probe.collection, None))
+            .collect();
+        driver.current = Some(Series::resume(endpoint, last_page, total_pages));
+
+        driver
+    }
+
     /// Where a run stopped now would be continued from.
     #[must_use]
     pub fn checkpoint(&self) -> Checkpoint {
@@ -386,6 +461,23 @@ impl ArchiveDriver {
     #[must_use]
     pub fn probed(&self) -> &[(Collection, u16)] {
         &self.probed
+    }
+
+    /// Probe results captured by this run, with page counts derived for progress reporting.
+    #[must_use]
+    pub fn probe_results(&self) -> Vec<ProbeResult> {
+        self.probed
+            .iter()
+            .map(|(collection, status)| ProbeResult {
+                collection: collection.clone(),
+                status: *status,
+                total_pages: self
+                    .pagination
+                    .iter()
+                    .find(|(candidate, _)| candidate.name() == collection.name())
+                    .map(|(_, pages)| *pages),
+            })
+            .collect()
     }
 
     /// Whether every collection probe for this run has been inspected.
@@ -484,7 +576,7 @@ impl ArchiveDriver {
         // UI progress from its item total at our 100-item page size instead; only a count carried
         // from an earlier paged response can drive the resumed series itself.
         let total_pages = self.resume_total_pages.take();
-        if (200..300).contains(&capture.status) || capture.status == 304 {
+        if probe_succeeded(capture.status) {
             if let Some(advertised) = capture
                 .header("x-wp-total")
                 .and_then(|value| value.parse::<usize>().ok())
@@ -519,6 +611,10 @@ impl ArchiveDriver {
             Err(message) => Inspection::error(message),
         }
     }
+}
+
+const fn probe_succeeded(status: u16) -> bool {
+    (status >= 200 && status < 300) || status == 304
 }
 
 impl Driver for ArchiveDriver {

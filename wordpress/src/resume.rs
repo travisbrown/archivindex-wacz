@@ -16,7 +16,7 @@ use archivindex_warc::record::{FieldsBlock, Record, http, payload};
 use chrono::{DateTime, Utc};
 use url::Url;
 
-use crate::archive::{ArchiveDriver, Checkpoint, Resumption, Site, SiteError};
+use crate::archive::{ArchiveDriver, Checkpoint, ProbeResult, Resumption, Site, SiteError};
 use crate::endpoint::{Collection, Endpoint, EndpointType, ROOT_ENDPOINTS, Registry};
 
 /// The recovered state of one collection-archive WARC.
@@ -30,6 +30,8 @@ pub struct ResumeInfo {
     pub checkpoint: Checkpoint,
     /// Supported and custom collections in their final probing order.
     pub endpoints: Vec<Collection>,
+    /// Probe results captured in or restored while replaying this WARC.
+    pub probes: Vec<ProbeResult>,
     /// Problems found while linking or replaying records.
     pub warnings: Vec<String>,
 }
@@ -84,6 +86,24 @@ pub enum Error {
 /// Returns [`Error`] when the file cannot be read, is not a semantic WARC, or does not contain
 /// enough `WordPress` request information to identify the archive traversal.
 pub fn inspect_archive(path: impl AsRef<Path>) -> Result<ResumeInfo, Error> {
+    inspect_archive_with_restored_probes(path, &[], None)
+}
+
+/// Inspect one continuation WARC using probe results recovered from its archive's initial WARC.
+///
+/// Restored probes let replay advance directly from the continued collection to later successful
+/// collections, including for continuation files produced without redundant bare probes.
+/// `before` supplies the initial segment's cutoff when this segment contains no paginated URL
+/// from which to recover it.
+///
+/// # Errors
+///
+/// Returns [`Error`] under the same conditions as [`inspect_archive`].
+pub fn inspect_archive_with_restored_probes(
+    path: impl AsRef<Path>,
+    probes: &[ProbeResult],
+    before: Option<DateTime<Utc>>,
+) -> Result<ResumeInfo, Error> {
     let path = path.as_ref();
     let gzip = crate::read::is_gzip_file(path).map_err(|source| Error::Io {
         path: path.to_owned(),
@@ -94,13 +114,13 @@ pub fn inspect_archive(path: impl AsRef<Path>) -> Result<ResumeInfo, Error> {
             path: path.to_owned(),
             source,
         })?;
-        inspect_reader(reader, path)
+        inspect_reader(reader, path, probes, before)
     } else {
         let reader = WarcReader::from_path(path).map_err(|source| Error::Io {
             path: path.to_owned(),
             source,
         })?;
-        inspect_reader(reader, path)
+        inspect_reader(reader, path, probes, before)
     }
 }
 
@@ -142,7 +162,12 @@ impl CaptureGroup {
     }
 }
 
-fn inspect_reader<R: BufRead>(reader: WarcReader<R>, path: &Path) -> Result<ResumeInfo, Error> {
+fn inspect_reader<R: BufRead>(
+    reader: WarcReader<R>,
+    path: &Path,
+    restored_probes: &[ProbeResult],
+    restored_before: Option<DateTime<Utc>>,
+) -> Result<ResumeInfo, Error> {
     let (groups, mut warnings) = collect_groups(reader, path)?;
     let site = groups
         .iter()
@@ -166,16 +191,34 @@ fn inspect_reader<R: BufRead>(reader: WarcReader<R>, path: &Path) -> Result<Resu
         .iter()
         .find(|group| belongs_to_site(&group.url, &site))
         .ok_or_else(|| Error::NoWordPressRequests(path.to_owned()))?;
-    let mut driver = initial_driver(
-        first,
-        &groups,
-        site.clone(),
-        before.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
-        &custom,
-    )?;
+    let before_or_epoch = before
+        .or(restored_before)
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    let mut driver = if restored_probes.is_empty() || first.url == format!("{}wp-json", site.root())
+    {
+        initial_driver(first, &groups, site.clone(), before_or_epoch, &custom)?
+    } else {
+        let resumption = starting_resumption(
+            first,
+            &groups,
+            &site,
+            restored_probes.iter().map(|probe| &probe.collection),
+        )?;
+        ArchiveDriver::resume_with_probes(
+            site.clone(),
+            before_or_epoch,
+            resumption,
+            restored_probes.to_vec(),
+        )
+    };
 
     replay(&groups, &mut driver, &mut warnings);
     let checkpoint = driver.checkpoint();
+    let probes = if restored_probes.is_empty() {
+        driver.probe_results()
+    } else {
+        restored_probes.to_vec()
+    };
     let endpoints = merge_endpoints(driver.endpoints(), &custom);
 
     Ok(ResumeInfo {
@@ -183,6 +226,7 @@ fn inspect_reader<R: BufRead>(reader: WarcReader<R>, path: &Path) -> Result<Resu
         before,
         checkpoint,
         endpoints,
+        probes,
         warnings,
     })
 }
@@ -429,10 +473,29 @@ fn initial_driver(
     if first.url == format!("{}wp-json", site.root()) {
         return Ok(ArchiveDriver::new(site, before));
     }
-    let name = collection_name(&first.url, &site)
+    let resumption = starting_resumption(first, groups, &site, custom.iter())?;
+    Ok(ArchiveDriver::resume(
+        site,
+        before,
+        resumption,
+        custom.to_vec(),
+    ))
+}
+
+fn starting_resumption<'a>(
+    first: &CaptureGroup,
+    groups: &[CaptureGroup],
+    site: &Site,
+    endpoints: impl IntoIterator<Item = &'a Collection>,
+) -> Result<Resumption, Error> {
+    let name = collection_name(&first.url, site)
         .ok_or_else(|| Error::StartingRequest(first.url.clone()))?;
-    let endpoint =
-        Collection::find(&name, custom).ok_or_else(|| Error::StartingRequest(first.url.clone()))?;
+    let endpoint = endpoints
+        .into_iter()
+        .find(|endpoint| endpoint.name() == name)
+        .cloned()
+        .or_else(|| name.parse::<Endpoint>().ok().map(Collection::Known))
+        .ok_or_else(|| Error::StartingRequest(first.url.clone()))?;
     let page = Url::parse(&first.url)
         .ok()
         .and_then(|url| {
@@ -443,7 +506,7 @@ fn initial_driver(
         .unwrap_or(0);
     let total_pages = groups
         .iter()
-        .filter(|group| collection_name(&group.url, &site).as_deref() == Some(name.as_str()))
+        .filter(|group| collection_name(&group.url, site).as_deref() == Some(name.as_str()))
         .filter_map(|group| group.response.as_ref())
         .filter_map(|response| http::ResponseMetadata::parse(&response.body))
         .filter_map(|metadata| {
@@ -453,16 +516,11 @@ fn initial_driver(
                 .and_then(|value| value.trim().parse::<usize>().ok())
         })
         .max();
-    Ok(ArchiveDriver::resume(
-        site,
-        before,
-        Resumption {
-            endpoint,
-            last_page: page.saturating_sub(1),
-            total_pages,
-        },
-        custom.to_vec(),
-    ))
+    Ok(Resumption {
+        endpoint,
+        last_page: page.saturating_sub(1),
+        total_pages,
+    })
 }
 
 fn replay(groups: &[CaptureGroup], driver: &mut ArchiveDriver, warnings: &mut Vec<String>) {

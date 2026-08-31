@@ -6,7 +6,6 @@ mod combine;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
-use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -22,17 +21,14 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
-use archivindex_wordpress::archive::{
-    ArchiveDriver, Checkpoint, PaginationProgress, Resumption, Site,
-};
+use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, PaginationProgress, Site};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
-use archivindex_wordpress::endpoint::{Collection, Registry};
 use archivindex_wordpress::lint::{Severity, lint_archive};
 use archivindex_wordpress::read::{
     CommentCompleteness, CommentUpdateAnchor, check_comment_collections,
     find_comment_update_anchors, read_comments,
 };
-use archivindex_wordpress::resume::inspect_archive;
+use archivindex_wordpress::resume::{inspect_archive, inspect_archive_with_restored_probes};
 use archivindex_wordpress::{CommentDriver, CommentProgress};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Parser;
@@ -117,29 +113,97 @@ fn lint_wp_archive(options: &LintOptions, quiet: bool) -> Result<CommandOutcome,
 /// Archive every supported collection a site exposes, beginning with the API roots and probes.
 fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutcome, Error> {
     let before = Utc::now();
+    let session = options
+        .session_name
+        .clone()
+        .unwrap_or_else(|| default_session_prefix(&options.base));
 
-    run_archive(
+    run_archive_for_session(
         ArchiveDriver::new(options.base.clone(), before),
         options,
         before,
         quiet,
+        &session,
     )
 }
 
-/// Continue an archive from the checkpoint an earlier run reported.
+/// Continue an archive from the ordered WARC segments already written for its session.
 fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<CommandOutcome, Error> {
-    let custom = options.custom_collections();
-    let endpoint = Collection::find(&options.endpoint, &custom)
-        .ok_or_else(|| Error::UnknownEndpoint(options.endpoint.clone()))?;
-    let resumption = Resumption {
-        endpoint,
-        last_page: options.last_page,
-        total_pages: options.total_pages,
-    };
-    let driver =
-        ArchiveDriver::resume(options.run.base.clone(), options.before, resumption, custom);
+    let paths = session_warcs(&options.output, &options.session_name)?;
+    let first_path = paths
+        .first()
+        .expect("session discovery returns at least one path");
+    let first = inspect_archive(first_path)?;
+    report_resume_warnings(first_path, &first.warnings);
+    if first.probes.len() != first.endpoints.len()
+        || first
+            .endpoints
+            .iter()
+            .zip(&first.probes)
+            .any(|(endpoint, probe)| endpoint.name() != probe.collection.name())
+    {
+        return Err(Error::MissingSessionProbes(first_path.clone()));
+    }
+    let before = first
+        .before
+        .or(options.before)
+        .ok_or_else(|| Error::MissingResumeCutoff(first_path.clone()))?;
 
-    run_archive(driver, &options.run, options.before, quiet)
+    let mut latest = first.clone();
+    for path in paths.iter().skip(1) {
+        let info = inspect_archive_with_restored_probes(path, &first.probes, Some(before))?;
+        report_resume_warnings(path, &info.warnings);
+        if info.site != first.site {
+            return Err(Error::SessionSiteMismatch {
+                path: path.clone(),
+                expected: first.site.base().to_owned(),
+                actual: info.site.base().to_owned(),
+            });
+        }
+        if info.before.is_some_and(|candidate| candidate != before) {
+            return Err(Error::SessionCutoffMismatch {
+                path: path.clone(),
+                expected: before,
+                actual: info.before.expect("the condition requires a cutoff"),
+            });
+        }
+        latest = info;
+    }
+
+    let mut resumption = match latest.checkpoint {
+        Checkpoint::Resume(resumption) => resumption,
+        checkpoint => {
+            return match checkpoint {
+                Checkpoint::Finished => {
+                    if !quiet {
+                        println!("{} is complete", options.session_name);
+                    }
+                    Ok(CommandOutcome::Success)
+                }
+                Checkpoint::Initial => Err(Error::InitialArchiveCannotResume(first_path.clone())),
+                Checkpoint::Resume(_) => unreachable!("the outer match excludes this variant"),
+            };
+        }
+    };
+    resumption.endpoint = first
+        .probes
+        .iter()
+        .find(|probe| probe.collection.name() == resumption.endpoint.name())
+        .map(|probe| probe.collection.clone())
+        .ok_or_else(|| Error::UnknownEndpoint(resumption.endpoint.name().to_owned()))?;
+    let driver =
+        ArchiveDriver::resume_with_probes(first.site.clone(), before, resumption, first.probes);
+    let run = ArchiveRunOptions {
+        config: options.config.clone(),
+        base: first.site,
+        output: options.output.clone(),
+        session_name: Some(next_segment_name(&options.output, &options.session_name)),
+        revisit_index: options.revisit_index.clone(),
+        limit: options.limit,
+        cookie: options.cookie.clone(),
+    };
+
+    run_archive_for_session(driver, &run, before, quiet, &options.session_name)
 }
 
 /// Recover and print the command continuing a collection archive WARC.
@@ -160,8 +224,8 @@ fn resume_info(options: &ResumeInfoOptions, quiet: bool) -> Result<CommandOutcom
                 Ok(CommandOutcome::ReportedProblems)
             }
         }
-        Checkpoint::Resume(resumption) => {
-            let before = info
+        Checkpoint::Resume(_) => {
+            let _ = info
                 .before
                 .ok_or_else(|| Error::MissingResumeCutoff(options.warc.clone()))?;
             let parent = options
@@ -169,19 +233,9 @@ fn resume_info(options: &ResumeInfoOptions, quiet: bool) -> Result<CommandOutcom
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
-            let run = ArchiveRunOptions {
-                config: None,
-                base: info.site,
-                output: parent.to_owned(),
-                session_name: None,
-                revisit_index: None,
-                limit: None,
-                cookie: None,
-            };
-            println!(
-                "{}",
-                resume_command(&run, before, &resumption, &info.endpoints)
-            );
+            let session = session_name_from_warc(&options.warc)
+                .ok_or_else(|| Error::SessionName(options.warc.clone()))?;
+            println!("{}", resume_command(parent, &session, None, None, None));
             Ok(CommandOutcome::ReportedProblems)
         }
         Checkpoint::Initial => Err(Error::InitialArchiveCannotResume(options.warc.clone())),
@@ -192,11 +246,28 @@ fn resume_info(options: &ResumeInfoOptions, quiet: bool) -> Result<CommandOutcom
 ///
 /// A run that stops after the initial requests reports the command that continues it; one that
 /// stops during them is an error, since there is nothing to continue.
+#[cfg(test)]
 fn run_archive(
     driver: ArchiveDriver,
     options: &ArchiveRunOptions,
     before: DateTime<Utc>,
     quiet: bool,
+) -> Result<CommandOutcome, Error> {
+    let archive_session = options
+        .session_name
+        .clone()
+        .unwrap_or_else(|| default_session_prefix(&options.base));
+
+    run_archive_for_session(driver, options, before, quiet, &archive_session)
+}
+
+/// Run one segment of an archive whose complete history is identified by `archive_session`.
+fn run_archive_for_session(
+    driver: ArchiveDriver,
+    options: &ArchiveRunOptions,
+    before: DateTime<Utc>,
+    quiet: bool,
+    archive_session: &str,
 ) -> Result<CommandOutcome, Error> {
     let session_name = options
         .session_name
@@ -285,11 +356,17 @@ fn run_archive(
             );
             Ok(CommandOutcome::ReportedProblems)
         }
-        Checkpoint::Resume(resumption) => {
+        Checkpoint::Resume(_) => {
             log::warn!("a partial archive was published at {}", output.display());
             println!(
                 "Continue the archive with: {}",
-                resume_command(options, before, &resumption, state.driver.endpoints())
+                resume_command(
+                    &options.output,
+                    archive_session,
+                    options.config.as_deref(),
+                    options.revisit_index.as_deref(),
+                    (!summary_has_pagination(&summary)).then_some(before),
+                )
             );
             Ok(CommandOutcome::ReportedProblems)
         }
@@ -398,55 +475,130 @@ fn report_archive_problems(
     }
 }
 
-/// The command continuing an archive from `resumption` with this run's settings.
+fn summary_has_pagination(summary: &SessionSummary) -> bool {
+    summary
+        .seed_captures
+        .iter()
+        .chain(&summary.extra_captures)
+        .any(|capture| {
+            url::Url::parse(&capture.url).is_ok_and(|url| {
+                let mut page = false;
+                let mut before = false;
+                for (name, _) in url.query_pairs() {
+                    page |= name == "page";
+                    before |= name == "before";
+                }
+                page && before
+            })
+        })
+}
+
+/// Direct WARC files whose names begin with a session name, in continuation order.
+fn session_warcs(output: &Path, session_name: &str) -> Result<Vec<PathBuf>, Error> {
+    let entries = std::fs::read_dir(output).map_err(|source| Error::SessionDirectory {
+        path: output.to_owned(),
+        source,
+    })?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|source| Error::SessionDirectory {
+                path: output.to_owned(),
+                source,
+            })?
+            .path();
+        if path.is_file()
+            && path.file_name().is_some_and(|name| {
+                name.to_str()
+                    .is_some_and(|name| name.starts_with(session_name))
+                    && is_warc_file_name(name)
+            })
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    if paths.is_empty() {
+        return Err(Error::NoSessionWarcs {
+            output: output.to_owned(),
+            session_name: session_name.to_owned(),
+        });
+    }
+
+    Ok(paths)
+}
+
+fn report_resume_warnings(path: &Path, warnings: &[String]) {
+    for warning in warnings {
+        log::warn!("{}: {warning}", path.display());
+    }
+}
+
+/// The stable default prefix shared by every run segment for a site.
+fn default_session_prefix(site: &Site) -> String {
+    site.session_name(DateTime::<Utc>::UNIX_EPOCH)
+        .strip_suffix("-0")
+        .expect("the epoch session name ends in -0")
+        .to_owned()
+}
+
+/// A continuation segment name that sorts after timestamp-named initial and legacy segments.
+fn next_segment_name(output: &Path, session_name: &str) -> String {
+    let timestamp = Utc::now().timestamp();
+    let base = format!("{session_name}~{timestamp}");
+    if !output.join(format!("{base}.warc")).exists()
+        && !output.join(format!("{base}.warc.gz")).exists()
+    {
+        return base;
+    }
+    for sequence in 1..=u32::MAX {
+        let candidate = format!("{base}~{sequence}");
+        if !output.join(format!("{candidate}.warc")).exists()
+            && !output.join(format!("{candidate}.warc.gz")).exists()
+        {
+            return candidate;
+        }
+    }
+    panic!("no unused continuation sequence exists for {base}")
+}
+
+fn session_name_from_warc(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    name.strip_suffix(".warc.gz")
+        .or_else(|| name.strip_suffix(".warc"))
+        .map(|stem| stem.split_once('~').map_or(stem, |(session, _)| session))
+        .map(str::to_owned)
+}
+
+/// The command continuing the archive segments sharing `session_name`.
 ///
-/// The custom collections among `endpoints` are repeated with the flag for their registry, in
-/// order, since the resumed run does not read the registries again. A cookie is not repeated,
-/// since it is a secret; the session name is left to default to a new timestamp.
+/// A cookie is not repeated because it is a secret. The capture limit is not repeated so a
+/// continuation finishes by default.
 fn resume_command(
-    options: &ArchiveRunOptions,
-    before: DateTime<Utc>,
-    resumption: &Resumption,
-    endpoints: &[Collection],
+    output: &Path,
+    session_name: &str,
+    config: Option<&Path>,
+    revisit_index: Option<&Path>,
+    before: Option<DateTime<Utc>>,
 ) -> String {
     let mut command = format!(
-        "archivindex-wordpress resume-archive --output {} --base {} --endpoint {} \
-         --last-page {} --before {}",
-        shell_word(&options.output.to_string_lossy()),
-        shell_word(options.base.base()),
-        shell_word(resumption.endpoint.name()),
-        resumption.last_page,
-        shell_word(&before.to_rfc3339_opts(SecondsFormat::Secs, true))
+        "archivindex-wordpress resume-archive --output {} --session-name {}",
+        shell_word(&output.to_string_lossy()),
+        shell_word(session_name),
     );
-    if let Some(total_pages) = resumption.total_pages {
-        // Writing to a `String` cannot fail, so the `fmt::Result` carries nothing.
-        let _ = write!(command, " --total-pages {total_pages}");
-    }
-    for endpoint in endpoints {
-        if let Some(registry) = endpoint.registry() {
-            let flag = match registry {
-                Registry::Types => "--custom",
-                Registry::Taxonomies => "--custom-taxonomy",
-            };
-            let _ = write!(command, " {flag} {}", shell_word(endpoint.name()));
-        }
-    }
-    let optional = [("--config", &options.config)];
-    for (flag, path) in optional {
+    for (flag, path) in [("--config", config), ("--revisit-index", revisit_index)] {
         if let Some(path) = path {
-            let _ = write!(command, " {flag} {}", shell_word(&path.to_string_lossy()));
+            command.push(' ');
+            command.push_str(flag);
+            command.push(' ');
+            command.push_str(&shell_word(&path.to_string_lossy()));
         }
     }
-    // An unknown page count plus conditional 304 responses cannot establish where a collection
-    // ends. Carry the revisit index only when the checkpoint also carries the needed count.
-    if resumption.total_pages.is_some()
-        && let Some(path) = &options.revisit_index
-    {
-        let _ = write!(
-            command,
-            " --revisit-index {}",
-            shell_word(&path.to_string_lossy())
-        );
+    if let Some(before) = before {
+        command.push_str(" --before ");
+        command.push_str(&shell_word(
+            &before.to_rfc3339_opts(SecondsFormat::Secs, true),
+        ));
     }
 
     command
@@ -1117,6 +1269,42 @@ enum Error {
     Lint(#[from] archivindex_wordpress::lint::Error),
     #[error(transparent)]
     Combine(#[from] combine::Error),
+    #[error("cannot read archive session directory {}: {source}", path.display())]
+    SessionDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "{} contains no direct .warc or .warc.gz files beginning with session name {session_name:?}",
+        output.display()
+    )]
+    NoSessionWarcs {
+        output: PathBuf,
+        session_name: String,
+    },
+    #[error("the first archive segment {} does not contain every endpoint probe", .0.display())]
+    MissingSessionProbes(PathBuf),
+    #[error(
+        "archive segment {} belongs to site {actual:?}, not the session's site {expected:?}",
+        path.display()
+    )]
+    SessionSiteMismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "archive segment {} uses cutoff {actual}, not the session's cutoff {expected}",
+        path.display()
+    )]
+    SessionCutoffMismatch {
+        path: PathBuf,
+        expected: DateTime<Utc>,
+        actual: DateTime<Utc>,
+    },
+    #[error("cannot derive an archive session name from {}", .0.display())]
+    SessionName(PathBuf),
     #[error("cannot read comment update input {}: {source}", path.display())]
     UpdateInputRead {
         path: PathBuf,
@@ -1148,10 +1336,7 @@ enum Error {
         .0.display()
     )]
     MissingResumeCutoff(PathBuf),
-    #[error(
-        "unknown endpoint {0:?}; pass a supported endpoint name or one listed with --custom or \
-         --custom-taxonomy"
-    )]
+    #[error("the archive session's initial probes do not include endpoint {0:?}")]
     UnknownEndpoint(String),
     #[error("comment update overlap is out of range: {0:?}")]
     OverlapOutOfRange(Duration),
@@ -1197,7 +1382,7 @@ enum Command {
     /// Read comments captured from the `WordPress` REST API in a WARC file.
     #[clap(name = "read-comments")]
     Read(ReadCommentsOptions),
-    /// Continue an archive from the checkpoint an earlier run reported.
+    /// Continue an archive by reading all WARC segments sharing its session name.
     #[clap(name = "resume-archive")]
     ResumeArchive(ResumeArchiveOptions),
     /// Print the command continuing an incomplete collection-archive WARC.
@@ -1208,7 +1393,7 @@ enum Command {
     Update(UpdateCommentsOptions),
 }
 
-/// Options shared by archiving a site and resuming its archive.
+/// Options for archiving a site.
 #[derive(Debug, clap::Args)]
 struct ArchiveRunOptions {
     /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
@@ -1245,29 +1430,27 @@ struct ArchiveRunOptions {
 /// Options for continuing an archive from its checkpoint.
 #[derive(Debug, clap::Args)]
 struct ResumeArchiveOptions {
-    #[clap(flatten)]
-    run: ArchiveRunOptions,
-    /// The endpoint to continue: a supported endpoint's lowercase name, or a custom collection
-    /// also listed with `--custom` or `--custom-taxonomy`.
-    #[clap(long, value_name = "ENDPOINT")]
-    endpoint: String,
-    /// The last page of that endpoint the earlier run captured, or 0 to probe the endpoint again.
-    #[clap(long, value_name = "PAGE")]
-    last_page: usize,
-    /// The most recently advertised page count, when the earlier run reported one.
-    #[clap(long, value_name = "PAGES")]
-    total_pages: Option<usize>,
-    /// The cutoff the archive started with, as reported by the earlier run.
+    /// A TOML or JSON archiver configuration file.
+    #[clap(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    config: Option<PathBuf>,
+    /// Directory containing every plain or compressed WARC segment from the archive run.
+    #[clap(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    output: PathBuf,
+    /// Filename prefix shared by the archive run's WARC segments.
+    #[clap(long)]
+    session_name: String,
+    /// Original archive cutoff, needed only when no segment contains a paginated request.
     #[clap(long, value_name = "TIMESTAMP")]
-    before: DateTime<Utc>,
-    /// A custom collection the earlier run discovered in the site's post types, repeated in the
-    /// reported order; the resumed run does not read the registries again.
-    #[clap(long, value_name = "ENDPOINT")]
-    custom: Vec<String>,
-    /// A custom collection the earlier run discovered in the site's taxonomies, repeated in the
-    /// reported order.
-    #[clap(long, value_name = "ENDPOINT")]
-    custom_taxonomy: Vec<String>,
+    before: Option<DateTime<Utc>>,
+    /// Persistent payload-revisit and conditional-request state database.
+    #[clap(long)]
+    revisit_index: Option<PathBuf>,
+    /// Stop this continuation after this many captures.
+    #[clap(long)]
+    limit: Option<usize>,
+    /// Cookie header obtained from a browser, scoped to the recovered site's host.
+    #[clap(long)]
+    cookie: Option<String>,
 }
 
 /// Options for recovering continuation information from an archive WARC.
@@ -1276,25 +1459,6 @@ struct ResumeInfoOptions {
     /// Path of the plain or gzip-compressed WARC file to inspect.
     #[clap(value_hint = clap::ValueHint::FilePath)]
     warc: PathBuf,
-}
-
-impl ResumeArchiveOptions {
-    /// The custom collections in probing order: those from the post types, then the taxonomies.
-    fn custom_collections(&self) -> Vec<Collection> {
-        let types = self.custom.iter().zip(std::iter::repeat(Registry::Types));
-        let taxonomies = self
-            .custom_taxonomy
-            .iter()
-            .zip(std::iter::repeat(Registry::Taxonomies));
-
-        types
-            .chain(taxonomies)
-            .map(|(name, registry)| Collection::Custom {
-                name: name.clone(),
-                registry,
-            })
-            .collect()
-    }
 }
 
 /// Options for reading comments from a WARC file.
@@ -1399,10 +1563,10 @@ mod tests {
 
     use super::{
         ArchiveProgress, ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, CombineOptions,
-        Command, CommentRun, CommentRunOptions, Config, Error, Opts, ResumeInfoOptions,
-        SharedArchiveDriver, capture_comment_run, check_wp_comments, combine_archives,
-        comment_update_inputs, load_config_for_output, page_total_change_warning, resume_archive,
-        resume_command, resume_info, run_archive,
+        Command, CommentRun, CommentRunOptions, Config, Error, Opts, ResumeArchiveOptions,
+        ResumeInfoOptions, SharedArchiveDriver, capture_comment_run, check_wp_comments,
+        combine_archives, comment_update_inputs, load_config_for_output, page_total_change_warning,
+        resume_archive, resume_command, resume_info, run_archive,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1761,26 +1925,22 @@ mod tests {
     }
 
     #[test]
-    fn resume_command_requires_the_checkpoint() {
+    fn resume_command_requires_only_the_output_and_session_name() {
         let options = Opts::try_parse_from([
             "archivindex-wordpress",
             "resume-archive",
+            "--config",
+            "capture.toml",
             "--output",
             "archives",
-            "--base",
+            "--session-name",
             "example.com",
-            "--endpoint",
-            "comments",
-            "--last-page",
-            "7",
-            "--before",
-            BEFORE,
-            "--custom-taxonomy",
-            "series",
-            "--custom",
-            "videos",
-            "--custom",
-            "clips",
+            "--revisit-index",
+            "state.sqlite3",
+            "--limit",
+            "12",
+            "--cookie",
+            "secret=yes",
         ])
         .expect("valid options");
 
@@ -1788,72 +1948,28 @@ mod tests {
             panic!("expected the resuming command");
         };
 
-        assert_eq!(options.run.base.base(), "example.com");
-        assert_eq!(options.run.output, PathBuf::from("archives"));
-        assert_eq!(options.run.session_name, None);
-        assert_eq!(options.endpoint, "comments");
-        assert_eq!(options.last_page, 7);
-        assert_eq!(options.total_pages, None);
-        assert_eq!(options.before, before());
-        // Custom collections from the post types precede those from the taxonomies.
-        assert_eq!(
-            options.custom_collections(),
-            [
-                custom("videos", Registry::Types),
-                custom("clips", Registry::Types),
-                custom("series", Registry::Taxonomies),
-            ]
-        );
+        assert_eq!(options.output, PathBuf::from("archives"));
+        assert_eq!(options.session_name, "example.com");
+        assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
+        assert_eq!(options.revisit_index, Some(PathBuf::from("state.sqlite3")));
+        assert_eq!(options.limit, Some(12));
+        assert_eq!(options.cookie.as_deref(), Some("secret=yes"));
 
-        let arguments = [
-            "archivindex-wordpress",
-            "resume-archive",
-            "--output",
-            "archives",
-            "--base",
-            "example.com",
-            "--endpoint",
-            "comments",
-            "--last-page",
-            "7",
-            "--before",
-            BEFORE,
-        ];
-        // Each checkpoint argument is required.
-        let rejected = [
-            arguments.map(|argument| if argument == "7" { "-1" } else { argument }),
-            arguments.map(|argument| {
-                if argument == BEFORE {
-                    "yesterday"
-                } else {
-                    argument
-                }
-            }),
-        ];
-        for arguments in rejected {
-            assert!(Opts::try_parse_from(arguments).is_err(), "{arguments:?}");
-        }
-        for skipped in [6, 8, 10] {
-            let mut incomplete = arguments.to_vec();
-            incomplete.drain(skipped..skipped + 2);
-            assert!(Opts::try_parse_from(incomplete).is_err());
-        }
-
-        // Endpoint names are exact, and a custom endpoint must be listed, before anything runs.
-        for (endpoint, custom) in [("Comments", "comments"), ("videos", "clips")] {
-            let mut unknown = arguments.to_vec();
-            unknown[7] = endpoint;
-            unknown.extend(["--custom", custom]);
-            let Command::ResumeArchive(options) = Opts::try_parse_from(unknown)
-                .expect("valid options")
-                .command
-            else {
-                panic!("expected the resuming command");
-            };
-            assert!(matches!(
-                resume_archive(&options, true),
-                Err(Error::UnknownEndpoint(name)) if name == endpoint
-            ));
+        for arguments in [
+            vec![
+                "archivindex-wordpress",
+                "resume-archive",
+                "--session-name",
+                "example.com",
+            ],
+            vec![
+                "archivindex-wordpress",
+                "resume-archive",
+                "--output",
+                "archives",
+            ],
+        ] {
+            assert!(Opts::try_parse_from(arguments).is_err());
         }
     }
 
@@ -1873,59 +1989,23 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_is_printed_as_a_resume_command() {
-        let mut options = ArchiveRunOptions {
-            config: None,
-            base: Site::parse("example.com/blog").expect("a site"),
-            output: PathBuf::from("archives"),
-            session_name: Some("ignored".to_owned()),
-            revisit_index: None,
-            limit: Some(3),
-            cookie: Some("secret=yes".to_owned()),
-        };
+    fn a_session_is_printed_as_a_minimal_resume_command() {
+        assert_eq!(
+            resume_command(Path::new("archives"), "example.com", None, None, None),
+            "archivindex-wordpress resume-archive --output archives --session-name example.com"
+        );
 
         assert_eq!(
             resume_command(
-                &options,
-                before(),
-                &resumption(Endpoint::Comments, 7, None),
-                &Endpoint::ALL.map(Collection::Known)
+                Path::new("archive output/it's here"),
+                "site's run",
+                Some(Path::new("capture files/site's.toml")),
+                Some(Path::new("state files/site.sqlite3")),
+                Some(before()),
             ),
-            "archivindex-wordpress resume-archive --output archives --base example.com/blog \
-             --endpoint comments --last-page 7 --before 2026-08-20T00:00:00Z"
-        );
-
-        // Custom collections are repeated in order, with the flag of their registry.
-        options.config = Some(PathBuf::from("capture.toml"));
-        options.revisit_index = Some(PathBuf::from("state.sqlite3"));
-        let videos = custom("videos", Registry::Types);
-        let endpoints = [
-            Endpoint::Media.into(),
-            videos.clone(),
-            custom("series", Registry::Taxonomies),
-            custom("it's", Registry::Types),
-        ];
-        assert_eq!(
-            resume_command(
-                &options,
-                before(),
-                &resumption(Endpoint::Media, 0, Some(12)),
-                &endpoints
-            ),
-            "archivindex-wordpress resume-archive --output archives --base example.com/blog \
-             --endpoint media --last-page 0 --before 2026-08-20T00:00:00Z --total-pages 12 \
-             --custom videos --custom-taxonomy series --custom 'it'\"'\"'s' \
-             --config capture.toml --revisit-index state.sqlite3"
-        );
-
-        options.output = PathBuf::from("archive output/it's here");
-        options.config = Some(PathBuf::from("capture files/site's.toml"));
-        assert_eq!(
-            resume_command(&options, before(), &resumption(videos, 3, None), &[]),
             "archivindex-wordpress resume-archive --output 'archive output/it'\"'\"'s here' \
-             --base example.com/blog --endpoint videos --last-page 3 \
-             --before 2026-08-20T00:00:00Z \
-             --config 'capture files/site'\"'\"'s.toml'"
+             --session-name 'site'\"'\"'s run' --config 'capture files/site'\"'\"'s.toml' \
+             --revisit-index 'state files/site.sqlite3' --before 2026-08-20T00:00:00Z"
         );
     }
 
@@ -2555,6 +2635,71 @@ mod tests {
         assert_eq!(
             resume_info(&ResumeInfoOptions { warc }, true)?,
             CommandOutcome::ReportedProblems
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn resume_archive_reads_prior_segments_and_does_not_reprobe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (port, server) = serve_site(22)?;
+        let directory = tempfile::tempdir()?;
+        let mut initial = archive_options(port, directory.path(), "site-chain");
+        initial.limit = Some(18);
+
+        assert_eq!(
+            run_archive(
+                ArchiveDriver::new(initial.base.clone(), before()),
+                &initial,
+                before(),
+                true,
+            )?,
+            CommandOutcome::ReportedProblems
+        );
+        let initial_warc = directory.path().join("site-chain.warc");
+        let mut encoder = GzEncoder::new(
+            std::fs::File::create(directory.path().join("site-chain.warc.gz"))?,
+            Compression::default(),
+        );
+        encoder.write_all(&std::fs::read(&initial_warc)?)?;
+        encoder.finish()?;
+        std::fs::remove_file(initial_warc)?;
+        assert_eq!(
+            resume_archive(
+                &ResumeArchiveOptions {
+                    config: None,
+                    output: directory.path().to_owned(),
+                    session_name: "site-chain".to_owned(),
+                    before: Some(before()),
+                    revisit_index: None,
+                    limit: None,
+                    cookie: None,
+                },
+                true,
+            )?,
+            CommandOutcome::Success
+        );
+
+        let requests = server.join().expect("the local server");
+        assert_eq!(requests.len(), 22);
+        assert!(requests[18].contains("/pages?") && requests[18].contains("page=1"));
+        assert!(requests[19].contains("/pages?") && requests[19].contains("page=2"));
+        assert!(requests[20].contains("/comments?") && requests[20].contains("page=1"));
+        assert!(requests[21].contains("/videos?") && requests[21].contains("page=1"));
+        assert!(requests[18..].iter().all(|request| request.contains('?')));
+
+        let segments = super::session_warcs(directory.path(), "site-chain")?;
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            metadata_vias(&segments[1])?
+                .into_iter()
+                .map(|(url, _)| url)
+                .collect::<Vec<_>>(),
+            requests[18..]
+                .iter()
+                .map(|request| format!("http://127.0.0.1:{port}{request}"))
+                .collect::<Vec<_>>()
         );
 
         Ok(())
