@@ -215,12 +215,7 @@ fn lint_reader<R: BufRead>(reader: WarcReader<R>, path: &Path) -> Result<LintRep
     let mut previous = None;
     let mut probes = Vec::new();
     for (position, (url, collection)) in expected_initial.iter().enumerate() {
-        let candidates = groups
-            .iter()
-            .enumerate()
-            .filter(|(_, group)| group.url == *url)
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
+        let candidates = initial_capture_candidates(&groups, url);
         let group = candidates.first().copied();
         let label = collection.as_ref().map_or_else(
             || format!("initial root {url}"),
@@ -312,6 +307,15 @@ fn expected_initial(site: &Site, customs: &[Collection]) -> Vec<(String, Option<
             .map(|collection| (endpoint_url(site, collection.name()), Some(collection))),
     );
     expected
+}
+
+fn initial_capture_candidates(groups: &[CaptureGroup], url: &str) -> Vec<usize> {
+    groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| group.url == url && !is_server_challenge(group))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn collect_groups<R: BufRead>(
@@ -514,7 +518,10 @@ fn discover_customs(
     let mut custom = Vec::new();
     for registry in Registry::ALL {
         let url = format!("{}{}", site.root(), registry.path());
-        let Some(group) = groups.iter().find(|group| group.url == url) else {
+        let Some(group) = groups
+            .iter()
+            .find(|group| group.url == url && !is_server_challenge(group))
+        else {
             continue;
         };
         let Some(response) = &group.response else {
@@ -1208,6 +1215,34 @@ fn response_metadata(group: &CaptureGroup) -> Option<http::ResponseMetadata> {
         .and_then(|response| http::ResponseMetadata::parse(&response.body))
 }
 
+fn is_server_challenge(group: &CaptureGroup) -> bool {
+    let Some(response) = &group.response else {
+        return false;
+    };
+    let Some(metadata) = http::ResponseMetadata::parse(&response.body) else {
+        return false;
+    };
+    if metadata.status == 403
+        && metadata
+            .header("cf-mitigated")
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"challenge"))
+    {
+        return true;
+    }
+    if metadata.status != 454 {
+        return false;
+    }
+    payload::entity_body(&response.body).is_ok_and(|entity| {
+        contains_bytes(&entity, b"sc-challenge") && contains_bytes(&entity, b"/.sc-verify/")
+    })
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 fn numeric_header(metadata: &http::ResponseMetadata, name: &str) -> Option<usize> {
     metadata
         .header(name)
@@ -1247,8 +1282,8 @@ mod tests {
 
     use super::{
         CaptureGroup, LintReport, PageCapture, Probe, StoredMetadata, StoredResponse,
-        StoredRevisit, StoredRevisitProfile, expected_initial, lint_series, page_query,
-        same_page_uri,
+        StoredRevisit, StoredRevisitProfile, expected_initial, initial_capture_candidates,
+        is_server_challenge, lint_series, page_query, same_page_uri,
     };
     use crate::archive::Site;
     use crate::endpoint::{Endpoint, ROOT_ENDPOINTS};
@@ -1295,6 +1330,24 @@ mod tests {
                 via: Some(via.to_owned()),
                 fields: true,
             }),
+        }
+    }
+
+    fn root_capture(status: u16, body: &str) -> CaptureGroup {
+        let url = "https://example.com/wp-json".to_owned();
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        CaptureGroup {
+            url: url.clone(),
+            response: Some(StoredResponse {
+                url,
+                body: response.into_bytes(),
+                truncation: None,
+                revisit: None,
+            }),
+            metadata: None,
         }
     }
 
@@ -1367,6 +1420,33 @@ mod tests {
                 "tags",
                 "navigation",
             ]
+        );
+    }
+
+    #[test]
+    fn simply_browser_challenges_do_not_count_as_initial_captures() {
+        let challenge = root_capture(
+            454,
+            r#"<script sc-challenge>fetch('/.sc-verify/')</script>"#,
+        );
+        assert!(is_server_challenge(&challenge));
+
+        let groups = [challenge, root_capture(200, "{}")];
+        assert_eq!(
+            initial_capture_candidates(&groups, "https://example.com/wp-json"),
+            [1]
+        );
+    }
+
+    #[test]
+    fn ordinary_error_responses_still_count_as_initial_captures() {
+        let groups = [
+            root_capture(454, "ordinary server error"),
+            root_capture(200, "{}"),
+        ];
+        assert_eq!(
+            initial_capture_candidates(&groups, "https://example.com/wp-json"),
+            [0, 1]
         );
     }
 
