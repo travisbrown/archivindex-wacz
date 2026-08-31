@@ -64,9 +64,10 @@ bar advances once through the collection's pages.
 
 `--base` names the site as a host with an optional path and no scheme, such as `example.com` or
 `example.com/blog` (a trailing slash is removed); requests use HTTPS. `--output` names a directory,
-which is created if needed. The session is written uncompressed to `<output>/<session name>.warc`,
-where `--session-name` defaults to the base and the current epoch second joined by a hyphen, with
-the slashes of a path replaced by hyphens, for example `example.com-blog-1787995936`. Successive
+which is created if needed. The session is written uncompressed to
+`<output>/<session name>-<epoch second>.warc`. `--session-name` is the stable prefix and defaults
+to the base with the slashes of a path replaced by hyphens, for example
+`example.com-blog-1787995936`. Every initial or resumed archive file has a timestamp. Successive
 runs therefore accumulate in the directory for merging later. The command accepts the archiver's
 TOML or JSON configuration schema through `--config`. Transport, WARC metadata, digest, and session
 settings—including retry policy and request delay—belong in that file. For example, `site.toml`
@@ -109,8 +110,8 @@ continuation therefore does
 not repeat roots, registries, or endpoint probes: it requests the next page of the interrupted
 series, then pages the remaining endpoints whose original probes succeeded. Its first page has a
 metadata `via` link to the last page in the preceding file, so pagination chains remain continuous
-across segments. New continuation filenames begin with the same session name and sort after the
-older files.
+across segments. New continuation filenames use the same
+`<session name>-<epoch second>.warc` form and sort after the older files.
 
 In the edge case where a run stops immediately after its probes and has no paginated URL yet, its
 printed command includes `--before` because that value cannot be reconstructed from the WARC.
@@ -130,11 +131,13 @@ cargo run --bin archivindex-wordpress -- resume-archive \
 ```
 
 If the continuation command from an earlier run is no longer available, `resume-info` prints the
-session-based command from a plain or gzip-compressed WARC. It replays only capture groups with a
-linked request, response or revisit, and metadata record. Corrupted or truncated groups are warned
-about, while the recovered checkpoint rolls back to the last complete capture. A WARC that stopped
-before recording any paginated request has no recoverable `before` cutoff and must be restarted
-with `archive`:
+session-based command from a plain or gzip-compressed WARC. A default timestamp-named WARC is
+reduced to the site's stable filename prefix so the command finds its legacy continuation files;
+an explicit session name is retained. It replays only capture groups with a linked request,
+response or revisit, and metadata record. Corrupted or truncated groups are warned about, while
+the recovered checkpoint rolls back to the last complete capture. A WARC that stopped before
+recording any paginated request has no recoverable `before` cutoff and must be restarted with
+`archive`:
 
 ```bash
 cargo run --bin archivindex-wordpress -- resume-info archives/example.com-1787995936.warc

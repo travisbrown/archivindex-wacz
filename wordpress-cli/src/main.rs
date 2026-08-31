@@ -117,10 +117,12 @@ fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutco
         .session_name
         .clone()
         .unwrap_or_else(|| default_session_prefix(&options.base));
+    let mut run = options.clone();
+    run.session_name = Some(next_segment_name(&options.output, &session));
 
     run_archive_for_session(
-        ArchiveDriver::new(options.base.clone(), before),
-        options,
+        ArchiveDriver::new(run.base.clone(), before),
+        &run,
         before,
         quiet,
         &session,
@@ -542,32 +544,74 @@ fn default_session_prefix(site: &Site) -> String {
         .to_owned()
 }
 
-/// A continuation segment name that sorts after timestamp-named initial and legacy segments.
+/// A timestamped segment name that sorts after earlier segments with the same session prefix.
 fn next_segment_name(output: &Path, session_name: &str) -> String {
-    let timestamp = Utc::now().timestamp();
-    let base = format!("{session_name}~{timestamp}");
-    if !output.join(format!("{base}.warc")).exists()
-        && !output.join(format!("{base}.warc.gz")).exists()
-    {
-        return base;
-    }
-    for sequence in 1..=u32::MAX {
-        let candidate = format!("{base}~{sequence}");
+    let now = Utc::now().timestamp();
+    let latest = std::fs::read_dir(output)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            let name = name.to_str()?;
+            let stem = name
+                .strip_suffix(".warc.gz")
+                .or_else(|| name.strip_suffix(".warc"))?;
+            stem.strip_prefix(session_name)?
+                .strip_prefix('-')?
+                .parse::<i64>()
+                .ok()
+        });
+    let mut timestamp = latest.max().map_or(now, |latest| now.max(latest + 1));
+    loop {
+        let candidate = format!("{session_name}-{timestamp}");
         if !output.join(format!("{candidate}.warc")).exists()
             && !output.join(format!("{candidate}.warc.gz")).exists()
         {
             return candidate;
         }
+        timestamp = timestamp
+            .checked_add(1)
+            .expect("archive segment timestamps do not exhaust i64");
     }
-    panic!("no unused continuation sequence exists for {base}")
 }
 
 fn session_name_from_warc(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    name.strip_suffix(".warc.gz")
-        .or_else(|| name.strip_suffix(".warc"))
-        .map(|stem| stem.split_once('~').map_or(stem, |(session, _)| session))
-        .map(str::to_owned)
+    let stem = name
+        .strip_suffix(".warc.gz")
+        .or_else(|| name.strip_suffix(".warc"))?;
+    let session = strip_legacy_continuation_suffix(stem);
+    Some(
+        session
+            .rsplit_once('-')
+            .filter(|(_, timestamp)| is_timestamp_suffix(timestamp))
+            .map_or(session, |(session, _)| session)
+            .to_owned(),
+    )
+}
+
+fn strip_legacy_continuation_suffix(stem: &str) -> &str {
+    let Some((session, sequence)) = stem.rsplit_once('~') else {
+        return stem;
+    };
+    if sequence.is_empty() || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return stem;
+    }
+    if let Some((base, timestamp)) = session.rsplit_once('~')
+        && is_timestamp_suffix(timestamp)
+    {
+        return base;
+    }
+    if is_timestamp_suffix(sequence) {
+        session
+    } else {
+        stem
+    }
+}
+
+fn is_timestamp_suffix(value: &str) -> bool {
+    value.len() >= 9 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The command continuing the archive segments sharing `session_name`.
@@ -1394,7 +1438,7 @@ enum Command {
 }
 
 /// Options for archiving a site.
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct ArchiveRunOptions {
     /// A TOML or JSON archiver configuration file, recognized by its extension; every key is
     /// optional and takes its default when absent.
@@ -1409,8 +1453,8 @@ struct ArchiveRunOptions {
     /// created when missing (an existing file is not overwritten).
     #[clap(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     output: PathBuf,
-    /// URL-safe name of the session and its WARC file; defaults to the base, with hyphens for its
-    /// slashes, followed by a hyphen and the current epoch second.
+    /// URL-safe prefix shared by the session's timestamp-named WARC segment files; defaults to the
+    /// base, with hyphens for its slashes.
     #[clap(long)]
     session_name: Option<String>,
     /// Persistent payload-revisit and conditional-request state database.
@@ -1565,8 +1609,9 @@ mod tests {
         ArchiveProgress, ArchiveRunOptions, ArchiveRunState, CheckCommentsOptions, CombineOptions,
         Command, CommentRun, CommentRunOptions, Config, Error, Opts, ResumeArchiveOptions,
         ResumeInfoOptions, SharedArchiveDriver, capture_comment_run, check_wp_comments,
-        combine_archives, comment_update_inputs, load_config_for_output, page_total_change_warning,
-        resume_archive, resume_command, resume_info, run_archive,
+        combine_archives, comment_update_inputs, load_config_for_output, next_segment_name,
+        page_total_change_warning, resume_archive, resume_command, resume_info, run_archive,
+        session_name_from_warc,
     };
 
     const BEFORE: &str = "2026-08-20T00:00:00Z";
@@ -1986,6 +2031,50 @@ mod tests {
             panic!("expected the resume information command");
         };
         assert_eq!(options.warc, PathBuf::from("archives/site.warc.gz"));
+    }
+
+    #[test]
+    fn resume_info_derives_default_and_explicit_session_names() {
+        assert_eq!(
+            session_name_from_warc(Path::new("archives/example.com-1788032113.warc")).as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            session_name_from_warc(Path::new(
+                "archives/example.com-1788032113~1788032999.warc.gz"
+            ),)
+            .as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            session_name_from_warc(Path::new("archives/editorial~nightly.warc")).as_deref(),
+            Some("editorial~nightly")
+        );
+        assert_eq!(
+            session_name_from_warc(Path::new("archives/editorial~nightly~1788032999.warc",))
+                .as_deref(),
+            Some("editorial~nightly")
+        );
+        assert_eq!(
+            session_name_from_warc(Path::new("archives/editorial-nightly-1788032999.warc"))
+                .as_deref(),
+            Some("editorial-nightly")
+        );
+        assert_eq!(
+            session_name_from_warc(Path::new("archives/campaign-2026.warc")).as_deref(),
+            Some("campaign-2026")
+        );
+    }
+
+    #[test]
+    fn every_archive_segment_name_has_a_numeric_timestamp() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let name = next_segment_name(directory.path(), "editorial-nightly");
+        let timestamp = name
+            .strip_prefix("editorial-nightly-")
+            .expect("the session prefix");
+        assert!(!timestamp.is_empty());
+        assert!(timestamp.bytes().all(|byte| byte.is_ascii_digit()));
     }
 
     #[test]
@@ -2442,6 +2531,33 @@ mod tests {
     }
 
     #[test]
+    fn archive_site_timestamps_an_explicit_session_name() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (port, server) = serve_site(22)?;
+        let directory = tempfile::tempdir()?;
+        let options = archive_options(port, directory.path(), "editorial-nightly");
+
+        assert_eq!(
+            super::archive_site(&options, true)?,
+            CommandOutcome::Success
+        );
+        assert_eq!(server.join().expect("the local server").len(), 22);
+        let files = super::session_warcs(directory.path(), "editorial-nightly")?;
+        assert_eq!(files.len(), 1);
+        let name = files[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a UTF-8 filename");
+        let timestamp = name
+            .strip_prefix("editorial-nightly-")
+            .and_then(|name| name.strip_suffix(".warc"))
+            .expect("a timestamped WARC filename");
+        assert!(super::is_timestamp_suffix(timestamp));
+
+        Ok(())
+    }
+
+    #[test]
     fn an_archive_pages_each_exposed_collection_after_the_probes()
     -> Result<(), Box<dyn std::error::Error>> {
         let (port, server) = serve_site(22)?;
@@ -2645,21 +2761,22 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (port, server) = serve_site(22)?;
         let directory = tempfile::tempdir()?;
-        let mut initial = archive_options(port, directory.path(), "site-chain");
+        let mut initial = archive_options(port, directory.path(), "site-chain-100");
         initial.limit = Some(18);
 
         assert_eq!(
-            run_archive(
+            super::run_archive_for_session(
                 ArchiveDriver::new(initial.base.clone(), before()),
                 &initial,
                 before(),
                 true,
+                "site-chain",
             )?,
             CommandOutcome::ReportedProblems
         );
-        let initial_warc = directory.path().join("site-chain.warc");
+        let initial_warc = directory.path().join("site-chain-100.warc");
         let mut encoder = GzEncoder::new(
-            std::fs::File::create(directory.path().join("site-chain.warc.gz"))?,
+            std::fs::File::create(directory.path().join("site-chain-100.warc.gz"))?,
             Compression::default(),
         );
         encoder.write_all(&std::fs::read(&initial_warc)?)?;
