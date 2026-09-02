@@ -845,7 +845,9 @@ fn page_query(url: &str) -> (Option<usize>, bool, Option<String>) {
             .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
         && one("orderby") == Some("id")
         && one("order") == Some("asc")
-        && one("per_page") == Some("100")
+        && one("per_page")
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|per_page| (1..=100).contains(&per_page))
         && url.fragment().is_none();
     (page, valid, before)
 }

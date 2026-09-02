@@ -17,6 +17,9 @@ use url::Url;
 
 use crate::endpoint::{Collection, Endpoint, EndpointType, ROOT_ENDPOINTS, Registry};
 
+/// The default and maximum number of collection items requested per page.
+pub const DEFAULT_PER_PAGE: usize = 100;
+
 /// A `WordPress` installation named by its host and optional path, such as `example.com/blog`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Site {
@@ -108,11 +111,17 @@ impl Site {
     }
 
     /// The URL of one page of an endpoint's collection, in ascending ID order up to `before`.
-    fn page_url(&self, endpoint: &str, before: DateTime<Utc>, page: usize) -> String {
+    fn page_url(
+        &self,
+        endpoint: &str,
+        before: DateTime<Utc>,
+        page: usize,
+        per_page: usize,
+    ) -> String {
         format!(
-            "{}?{}",
+            "{}?before={}&orderby=id&order=asc&page={page}&per_page={per_page}",
             self.endpoint_url(endpoint),
-            crate::paging_query(None, before, page)
+            before.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         )
     }
 }
@@ -191,6 +200,7 @@ pub struct ProbeResult {
 pub struct ArchiveDriver {
     site: Site,
     before: DateTime<Utc>,
+    per_page: usize,
     /// Whether the run began with the root resources and every probe, which cannot be resumed.
     initial: bool,
     /// Index into [`ROOT_ENDPOINTS`] of the next root resource to request.
@@ -301,6 +311,7 @@ impl ArchiveDriver {
         Self {
             site,
             before,
+            per_page: DEFAULT_PER_PAGE,
             initial: true,
             next_root: 0,
             endpoints: Endpoint::ALL.map(Collection::Known).to_vec(),
@@ -312,6 +323,18 @@ impl ArchiveDriver {
             resume_total_pages: None,
             stopped: false,
         }
+    }
+
+    /// Request `per_page` items from every paginated collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `per_page` is in WordPress's supported range of 1 through 100.
+    #[must_use]
+    pub fn with_per_page(mut self, per_page: usize) -> Self {
+        assert!((1..=DEFAULT_PER_PAGE).contains(&per_page));
+        self.per_page = per_page;
+        self
     }
 
     /// Continue an archive of `site` with the same `before` cutoff from a checkpoint.
@@ -515,11 +538,14 @@ impl ArchiveDriver {
         let endpoint = series.endpoint.name();
         let via = match series.page {
             0 => self.site.endpoint_url(endpoint),
-            page => self.site.page_url(endpoint, self.before, page),
+            page => self
+                .site
+                .page_url(endpoint, self.before, page, self.per_page),
         };
 
         Request::extra(
-            self.site.page_url(endpoint, self.before, series.page + 1),
+            self.site
+                .page_url(endpoint, self.before, series.page + 1, self.per_page),
             via,
         )
     }
@@ -580,7 +606,7 @@ impl ArchiveDriver {
             if let Some(advertised) = capture
                 .header("x-wp-total")
                 .and_then(|value| value.parse::<usize>().ok())
-                .map(|total| total.div_ceil(crate::PER_PAGE))
+                .map(|total| total.div_ceil(self.per_page))
                 .or(total_pages)
             {
                 self.pagination.push((endpoint.clone(), advertised));
@@ -641,9 +667,12 @@ impl Driver for ArchiveDriver {
 
         if let Some(series) = &self.current
             && capture.url
-                == self
-                    .site
-                    .page_url(series.endpoint.name(), self.before, series.page + 1)
+                == self.site.page_url(
+                    series.endpoint.name(),
+                    self.before,
+                    series.page + 1,
+                    self.per_page,
+                )
         {
             return self.inspect_page(capture);
         }
@@ -884,6 +913,21 @@ mod tests {
         probe_all(&mut driver, [NOT_FOUND; 8]);
         assert_eq!(driver.next(), None);
         assert_eq!(driver.endpoints(), Endpoint::ALL.map(Collection::Known));
+    }
+
+    #[test]
+    fn an_archive_uses_its_configured_page_size() {
+        let mut driver = ArchiveDriver::new(site(), before()).with_per_page(20);
+        capture_roots(&mut driver);
+        probe_all(
+            &mut driver,
+            [
+                OK, NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND,
+            ],
+        );
+
+        let request = driver.next().expect("the first collection page");
+        assert!(request.url.ends_with("&page=1&per_page=20"));
     }
 
     #[test]

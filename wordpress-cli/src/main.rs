@@ -21,7 +21,9 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cli_support::{
     CommandOutcome, Verbosity, exit_code, interrupt_flag, load_config, spinner,
 };
-use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, PaginationProgress, Site};
+use archivindex_wordpress::archive::{
+    ArchiveDriver, Checkpoint, DEFAULT_PER_PAGE, PaginationProgress, Site,
+};
 use archivindex_wordpress::complete::{CommentCompletionSummary, complete_comments_with_delay};
 use archivindex_wordpress::lint::{Severity, lint_archive};
 use archivindex_wordpress::read::{
@@ -121,7 +123,7 @@ fn archive_site(options: &ArchiveRunOptions, quiet: bool) -> Result<CommandOutco
     run.session_name = Some(next_segment_name(&options.output, &session));
 
     run_archive_for_session(
-        ArchiveDriver::new(run.base.clone(), before),
+        ArchiveDriver::new(run.base.clone(), before).with_per_page(run.per_page),
         &run,
         before,
         quiet,
@@ -194,7 +196,8 @@ fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<Command
         .map(|probe| probe.collection.clone())
         .ok_or_else(|| Error::UnknownEndpoint(resumption.endpoint.name().to_owned()))?;
     let driver =
-        ArchiveDriver::resume_with_probes(first.site.clone(), before, resumption, first.probes);
+        ArchiveDriver::resume_with_probes(first.site.clone(), before, resumption, first.probes)
+            .with_per_page(options.per_page);
     let run = ArchiveRunOptions {
         config: options.config.clone(),
         base: first.site,
@@ -202,6 +205,7 @@ fn resume_archive(options: &ResumeArchiveOptions, quiet: bool) -> Result<Command
         session_name: Some(next_segment_name(&options.output, &options.session_name)),
         revisit_index: options.revisit_index.clone(),
         limit: options.limit,
+        per_page: options.per_page,
         cookie: options.cookie.clone(),
     };
 
@@ -237,7 +241,10 @@ fn resume_info(options: &ResumeInfoOptions, quiet: bool) -> Result<CommandOutcom
                 .unwrap_or_else(|| Path::new("."));
             let session = session_name_from_warc(&options.warc)
                 .ok_or_else(|| Error::SessionName(options.warc.clone()))?;
-            println!("{}", resume_command(parent, &session, None, None, None));
+            println!(
+                "{}",
+                resume_command(parent, &session, None, None, None, DEFAULT_PER_PAGE)
+            );
             Ok(CommandOutcome::ReportedProblems)
         }
         Checkpoint::Initial => Err(Error::InitialArchiveCannotResume(options.warc.clone())),
@@ -368,6 +375,7 @@ fn run_archive_for_session(
                     options.config.as_deref(),
                     options.revisit_index.as_deref(),
                     (!summary_has_pagination(&summary)).then_some(before),
+                    options.per_page,
                 )
             );
             Ok(CommandOutcome::ReportedProblems)
@@ -614,6 +622,16 @@ fn is_timestamp_suffix(value: &str) -> bool {
     value.len() >= 9 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn parse_per_page(value: &str) -> Result<usize, String> {
+    let per_page = value
+        .parse::<usize>()
+        .map_err(|_| "must be an integer from 1 through 100".to_owned())?;
+    (1..=DEFAULT_PER_PAGE)
+        .contains(&per_page)
+        .then_some(per_page)
+        .ok_or_else(|| "must be from 1 through 100".to_owned())
+}
+
 /// The command continuing the archive segments sharing `session_name`.
 ///
 /// A cookie is not repeated because it is a secret. The capture limit is not repeated so a
@@ -624,6 +642,7 @@ fn resume_command(
     config: Option<&Path>,
     revisit_index: Option<&Path>,
     before: Option<DateTime<Utc>>,
+    per_page: usize,
 ) -> String {
     let mut command = format!(
         "archivindex-wordpress resume-archive --output {} --session-name {}",
@@ -643,6 +662,9 @@ fn resume_command(
         command.push_str(&shell_word(
             &before.to_rfc3339_opts(SecondsFormat::Secs, true),
         ));
+    }
+    if per_page != DEFAULT_PER_PAGE {
+        command.push_str(&format!(" --per-page {per_page}"));
     }
 
     command
@@ -1463,6 +1485,9 @@ struct ArchiveRunOptions {
     /// Stop after this many captures, reporting the command that continues the archive.
     #[clap(long)]
     limit: Option<usize>,
+    /// Number of items requested per collection page.
+    #[clap(long, default_value_t = DEFAULT_PER_PAGE, value_parser = parse_per_page)]
+    per_page: usize,
     /// Cookie header obtained from a browser, scoped to the site's host.
     ///
     /// The value is sent with every request to that host and recorded in the WARC request records.
@@ -1492,6 +1517,9 @@ struct ResumeArchiveOptions {
     /// Stop this continuation after this many captures.
     #[clap(long)]
     limit: Option<usize>,
+    /// Number of items requested per collection page.
+    #[clap(long, default_value_t = DEFAULT_PER_PAGE, value_parser = parse_per_page)]
+    per_page: usize,
     /// Cookie header obtained from a browser, scoped to the recovered site's host.
     #[clap(long)]
     cookie: Option<String>,
@@ -1595,7 +1623,9 @@ mod tests {
     use archivindex_warc::record::extension::NoExtension;
     use archivindex_warc::record::{FieldsBlock, Record};
     use archivindex_wordpress::CommentDriver;
-    use archivindex_wordpress::archive::{ArchiveDriver, Checkpoint, Resumption, Site};
+    use archivindex_wordpress::archive::{
+        ArchiveDriver, Checkpoint, DEFAULT_PER_PAGE, Resumption, Site,
+    };
     use archivindex_wordpress::endpoint::{Collection, Endpoint, Registry};
     use archivindex_wordpress::lint::{Severity, lint_archive};
     use archivindex_wordpress::read::{CommentCompleteness, check_comment_collections};
@@ -1712,6 +1742,7 @@ mod tests {
             session_name: Some(session_name.to_owned()),
             revisit_index: None,
             limit: None,
+            per_page: DEFAULT_PER_PAGE,
             cookie: None,
         }
     }
@@ -1837,6 +1868,8 @@ mod tests {
             "state.sqlite3",
             "--limit",
             "12",
+            "--per-page",
+            "20",
             "--cookie",
             "cf_clearance=test-clearance; __cf_bm=test-bot-cookie",
         ])
@@ -1852,6 +1885,7 @@ mod tests {
         assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
         assert_eq!(options.revisit_index, Some(PathBuf::from("state.sqlite3")));
         assert_eq!(options.limit, Some(12));
+        assert_eq!(options.per_page, 20);
         assert_eq!(
             options.cookie.as_deref(),
             Some("cf_clearance=test-clearance; __cf_bm=test-bot-cookie")
@@ -1870,6 +1904,7 @@ mod tests {
             panic!("expected the archiving command");
         };
         assert_eq!(defaults.session_name, None);
+        assert_eq!(defaults.per_page, DEFAULT_PER_PAGE);
         assert!(
             defaults
                 .base
@@ -1984,6 +2019,8 @@ mod tests {
             "state.sqlite3",
             "--limit",
             "12",
+            "--per-page",
+            "10",
             "--cookie",
             "secret=yes",
         ])
@@ -1998,6 +2035,7 @@ mod tests {
         assert_eq!(options.config, Some(PathBuf::from("capture.toml")));
         assert_eq!(options.revisit_index, Some(PathBuf::from("state.sqlite3")));
         assert_eq!(options.limit, Some(12));
+        assert_eq!(options.per_page, 10);
         assert_eq!(options.cookie.as_deref(), Some("secret=yes"));
 
         for arguments in [
@@ -2080,8 +2118,20 @@ mod tests {
     #[test]
     fn a_session_is_printed_as_a_minimal_resume_command() {
         assert_eq!(
-            resume_command(Path::new("archives"), "example.com", None, None, None),
+            resume_command(
+                Path::new("archives"),
+                "example.com",
+                None,
+                None,
+                None,
+                DEFAULT_PER_PAGE,
+            ),
             "archivindex-wordpress resume-archive --output archives --session-name example.com"
+        );
+
+        assert!(
+            resume_command(Path::new("archives"), "example.com", None, None, None, 20,)
+                .ends_with(" --per-page 20")
         );
 
         assert_eq!(
@@ -2091,6 +2141,7 @@ mod tests {
                 Some(Path::new("capture files/site's.toml")),
                 Some(Path::new("state files/site.sqlite3")),
                 Some(before()),
+                DEFAULT_PER_PAGE,
             ),
             "archivindex-wordpress resume-archive --output 'archive output/it'\"'\"'s here' \
              --session-name 'site'\"'\"'s run' --config 'capture files/site'\"'\"'s.toml' \
@@ -2791,6 +2842,7 @@ mod tests {
                     before: Some(before()),
                     revisit_index: None,
                     limit: None,
+                    per_page: DEFAULT_PER_PAGE,
                     cookie: None,
                 },
                 true,
