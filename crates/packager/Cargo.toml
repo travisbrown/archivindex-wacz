@@ -1,0 +1,44 @@
+[package]
+name = "archivindex-packager"
+description = "Packaging WARC captures as indexed WACZ distributions"
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/crate/archivindex-packager/"
+keywords = ["warc", "wacz", "web", "archive"]
+edition.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+archivindex-cdx.workspace = true
+archivindex-surt.workspace = true
+archivindex-wacz.workspace = true
+archivindex-warc = { workspace = true, features = ["gzip", "http"] }
+chrono.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+archivindex-archiver.workspace = true
+archivindex-test-support.workspace = true
+flate2.workspace = true
+# Integration tests inspect WARC records, whose target URIs are `fluent_uri::Uri<String>` values.
+fluent-uri.workspace = true
+proptest.workspace = true
+test-strategy.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# Compile SQLite for the integration tests on Windows.
+archivindex-archiver = { workspace = true, features = ["bundled"] }

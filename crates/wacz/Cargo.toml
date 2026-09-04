@@ -1,0 +1,43 @@
+[package]
+name = "archivindex-wacz"
+description = "Reading and writing web archive collections in the WACZ format"
+authors.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/crate/archivindex-wacz/"
+keywords = ["wacz", "warc", "web", "archive"]
+edition.workspace = true
+rust-version.workspace = true
+readme.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+archivindex-cdx = { workspace = true, features = ["bounded-static"] }
+archivindex-digest.workspace = true
+archivindex-lines.workspace = true
+archivindex-publication.workspace = true
+archivindex-serde.workspace = true
+archivindex-surt.workspace = true
+archivindex-warc = { workspace = true, features = ["gzip", "http"] }
+bounded-static = { workspace = true, features = ["derive", "chrono"] }
+chrono = { workspace = true, features = ["serde"] }
+data-encoding.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+# Integration tests build WARC records, whose target URIs are `fluent_uri::Uri<String>` values.
+fluent-uri.workspace = true
+proptest.workspace = true
+test-strategy.workspace = true
