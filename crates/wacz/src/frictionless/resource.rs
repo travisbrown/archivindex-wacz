@@ -156,8 +156,8 @@ mod tests {
     use super::*;
     use crate::strategies;
 
-    #[test_strategy::proptest]
-    fn resources_round_trip(#[strategy(strategies::resource())] resource: Resource<'static>) {
+    #[proptest::property_test]
+    fn resources_round_trip(#[strategy = strategies::resource()] resource: Resource<'static>) {
         let text = serde_json::to_string(&resource).unwrap();
         let parsed = serde_json::from_str::<Resource<'_>>(&text).unwrap();
 

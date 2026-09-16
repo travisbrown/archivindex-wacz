@@ -534,10 +534,12 @@ mod tests {
     use super::*;
     use crate::strategies;
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn page_lists_round_trip(
-        #[strategy(strategies::page_list_header())] header: PageListHeader<'static>,
-        #[strategy(proptest::collection::vec(strategies::page(), 0..=4))] pages: Vec<Page<'static>>,
+        #[strategy = strategies::page_list_header()] header: PageListHeader<'static>,
+        #[strategy = proptest::collection::vec(strategies::page(), 0..=4)] pages: Vec<
+            Page<'static>,
+        >,
     ) {
         let mut output = Vec::new();
         write_page_list(&mut output, &header, &pages).unwrap();
@@ -554,11 +556,11 @@ mod tests {
         prop_assert_eq!(read, pages);
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn synthetic_identifiers_are_hexadecimal_of_the_requested_length(
-        #[strategy(strategies::datetime())] ts: DateTime<Utc>,
-        #[strategy(".*")] url: String,
-        #[strategy(0..=80_usize)] length: usize,
+        #[strategy = strategies::datetime()] ts: DateTime<Utc>,
+        #[strategy = ".*"] url: String,
+        #[strategy = 0..=80_usize] length: usize,
     ) {
         let id = synthetic_id(&ts, &url, length);
 
@@ -631,10 +633,12 @@ mod tests {
         );
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn written_entries_are_read_at_both_levels(
-        #[strategy(strategies::page_list_header())] header: PageListHeader<'static>,
-        #[strategy(proptest::collection::vec(strategies::page(), 0..=4))] pages: Vec<Page<'static>>,
+        #[strategy = strategies::page_list_header()] header: PageListHeader<'static>,
+        #[strategy = proptest::collection::vec(strategies::page(), 0..=4)] pages: Vec<
+            Page<'static>,
+        >,
     ) {
         let mut output = Vec::new();
         write_page_list(&mut output, &header, &pages).unwrap();

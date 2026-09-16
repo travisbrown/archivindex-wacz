@@ -40,4 +40,3 @@ zip.workspace = true
 # Integration tests build WARC records, whose target URIs are `fluent_uri::Uri<String>` values.
 fluent-uri.workspace = true
 proptest.workspace = true
-test-strategy.workspace = true

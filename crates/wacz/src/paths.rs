@@ -124,8 +124,8 @@ mod tests {
     }
 
     /// A `ZipNum` member and its counterpart name each other.
-    #[test_strategy::proptest]
-    fn zipnum_partners_are_mutual(#[strategy(strategies::zipnum_path())] path: String) {
+    #[proptest::property_test]
+    fn zipnum_partners_are_mutual(#[strategy = strategies::zipnum_path()] path: String) {
         let partner = zipnum_partner(&path).expect("a ZipNum member has a counterpart");
 
         prop_assert_ne!(&partner, &path);
@@ -135,8 +135,8 @@ mod tests {
     }
 
     /// Only `ZipNum` members have counterparts.
-    #[test_strategy::proptest]
-    fn only_zipnum_members_have_partners(#[strategy(strategies::member_path())] path: String) {
+    #[proptest::property_test]
+    fn only_zipnum_members_have_partners(#[strategy = strategies::member_path()] path: String) {
         prop_assert_eq!(
             zipnum_partner(&path).is_some(),
             is_zipnum_data(&path) || is_zipnum_summary(&path)
@@ -147,8 +147,8 @@ mod tests {
     ///
     /// A `ZipNum` block file is also a CDXJ index, since only the presence of its summary
     /// distinguishes the two readings.
-    #[test_strategy::proptest]
-    fn member_kinds_are_exclusive_and_safe(#[strategy(strategies::member_path())] path: String) {
+    #[proptest::property_test]
+    fn member_kinds_are_exclusive_and_safe(#[strategy = strategies::member_path()] path: String) {
         let kinds = [
             is_warc(&path),
             is_cdxj_index(&path),
@@ -163,8 +163,8 @@ mod tests {
 
     /// Every index name accepted by the writer is recognized by the reader, which reads more
     /// forms than the writer produces.
-    #[test_strategy::proptest]
-    fn index_names_are_index_paths(#[strategy(strategies::member_path())] name: String) {
+    #[proptest::property_test]
+    fn index_names_are_index_paths(#[strategy = strategies::member_path()] name: String) {
         let path = format!("{INDEXES_PREFIX}{name}");
 
         prop_assert!(!valid_index_name(&name) || is_cdxj_index(&path));

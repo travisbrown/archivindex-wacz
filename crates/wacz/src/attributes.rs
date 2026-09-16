@@ -105,27 +105,27 @@ mod tests {
     use super::*;
     use crate::strategies;
 
-    #[test_strategy::proptest]
-    fn rfc_3339_dates_round_trip(#[strategy(strategies::datetime())] datetime: DateTime<Utc>) {
+    #[proptest::property_test]
+    fn rfc_3339_dates_round_trip(#[strategy = strategies::datetime()] datetime: DateTime<Utc>) {
         prop_assert_eq!(
             parse_compatible_datetime(&datetime.to_rfc3339()),
             Some(datetime)
         );
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn zone_offsets_name_the_same_instant(
-        #[strategy(strategies::datetime())] datetime: DateTime<Utc>,
-        #[strategy(strategies::time_zone_offset())] offset: chrono::FixedOffset,
+        #[strategy = strategies::datetime()] datetime: DateTime<Utc>,
+        #[strategy = strategies::time_zone_offset()] offset: chrono::FixedOffset,
     ) {
         let elsewhere = datetime.with_timezone(&offset).to_rfc3339();
 
         prop_assert_eq!(parse_compatible_datetime(&elsewhere), Some(datetime));
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn zoneless_date_times_are_read_as_utc(
-        #[strategy(strategies::datetime())] datetime: DateTime<Utc>,
+        #[strategy = strategies::datetime()] datetime: DateTime<Utc>,
     ) {
         // `%.f` prints nothing at all for a whole second, so both layouts are exercised.
         let written = datetime.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
@@ -133,9 +133,9 @@ mod tests {
         prop_assert_eq!(parse_compatible_datetime(&written), Some(datetime));
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn bare_dates_are_read_as_midnight_utc(
-        #[strategy(strategies::datetime())] datetime: DateTime<Utc>,
+        #[strategy = strategies::datetime()] datetime: DateTime<Utc>,
     ) {
         let written = datetime.format("%Y-%m-%d").to_string();
         let parsed = parse_compatible_datetime(&written);

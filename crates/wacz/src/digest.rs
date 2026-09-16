@@ -200,16 +200,16 @@ mod tests {
         Ok(())
     }
 
-    #[test_strategy::proptest]
-    fn text_round_trips(#[strategy(strategies::digest())] digest: Sha256Digest) {
+    #[proptest::property_test]
+    fn text_round_trips(#[strategy = strategies::digest()] digest: Sha256Digest) {
         prop_assert_eq!(
             digest.to_string().parse::<Sha256Digest>().ok(),
             Some(digest)
         );
     }
 
-    #[test_strategy::proptest]
-    fn parsing_ignores_hexadecimal_case(#[strategy(strategies::digest())] digest: Sha256Digest) {
+    #[proptest::property_test]
+    fn parsing_ignores_hexadecimal_case(#[strategy = strategies::digest()] digest: Sha256Digest) {
         let text = digest.to_string();
         let prefix = <Encoding as Format>::PREFIX;
         let upper = format!("{prefix}{}", text[prefix.len()..].to_uppercase());
@@ -217,8 +217,8 @@ mod tests {
         prop_assert_eq!(upper.parse::<Sha256Digest>().ok(), Some(digest));
     }
 
-    #[test_strategy::proptest]
-    fn serde_round_trips(#[strategy(strategies::digest())] digest: Sha256Digest) {
+    #[proptest::property_test]
+    fn serde_round_trips(#[strategy = strategies::digest()] digest: Sha256Digest) {
         let json = serde_json::to_string(&digest).unwrap();
 
         prop_assert_eq!(
@@ -228,7 +228,7 @@ mod tests {
     }
 
     /// Buffer and stream hashing are separate code paths, so they must agree.
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn computing_and_reading_agree(bytes: Vec<u8>) {
         let (from_reader, length) = Sha256Digest::from_reader(&bytes[..]).unwrap();
 

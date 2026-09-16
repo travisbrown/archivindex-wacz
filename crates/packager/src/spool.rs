@@ -271,9 +271,9 @@ mod tests {
     use super::*;
     use crate::strategies;
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn annotations_merge_to_the_last_present_values(
-        #[strategy(proptest::collection::vec(strategies::annotation(), 0..=6))] updates: Vec<
+        #[strategy = proptest::collection::vec(strategies::annotation(), 0..=6)] updates: Vec<
             Annotation,
         >,
     ) {
@@ -294,10 +294,10 @@ mod tests {
         prop_assert_eq!(merged.page_url, last_page_url);
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn spooled_values_round_trip_through_json(
-        #[strategy(strategies::annotation())] annotation: Annotation,
-        #[strategy(strategies::page_draft())] draft: PageDraft,
+        #[strategy = strategies::annotation()] annotation: Annotation,
+        #[strategy = strategies::page_draft()] draft: PageDraft,
     ) {
         let bytes = serde_json::to_vec(&annotation).unwrap();
 

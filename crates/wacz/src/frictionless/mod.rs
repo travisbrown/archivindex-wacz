@@ -871,9 +871,9 @@ mod tests {
         }
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn data_packages_round_trip(
-        #[strategy(strategies::data_package())] package: DataPackage<'static>,
+        #[strategy = strategies::data_package()] package: DataPackage<'static>,
     ) {
         let text = serde_json::to_string(&package).unwrap();
         let parsed = serde_json::from_str::<DataPackage<'_>>(&text).unwrap();
@@ -881,9 +881,9 @@ mod tests {
         prop_assert_eq!(parsed.into_static(), package);
     }
 
-    #[test_strategy::proptest]
+    #[proptest::property_test]
     fn the_main_page_url_alias_is_accepted(
-        #[strategy(strategies::data_package())] package: DataPackage<'static>,
+        #[strategy = strategies::data_package()] package: DataPackage<'static>,
     ) {
         let mut value = serde_json::to_value(&package).unwrap();
         let object = value
