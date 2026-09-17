@@ -1,0 +1,10 @@
+[global]
+enable = ["MD013"]
+
+[MD013]
+line-length = 100
+code-blocks = false
+tables = false
+stern = true
+ignore-link-urls = false
+reflow = true
