@@ -82,7 +82,6 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#8c322a9b1b14be39aa74cdd3dad85cfaefec7d8a"
 dependencies = [
  "archivindex-publication",
  "archivindex-warc",
@@ -105,7 +104,6 @@ dependencies = [
 [[package]]
 name = "archivindex-cdx"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "archivindex-serde",
  "bounded-static",
@@ -118,7 +116,6 @@ dependencies = [
 [[package]]
 name = "archivindex-cli-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "clap",
  "ctrlc",
@@ -134,7 +131,6 @@ dependencies = [
 [[package]]
 name = "archivindex-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "data-encoding",
  "thiserror",
@@ -143,7 +139,6 @@ dependencies = [
 [[package]]
 name = "archivindex-lines"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "thiserror",
 ]
@@ -183,7 +178,6 @@ dependencies = [
 [[package]]
 name = "archivindex-publication"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -192,7 +186,6 @@ dependencies = [
 [[package]]
 name = "archivindex-serde"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "serde",
 ]
@@ -200,7 +193,6 @@ dependencies = [
 [[package]]
 name = "archivindex-surt"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "bounded-static",
  "fluent-uri",
@@ -211,9 +203,9 @@ dependencies = [
 [[package]]
 name = "archivindex-test-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#a25373587c251dbf13188fb75f4d9b41a92ce276"
 dependencies = [
  "proptest",
+ "url",
 ]
 
 [[package]]
@@ -243,7 +235,6 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#8c322a9b1b14be39aa74cdd3dad85cfaefec7d8a"
 dependencies = [
  "archivindex-warc-digest",
  "chrono",
@@ -261,7 +252,6 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#8c322a9b1b14be39aa74cdd3dad85cfaefec7d8a"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -274,7 +264,6 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#8c322a9b1b14be39aa74cdd3dad85cfaefec7d8a"
 dependencies = [
  "archivindex-warc",
  "fluent-uri",

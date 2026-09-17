@@ -824,7 +824,8 @@ fn capture_identity_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Re
         Timestamp::with_milliseconds(date)
     } else {
         Timestamp::new(date)
-    };
+    }
+    .map_err(|error| error.to_string())?;
     if item.timestamp != timestamp {
         return Err(format!(
             "timestamp {} does not match WARC-Date at the same precision ({timestamp})",

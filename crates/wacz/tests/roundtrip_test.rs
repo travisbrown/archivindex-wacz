@@ -53,7 +53,7 @@ fn capture_time() -> chrono::DateTime<Utc> {
 fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     Ok(cdxj::Item {
         key: Surt::from_url(url)?.into(),
-        timestamp: Timestamp::new(capture_time()),
+        timestamp: Timestamp::new(capture_time()).unwrap(),
         fields: cdxj::Fields {
             url: Cow::Owned(url.to_owned()),
             digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
@@ -107,7 +107,7 @@ fn item_at(
     timestamp: chrono::DateTime<Utc>,
 ) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
-    item.timestamp = Timestamp::new(timestamp);
+    item.timestamp = Timestamp::new(timestamp).unwrap();
     Ok(item)
 }
 
@@ -177,7 +177,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 
     let item = cdxj::Item {
         key: Surt::from_url(URL)?.into(),
-        timestamp: Timestamp::new(capture_time),
+        timestamp: Timestamp::new(capture_time).unwrap(),
         fields: cdxj::Fields {
             url: Cow::Borrowed(URL),
             digest: Some(Cow::Borrowed(PAYLOAD_DIGEST)),
@@ -374,7 +374,7 @@ fn plain_lookup_and_capture_resolution() -> Result<(), Box<dyn std::error::Error
     let warc = warc_bytes()?;
     let wacz = build_wacz("data.warc", &warc)?;
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    let timestamp = Timestamp::new(capture_time());
+    let timestamp = Timestamp::new(capture_time()).unwrap();
 
     assert!(reader.lookup(URL, ..timestamp)?.is_empty());
 
@@ -625,8 +625,8 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
         item_at(URL, first)?,
         item_at(URL, second)?,
     ];
-    items[1].timestamp = Timestamp::new(first);
-    items[2].timestamp = Timestamp::with_milliseconds(second);
+    items[1].timestamp = Timestamp::new(first).unwrap();
+    items[2].timestamp = Timestamp::with_milliseconds(second).unwrap();
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     let required = required_items(&items)?;
@@ -634,7 +634,10 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
     let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
 
-    let captures = reader.lookup(URL, Timestamp::new(first)..Timestamp::new(third))?;
+    let captures = reader.lookup(
+        URL,
+        Timestamp::new(first).unwrap()..Timestamp::new(third).unwrap(),
+    )?;
     assert_eq!(captures.len(), 2);
     assert!(captures.is_sorted_by_key(|capture| capture.item.timestamp));
     assert_eq!(captures[0].item.timestamp.datetime(), first);
@@ -1805,7 +1808,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
     let warc = warc_bytes()?;
     let length = warc.len() as u64;
     let mut good = resolvable_item(URL, "data.warc", length)?;
-    good.timestamp = Timestamp::with_milliseconds(capture_time());
+    good.timestamp = Timestamp::with_milliseconds(capture_time()).unwrap();
     good.fields.digest = Some(Cow::Borrowed(
         "SHA-256:flN+kD31v6nJ3i3FkNJkb4tKpx3RSHe9Pi7O2oKaRhg=",
     ));
@@ -1818,7 +1821,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
 
     let mut bad_timestamp = good.clone();
     bad_timestamp.timestamp =
-        Timestamp::with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1));
+        Timestamp::with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1)).unwrap();
 
     let mut bad_status = good.clone();
     bad_status.fields.status = Some(404);
