@@ -581,7 +581,8 @@ mod tests {
             key: Cow::Borrowed("com,example)/"),
             timestamp: archivindex_cdx::timestamp::Timestamp::new(
                 Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
-            ),
+            )
+            .unwrap(),
             fields: cdxj::ConformingFields::new(
                 "https://example.com/",
                 "sha256:00",
