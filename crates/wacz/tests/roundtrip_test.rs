@@ -1979,3 +1979,55 @@ fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>>
 
     Ok(())
 }
+
+/// Both formats reject blank records during validation, before the `ZipNum` encoder can treat one
+/// as a block prefix or the plain writer can emit an index rejected by content validation.
+#[test]
+fn sorted_indexes_reject_blank_lines_before_writing() -> Result<(), Box<dyn std::error::Error>> {
+    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    for index_format in [
+        IndexFormat::Plain,
+        IndexFormat::zipnum_with_lines(nonzero(1)),
+    ] {
+        for text in [
+            format!("\n{item}\n"),
+            format!("{item}\n\n{item}\n"),
+            format!("{item}\n\n"),
+        ] {
+            let config = WriterConfig::default().index_format(index_format);
+            let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+            assert!(matches!(
+                writer.add_sorted_index_file("index.cdx", Cursor::new(text)),
+                Err(writer::Error::InvalidIndex(_))
+            ));
+            // A validation failure must not reserve a member name or partially write an index.
+            writer.add_sorted_index_file("index.cdx", Cursor::new(format!("{item}\n")))?;
+            let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
+            let mut reader = WaczReader::new(Cursor::new(wacz))?;
+            assert_eq!(reader.lookup(URL, ..)?.len(), 1);
+        }
+    }
+    Ok(())
+}
+
+/// Validation and copying must start at the same position, including when earlier bytes are not
+/// CDXJ. Rewinding to zero would emit unvalidated bytes or panic when encoding a `ZipNum` block.
+#[test]
+fn sorted_indexes_start_at_the_readers_position() -> Result<(), Box<dyn std::error::Error>> {
+    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    for index_format in [
+        IndexFormat::Plain,
+        IndexFormat::zipnum_with_lines(nonzero(1)),
+    ] {
+        let prefix = "not an index\n";
+        let mut input = Cursor::new(format!("{prefix}{item}\n"));
+        input.set_position(prefix.len() as u64);
+        let config = WriterConfig::default().index_format(index_format);
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+        writer.add_sorted_index_file("index.cdx", input)?;
+        let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
+        let mut reader = WaczReader::new(Cursor::new(wacz))?;
+        assert_eq!(reader.lookup(URL, ..)?.len(), 1);
+    }
+    Ok(())
+}

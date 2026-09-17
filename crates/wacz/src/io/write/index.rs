@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use archivindex_cdx::format::cdxj;
@@ -43,7 +43,8 @@ impl<W: Write + Seek> WaczWriter<W> {
 
     /// Add a sorted CDXJ file without retaining the full index in memory.
     ///
-    /// Nonblank lines are parsed before any member is written. The file is rejected if a line sorts
+    /// Every line from the current position is parsed before any member is written. Blank lines
+    /// are rejected. The file is rejected if a line sorts
     /// before its predecessor by `(key, timestamp)`. Equal keys and timestamps retain their input
     /// order, and duplicate lines are preserved.
     ///
@@ -61,8 +62,12 @@ impl<W: Write + Seek> WaczWriter<W> {
         if !crate::paths::valid_index_name(name) {
             return Err(Error::InvalidIndexName(name.to_owned()));
         }
+        let start = reader.stream_position()?;
         let mut previous: Option<(String, Timestamp)> = None;
-        for (index, item) in IndexReader::new(&mut reader).enumerate() {
+        for (index, item) in IndexReader::new(&mut reader)
+            .rejecting_blank_lines()
+            .enumerate()
+        {
             let item = item.map_err(Error::InvalidIndex)?;
             cdxj::ConformingFields::try_from(&item.fields).map_err(|source| {
                 Error::NonConformingIndex {
@@ -77,7 +82,7 @@ impl<W: Write + Seek> WaczWriter<W> {
             }
             previous = Some(current);
         }
-        reader.rewind()?;
+        reader.seek(SeekFrom::Start(start))?;
         match self.config.index_format {
             IndexFormat::Plain => {
                 let path = format!("{INDEXES_PREFIX}{name}");
