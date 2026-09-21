@@ -417,21 +417,20 @@ fn single<T>(
 
 fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
     let mut lines = Lines::with_source(text.as_bytes(), path);
-    let (header_context, header_line) =
-        lines
-            .next_content()
-            .map_err(zipnum_io_error)?
-            .ok_or_else(|| {
-                zipnum_error(
-                    LineContext {
-                        source: path.to_owned(),
-                        line: 1,
-                        excerpt: None,
-                    },
-                    "missing !meta header",
-                )
-            })?;
-    let (header_key, header_json) = crate::cdxj::split_prefix(header_line)
+    let header_context = lines
+        .next_content()
+        .map_err(|error| zipnum_line_error(&error))?
+        .ok_or_else(|| {
+            zipnum_error(
+                LineContext {
+                    source: path.to_owned(),
+                    line: 1,
+                    excerpt: None,
+                },
+                "missing !meta header",
+            )
+        })?;
+    let (header_key, header_json) = crate::cdxj::split_prefix(header_context.content)
         .ok_or_else(|| zipnum_error(header_context.into_owned(), "malformed !meta header"))?;
 
     if header_key != "!meta 0" {
@@ -453,8 +452,11 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
     let data_path = sibling_path(path, &header.filename);
     let mut blocks: Vec<ZipNumBlock> = Vec::new();
 
-    while let Some((context, line)) = lines.next_content().map_err(zipnum_io_error)? {
-        let (prefix, json) = crate::cdxj::split_prefix(line)
+    while let Some(context) = lines
+        .next_content()
+        .map_err(|error| zipnum_line_error(&error))?
+    {
+        let (prefix, json) = crate::cdxj::split_prefix(context.content)
             .ok_or_else(|| zipnum_error(context.into_owned(), "malformed line"))?;
         let (key, timestamp) = prefix
             .rsplit_once(' ')
@@ -498,8 +500,8 @@ fn zipnum_error(context: LineContext, message: impl Into<String>) -> Error {
     }
 }
 
-fn zipnum_io_error(error: archivindex_lines::Error) -> Error {
-    zipnum_error(error.context, error.source.to_string())
+fn zipnum_line_error(error: &archivindex_lines::Error) -> Error {
+    zipnum_error(error.context().clone(), error.to_string())
 }
 
 fn sibling_path(path: &str, filename: &str) -> String {

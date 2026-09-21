@@ -40,6 +40,7 @@ tempfile = "3"
 thiserror = "2"
 # WARC and gzip-compressed members use ZIP STORE; metadata and plain indexes use DEFLATE.
 # `flate2` handles gzip content separately.
+wiremock = "0.6.5"
 zip = { version = "8", default-features = false, features = ["deflate-flate2", "deflate-zopfli"] }
 
 [workspace.lints.rust]
@@ -52,21 +53,3 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
-
-# Use the sibling checkout while cross-repository changes are reviewed together.
-[patch."https://github.com/travisbrown/archivindex"]
-archivindex-cdx = { path = "../archivindex/crates/cdx" }
-archivindex-cli-support = { path = "../archivindex/crates/cli-support" }
-archivindex-digest = { path = "../archivindex/crates/digest" }
-archivindex-lines = { path = "../archivindex/crates/lines" }
-archivindex-publication = { path = "../archivindex/crates/publication" }
-archivindex-serde = { path = "../archivindex/crates/serde" }
-archivindex-surt = { path = "../archivindex/crates/surt" }
-archivindex-test-support = { path = "../archivindex/crates/test-support" }
-
-# Use the sibling checkout while cross-repository changes are reviewed together.
-[patch."https://github.com/travisbrown/archivindex-warc"]
-archivindex-archiver = { path = "../archivindex-warc/crates/archiver" }
-archivindex-warc = { path = "../archivindex-warc" }
-archivindex-warc-digest = { path = "../archivindex-warc/crates/digest" }
-archivindex-warc-revisit-index = { path = "../archivindex-warc/crates/revisit-index" }

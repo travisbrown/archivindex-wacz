@@ -626,7 +626,7 @@ fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn st
         item_at(URL, second)?,
     ];
     items[1].timestamp = Timestamp::new(first).unwrap();
-    items[2].timestamp = Timestamp::with_milliseconds(second).unwrap();
+    items[2].timestamp = Timestamp::new_with_milliseconds(second).unwrap();
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     let required = required_items(&items)?;
@@ -1808,7 +1808,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
     let warc = warc_bytes()?;
     let length = warc.len() as u64;
     let mut good = resolvable_item(URL, "data.warc", length)?;
-    good.timestamp = Timestamp::with_milliseconds(capture_time()).unwrap();
+    good.timestamp = Timestamp::new_with_milliseconds(capture_time()).unwrap();
     good.fields.digest = Some(Cow::Borrowed(
         "SHA-256:flN+kD31v6nJ3i3FkNJkb4tKpx3RSHe9Pi7O2oKaRhg=",
     ));
@@ -1821,7 +1821,7 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
 
     let mut bad_timestamp = good.clone();
     bad_timestamp.timestamp =
-        Timestamp::with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1)).unwrap();
+        Timestamp::new_with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1)).unwrap();
 
     let mut bad_status = good.clone();
     bad_status.fields.status = Some(404);

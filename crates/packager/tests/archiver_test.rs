@@ -2,7 +2,6 @@
 
 use std::io::{Cursor, Read};
 use std::path::Path;
-use std::thread;
 
 use archivindex_archiver::session::{
     Capture, CaptureProcessor, Crawl, Discovery, Operator, Session,
@@ -11,7 +10,7 @@ use archivindex_archiver::{Archiver, Config};
 use archivindex_cdx::format::cdxj::Fields;
 use archivindex_packager::WarcToWacz;
 use archivindex_surt::Surt;
-use archivindex_test_support::http::{Request, dead_port, response, serve_with};
+use archivindex_test_support::http::{RequestExt, Server, dead_port, response, serve_with};
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::io::read::WaczReader;
 use archivindex_wacz::io::read::validate::ValidationOptions;
@@ -20,6 +19,7 @@ use archivindex_warc::record::extension::NoExtension;
 use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
 use fluent_uri::Uri;
+use wiremock::{Request, ResponseTemplate};
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
 const PNG_PAYLOAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
@@ -103,11 +103,11 @@ fn operator() -> Operator {
 
 /// A canned HTTP/1.1 response for a request path: a small site whose home page links to two other
 /// pages, one of which links back, plus a redirect and an image served as text.
-fn respond(path: &str) -> Vec<u8> {
+fn respond(path: &str) -> ResponseTemplate {
     // Redirects to an address that refuses connections carry the target port in the path.
     if let Some(port) = path.strip_prefix("/dead/") {
         return response(
-            "302 Found",
+            302,
             &[("location", &format!("http://127.0.0.1:{port}/"))],
             "",
         );
@@ -115,36 +115,27 @@ fn respond(path: &str) -> Vec<u8> {
 
     match path {
         "/" => response(
-            "200 OK",
+            200,
             &[("content-type", "text/html")],
             "<html>home links: /about /missing</html>",
         ),
         "/about" => response(
-            "200 OK",
+            200,
             &[("content-type", "text/html")],
             "<html>about links: /</html>",
         ),
         "/redirect" => response(
-            "302 Found",
+            302,
             &[("content-type", "text/plain"), ("location", "/about")],
             "",
         ),
-        "/mislabelled" => {
-            let mut response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\
-                 connection: close\r\n\r\n",
-                PNG_PAYLOAD.len()
-            )
-            .into_bytes();
-            response.extend_from_slice(PNG_PAYLOAD);
-            response
-        }
-        _ => response("404 Not Found", &[("content-type", "text/plain")], "gone"),
+        "/mislabelled" => response(200, &[("content-type", "text/plain")], PNG_PAYLOAD),
+        _ => response(404, &[("content-type", "text/plain")], "gone"),
     }
 }
 
 /// Serve the canned site for a fixed number of connections, returning the request paths.
-fn serve(connections: usize) -> std::io::Result<(u16, thread::JoinHandle<Vec<String>>)> {
+fn serve(connections: usize) -> std::io::Result<Server<String>> {
     serve_with(connections, |request| {
         let path = request.path();
         (respond(path), path.to_owned())
@@ -154,27 +145,30 @@ fn serve(connections: usize) -> std::io::Result<(u16, thread::JoinHandle<Vec<Str
 /// Answer a request for a versioned page, whose `ETag` advances once: an unconditional request or
 /// one for a stale version gets the current page in full, while one for the current version gets
 /// `304 Not Modified`, carrying the page's validators without a body.
-fn respond_versioned(request: &Request, versions: usize) -> Vec<u8> {
+fn respond_versioned(request: &Request, versions: usize) -> ResponseTemplate {
     let requested = request
         .header("if-none-match")
         .and_then(|etag| etag.trim_matches('"').parse::<usize>().ok());
     let current = requested.map_or(1, |etag| versions.min(etag + 1));
 
     if requested == Some(current) {
-        format!(
-            "HTTP/1.1 304 Not Modified\r\netag: \"{current}\"\r\nlast-modified: {LAST_MODIFIED}\r\n\
-             connection: close\r\n\r\n"
+        response(
+            304,
+            &[
+                ("etag", &format!("\"{current}\"")),
+                ("last-modified", LAST_MODIFIED),
+            ],
+            "",
         )
-        .into_bytes()
     } else {
         response(
-            "200 OK",
+            200,
             &[
                 ("content-type", "text/html"),
                 ("etag", &format!("\"{current}\"")),
                 ("last-modified", LAST_MODIFIED),
             ],
-            &format!("<html>version {current}</html>"),
+            format!("<html>version {current}</html>"),
         )
     }
 }
@@ -284,7 +278,8 @@ fn assert_frames_one_response(
 #[test]
 fn packages_archived_captures_with_a_random_access_index() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (port, server) = serve(5)?;
+    let server = serve(5)?;
+    let port = server.port();
     let urls = [
         format!("http://127.0.0.1:{port}/"),
         format!("http://127.0.0.1:{port}/redirect"),
@@ -292,7 +287,7 @@ fn packages_archived_captures_with_a_random_access_index() -> Result<(), Box<dyn
         format!("http://127.0.0.1:{port}/mislabelled"),
     ];
     let bytes = archive(gzip_config(), &urls)?;
-    server.join().expect("server thread should not panic");
+    let _ = server.finish();
 
     let mut reader = package(&bytes)?;
     assert_conformant(&mut reader)?;
@@ -395,10 +390,11 @@ fn packages_archived_captures_with_a_random_access_index() -> Result<(), Box<dyn
 
 #[test]
 fn packages_a_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
-    let (port, server) = serve(1)?;
+    let server = serve(1)?;
+    let port = server.port();
     let urls = [format!("http://127.0.0.1:{port}/")];
     let bytes = archive(Config::default(), &urls)?;
-    server.join().expect("server thread should not panic");
+    let _ = server.finish();
 
     let mut reader = package(&bytes)?;
     assert_conformant(&mut reader)?;
@@ -423,11 +419,12 @@ fn packages_a_plain_warc_member() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn packages_a_hop_captured_before_a_failure() -> Result<(), Box<dyn std::error::Error>> {
     let dead_port = dead_port()?;
-    let (port, server) = serve(1)?;
+    let server = serve(1)?;
+    let port = server.port();
     let url = format!("http://127.0.0.1:{port}/dead/{dead_port}");
     let mut bytes = Vec::new();
     let summary = Archiver::new(gzip_config())?.archive([&url], Cursor::new(&mut bytes))?;
-    server.join().expect("server thread should not panic");
+    let _ = server.finish();
     assert!(!summary.is_complete());
 
     // The completed redirect hop is a page and an index entry even though the following request
@@ -452,7 +449,8 @@ fn packages_a_hop_captured_before_a_failure() -> Result<(), Box<dyn std::error::
 fn packages_a_crawl_session_with_extra_pages() -> Result<(), Box<dyn std::error::Error>> {
     // The seeds are the home page and a redirect whose final URL is /about; the home page links to
     // /about and /missing, which are crawled as discoveries.
-    let (port, server) = serve(5)?;
+    let server = serve(5)?;
+    let port = server.port();
     let seeds = [
         format!("http://127.0.0.1:{port}/"),
         format!("http://127.0.0.1:{port}/redirect"),
@@ -469,7 +467,7 @@ fn packages_a_crawl_session_with_extra_pages() -> Result<(), Box<dyn std::error:
         &path,
     )?
     .run()?;
-    server.join().expect("server thread should not panic");
+    let _ = server.finish();
     assert!(summary.is_complete());
 
     let mut reader = package_path(&path)?;
@@ -537,7 +535,8 @@ fn packages_a_crawl_session_with_extra_pages() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn packages_an_identical_payload_revisit() -> Result<(), Box<dyn std::error::Error>> {
-    let (port, server) = serve(2)?;
+    let server = serve(2)?;
+    let port = server.port();
     let url = format!("http://127.0.0.1:{port}/about");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("recapture.warc.gz");
@@ -550,7 +549,7 @@ fn packages_an_identical_payload_revisit() -> Result<(), Box<dyn std::error::Err
         &path,
     )?
     .run()?;
-    server.join().expect("server thread should not panic");
+    let _ = server.finish();
     assert!(summary.is_complete());
 
     // Both captures are indexed under the shared payload digest, the revisit entry marked by the
@@ -577,7 +576,8 @@ fn packages_an_identical_payload_revisit() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 fn packages_server_not_modified_revisits() -> Result<(), Box<dyn std::error::Error>> {
-    let (port, server) = serve_with(3, |request| (respond_versioned(request, 2), ()))?;
+    let server = serve_with(3, |request| (respond_versioned(request, 2), ()))?;
+    let port = server.port();
     let url = format!("http://127.0.0.1:{port}/page");
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("revalidate.warc.gz");
@@ -590,7 +590,7 @@ fn packages_server_not_modified_revisits() -> Result<(), Box<dyn std::error::Err
         &path,
     )?
     .run()?;
-    server.join().expect("server thread should not panic");
+    let _ = server.finish();
     assert!(summary.is_complete());
 
     // The first recapture finds the page changed and is stored in full under its new digest; the

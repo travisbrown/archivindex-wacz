@@ -74,7 +74,7 @@ impl<R: BufRead> Iterator for IndexReader<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.lines.next_content() {
-            Ok(Some((context, line))) => Some(Item::parse(line).map(Item::into_owned).map_err(
+            Ok(Some(context)) => Some(Item::parse(context.content).map(Item::into_owned).map_err(
                 |source| Error::InvalidLine {
                     context: context.into_owned(),
                     source: InvalidLineSource::Item(source),
@@ -82,8 +82,8 @@ impl<R: BufRead> Iterator for IndexReader<R> {
             )),
             Ok(None) => None,
             Err(error) => Some(Err(Error::InvalidLine {
-                context: error.context,
-                source: InvalidLineSource::Io(error.source),
+                context: error.context().clone(),
+                source: InvalidLineSource::Io(error.into()),
             })),
         }
     }
@@ -117,7 +117,14 @@ mod tests {
             panic!("unexpected error")
         };
         assert_eq!(context.line, 1);
-        assert!(matches!(source, InvalidLineSource::Io(_)));
+        let InvalidLineSource::Io(source) = source else {
+            panic!("expected a line-reading error")
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(
+            source.get_ref().and_then(|error| error.downcast_ref()),
+            Some(archivindex_lines::Error::Blank { context: inner }) if inner == &context
+        ));
     }
 
     #[test]

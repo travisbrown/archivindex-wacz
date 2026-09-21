@@ -515,8 +515,8 @@ fn capture_parts(
         generated_title,
     );
     let item = cdxj::Item {
-        key: Cow::Owned(Cow::from(canonical.surt()).into_owned()),
-        timestamp: Timestamp::with_milliseconds(date)
+        key: Cow::from(canonical.surt()),
+        timestamp: Timestamp::new_with_milliseconds(date)
             .map_err(|_| SkipReason::UnrepresentableTimestamp)?,
         fields: {
             let fields = cdxj::ConformingFields::new(

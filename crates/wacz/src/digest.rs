@@ -21,13 +21,8 @@ struct Encoding;
 impl archivindex_digest::Format for Encoding {
     const PREFIX: &'static str = "sha256:";
 
-    fn encoding() -> data_encoding::Encoding {
-        data_encoding::HEXLOWER
-    }
-
-    fn decoding() -> data_encoding::Encoding {
-        data_encoding::HEXLOWER_PERMISSIVE
-    }
+    const ENCODING: data_encoding::Encoding = data_encoding::HEXLOWER;
+    const DECODING: data_encoding::Encoding = data_encoding::HEXLOWER_PERMISSIVE;
 }
 
 /// A SHA-256 digest, displayed and parsed in the `sha256:<hex>` encoding used by WACZ resource
@@ -97,7 +92,7 @@ impl fmt::Display for Sha256Digest {
 }
 
 impl FromStr for Sha256Digest {
-    type Err = archivindex_digest::ParseError;
+    type Err = archivindex_digest::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         archivindex_digest::decode::<Encoding, 32>(s).map(Self)
@@ -118,7 +113,7 @@ impl<'de> serde::de::Deserialize<'de> for Sha256Digest {
 
 #[cfg(test)]
 mod tests {
-    use archivindex_digest::{Format, ParseError};
+    use archivindex_digest::{Error, Format};
     use proptest::prelude::*;
 
     use super::*;
@@ -168,7 +163,7 @@ mod tests {
     fn parse_rejects_missing_prefix() {
         assert!(matches!(
             EMPTY.trim_start_matches("sha256:").parse::<Sha256Digest>(),
-            Err(ParseError::MissingPrefix { .. })
+            Err(Error::MissingPrefix { .. })
         ));
     }
 
@@ -176,7 +171,7 @@ mod tests {
     fn parse_rejects_invalid_length() {
         assert!(matches!(
             "sha256:abcd".parse::<Sha256Digest>(),
-            Err(ParseError::InvalidLength { expected: 64, .. })
+            Err(Error::InvalidLength { expected: 64, .. })
         ));
     }
 
@@ -186,7 +181,7 @@ mod tests {
 
         assert!(matches!(
             value.parse::<Sha256Digest>(),
-            Err(ParseError::InvalidEncoding(_))
+            Err(Error::InvalidEncoding(_))
         ));
     }
 

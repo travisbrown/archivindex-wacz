@@ -821,7 +821,7 @@ fn capture_identity_matches(item: &Item<'_>, record: &Record<NoExtension>) -> Re
 
     let date = record.core().date.date_time();
     let timestamp = if item.timestamp.has_milliseconds() {
-        Timestamp::with_milliseconds(date)
+        Timestamp::new_with_milliseconds(date)
     } else {
         Timestamp::new(date)
     }
