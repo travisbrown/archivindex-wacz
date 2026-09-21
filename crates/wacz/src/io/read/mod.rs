@@ -97,7 +97,7 @@ pub enum Error {
         value: String,
         /// The digest parsing failure.
         #[source]
-        source: archivindex_digest::ParseError,
+        source: archivindex_digest::Error,
     },
     /// Bytes located by an index do not match their declared digest.
     #[error("digest mismatch for {path}: expected {expected}, computed {actual}")]

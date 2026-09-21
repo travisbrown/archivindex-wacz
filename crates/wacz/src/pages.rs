@@ -93,8 +93,8 @@ impl From<std::io::Error> for Error {
 impl From<archivindex_lines::Error> for Error {
     fn from(error: archivindex_lines::Error) -> Self {
         Self::Io {
-            source: error.source,
-            context: Some(error.context),
+            context: Some(error.context().clone()),
+            source: error.into(),
         }
     }
 }
@@ -299,14 +299,15 @@ impl<R: BufRead> RawPageListReader<R> {
 
     /// Read the header line and build a reader around the remaining lines.
     fn from_lines(mut lines: Lines<R>) -> Result<Self, Error> {
-        let (location, line_text) = lines.next_content()?.ok_or(Error::MissingHeader)?;
+        let location = lines.next_content()?.ok_or(Error::MissingHeader)?;
 
-        let header = serde_json::from_str::<PageListHeader<'_>>(line_text).map_err(|source| {
-            Error::InvalidHeader {
-                context: location.into_owned(),
-                source,
-            }
-        })?;
+        let header =
+            serde_json::from_str::<PageListHeader<'_>>(location.content).map_err(|source| {
+                Error::InvalidHeader {
+                    context: location.into_owned(),
+                    source,
+                }
+            })?;
 
         if header.format != FORMAT {
             return Err(Error::UnsupportedFormat(header.format.into_owned()));
@@ -326,8 +327,8 @@ impl<R: BufRead> RawPageListReader<R> {
     /// Read the next entry together with the source context it came from.
     fn next_located(&mut self) -> Option<Result<(LineContextRef<'_>, RawPage<'static>), Error>> {
         match self.lines.next_content() {
-            Ok(Some((location, line_text))) => Some(
-                serde_json::from_str::<RawPage<'_>>(line_text)
+            Ok(Some(location)) => Some(
+                serde_json::from_str::<RawPage<'_>>(location.content)
                     .map(|page| (location, page.into_static()))
                     .map_err(|source| Error::InvalidEntry {
                         source,
@@ -605,10 +606,19 @@ mod tests {
             .expect("the blank second line")
             .expect_err("blank lines are not entries");
 
-        assert!(
-            matches!(&error, Error::Io { context: Some(context), .. } if context.line == 2),
-            "unexpected error: {error}"
-        );
+        let Error::Io {
+            source,
+            context: Some(context),
+        } = error
+        else {
+            panic!("expected a line-reading error: {error}")
+        };
+        assert_eq!(context.line, 2);
+        assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(
+            source.get_ref().and_then(|error| error.downcast_ref()),
+            Some(archivindex_lines::Error::Blank { context: inner }) if inner == &context
+        ));
     }
 
     #[test]
@@ -654,7 +664,7 @@ mod tests {
 
     #[test]
     fn line_io_errors_retain_context() {
-        let error = Error::from(archivindex_lines::Error {
+        let error = Error::from(archivindex_lines::Error::Io {
             context: LineContext {
                 source: "pages/pages.jsonl".to_owned(),
                 line: 3,

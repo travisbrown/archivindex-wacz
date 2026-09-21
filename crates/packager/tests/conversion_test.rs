@@ -7,6 +7,7 @@ use archivindex_packager::{
 };
 use archivindex_wacz::io::read::WaczReader;
 use archivindex_wacz::io::read::validate::ValidationOptions;
+use archivindex_wacz::io::write::IndexFormat;
 use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::metadata::MetadataBody;
@@ -83,6 +84,40 @@ fn write_source(path: &std::path::Path, records: Vec<Record>, gzip: bool) -> std
     } else {
         std::fs::write(path, bytes)?;
     }
+    Ok(())
+}
+
+/// IPv6 capture keys must use the same rendering as URL lookup and validation.
+#[test]
+fn ipv6_captures_are_indexed_and_found() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let url = "https://[2001:db8::1]:8080/Page";
+    write_source(
+        &input,
+        vec![response(url, "IPv6 capture", WarcDate::from(Utc::now()))],
+        false,
+    )?;
+
+    for (name, format) in [
+        ("plain", IndexFormat::Plain),
+        ("zipnum", IndexFormat::zipnum()),
+    ] {
+        let output = directory.path().join(format!("{name}.wacz"));
+        let summary = WarcToWacz::new(&input, &output)
+            .index_format(format)
+            .run()?;
+        assert_eq!(summary.captures, 1);
+        assert!(summary.warnings.is_empty());
+
+        let mut reader = WaczReader::open(&output)?;
+        let validation = reader.validate(ValidationOptions::all())?;
+        assert!(validation.is_conformant(), "{validation:#?}");
+        let captures = reader.lookup(url, ..)?;
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].item.key, "2001:db8::1:8080)/page");
+    }
+
     Ok(())
 }
 
