@@ -91,7 +91,7 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#4fac7520717535c8dc75c735566d80896de4a8b1"
+source = "git+https://github.com/travisbrown/archivindex-warc#15d0ebd948a11a603b7d330cc86459a4f3581ae6"
 dependencies = [
  "archivindex-publication",
  "archivindex-warc",
@@ -256,7 +256,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#4fac7520717535c8dc75c735566d80896de4a8b1"
+source = "git+https://github.com/travisbrown/archivindex-warc#15d0ebd948a11a603b7d330cc86459a4f3581ae6"
 dependencies = [
  "archivindex-warc-digest",
  "chrono",
@@ -274,7 +274,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#4fac7520717535c8dc75c735566d80896de4a8b1"
+source = "git+https://github.com/travisbrown/archivindex-warc#15d0ebd948a11a603b7d330cc86459a4f3581ae6"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -287,7 +287,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#4fac7520717535c8dc75c735566d80896de4a8b1"
+source = "git+https://github.com/travisbrown/archivindex-warc#15d0ebd948a11a603b7d330cc86459a4f3581ae6"
 dependencies = [
  "archivindex-warc",
  "fluent-uri",
@@ -1888,7 +1888,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
