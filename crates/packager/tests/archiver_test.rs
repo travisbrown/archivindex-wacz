@@ -3,9 +3,8 @@
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use archivindex_archiver::session::{
-    Capture, CaptureProcessor, Crawl, Discovery, Operator, Session,
-};
+use archivindex_archiver::config::Operator;
+use archivindex_archiver::session::{Capture, CaptureProcessor, Crawl, Discovery, Session};
 use archivindex_archiver::{Archiver, Config};
 use archivindex_cdx::format::cdxj::Fields;
 use archivindex_packager::WarcToWacz;

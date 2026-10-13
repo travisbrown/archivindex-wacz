@@ -21,11 +21,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 archivindex-cdx = { workspace = true, features = ["bounded-static"] }
 archivindex-digest.workspace = true
+archivindex-http.workspace = true
 archivindex-lines.workspace = true
 archivindex-publication.workspace = true
 archivindex-serde.workspace = true
 archivindex-surt.workspace = true
-archivindex-warc = { workspace = true, features = ["gzip", "http"] }
+archivindex-warc = { workspace = true, features = ["gzip"] }
 bounded-static = { workspace = true, features = ["derive", "chrono"] }
 chrono = { workspace = true, features = ["serde"] }
 data-encoding.workspace = true

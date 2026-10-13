@@ -50,8 +50,8 @@ fn capture_time() -> chrono::DateTime<Utc> {
 }
 
 /// Build a minimal CDXJ item for a URL captured at [`capture_time`].
-fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
-    Ok(cdxj::Item {
+fn item_for(url: &str) -> Result<cdxj::Entry<'static>, archivindex_surt::url::Error> {
+    Ok(cdxj::Entry {
         key: Surt::from_url(url)?.into(),
         timestamp: Timestamp::new(capture_time()).unwrap(),
         fields: cdxj::Fields {
@@ -69,9 +69,9 @@ fn item_for(url: &str) -> Result<cdxj::Item<'static>, archivindex_surt::url::Err
 }
 
 fn required_items(
-    items: &[cdxj::Item<'static>],
-) -> Result<Vec<cdxj::ConformingItem<'static>>, cdxj::ConformanceError> {
-    items.iter().map(cdxj::ConformingItem::try_from).collect()
+    items: &[cdxj::Entry<'static>],
+) -> Result<Vec<cdxj::ConformingEntry<'static>>, cdxj::ConformanceError> {
+    items.iter().map(cdxj::ConformingEntry::try_from).collect()
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -92,7 +92,7 @@ fn finish_fixture<W: Write + Seek>(
     if !present.contains(&MemberClass::Index) {
         writer.add_index(
             "fixture.cdx",
-            std::iter::empty::<&cdxj::ConformingItem<'static>>(),
+            std::iter::empty::<&cdxj::ConformingEntry<'static>>(),
         )?;
     }
     if !present.contains(&MemberClass::Pages) {
@@ -105,7 +105,7 @@ fn finish_fixture<W: Write + Seek>(
 fn item_at(
     url: &str,
     timestamp: chrono::DateTime<Utc>,
-) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
+) -> Result<cdxj::Entry<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.timestamp = Timestamp::new(timestamp).unwrap();
     Ok(item)
@@ -116,7 +116,7 @@ fn resolvable_item(
     url: &str,
     filename: &'static str,
     length: u64,
-) -> Result<cdxj::Item<'static>, archivindex_surt::url::Error> {
+) -> Result<cdxj::Entry<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.fields.filename = Some(Cow::Borrowed(filename));
     item.fields.length = Some(length);
@@ -175,7 +175,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 
     let capture_time = capture_time();
 
-    let item = cdxj::Item {
+    let item = cdxj::Entry {
         key: Surt::from_url(URL)?.into(),
         timestamp: Timestamp::new(capture_time).unwrap(),
         fields: cdxj::Fields {
@@ -191,7 +191,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
         },
     };
 
-    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
+    writer.add_index("index.cdx", [&cdxj::ConformingEntry::try_from(&item)?])?;
 
     let page = Page {
         url: Cow::Borrowed(URL),
@@ -376,7 +376,7 @@ fn plain_lookup_and_capture_resolution() -> Result<(), Box<dyn std::error::Error
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
     let timestamp = Timestamp::new(capture_time()).unwrap();
 
-    assert!(reader.lookup(URL, ..timestamp)?.is_empty());
+    assert_eq!(reader.lookup(URL, ..timestamp)?, []);
 
     let captures = reader.lookup(URL, timestamp..=timestamp)?;
     assert_eq!(captures.len(), 1);
@@ -757,7 +757,7 @@ fn publication_never_overwrites_a_competing_output() -> Result<(), Box<dyn std::
     std::fs::write(&path, b"other writer")?;
     writer.add_index(
         "fixture.cdx",
-        std::iter::empty::<&cdxj::ConformingItem<'static>>(),
+        std::iter::empty::<&cdxj::ConformingEntry<'static>>(),
     )?;
     assert!(writer.finish(DataPackageBuilder::default()).is_err());
     assert_eq!(std::fs::read(&path)?, b"other writer");
@@ -798,7 +798,7 @@ fn write_and_open_from_paths() -> Result<(), Box<dyn std::error::Error>> {
     writer.add_pages(&PageListHeader::default(), [])?;
     writer.add_index(
         "fixture.cdx",
-        std::iter::empty::<&cdxj::ConformingItem<'static>>(),
+        std::iter::empty::<&cdxj::ConformingEntry<'static>>(),
     )?;
     writer.finish(DataPackageBuilder::default())?;
 
@@ -925,7 +925,7 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
 /// `ZipNum` blocks are gzip members encoded at the configured gzip compression level.
 #[test]
 fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
     for (level, expected_xfl) in [(1, 4), (9, 2)] {
         let config = WriterConfig::default()
             .index_format(IndexFormat::zipnum())
@@ -948,18 +948,18 @@ fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error
 /// only its `!meta` line.
 #[test]
 fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let no_items = std::iter::empty::<&cdxj::ConformingItem<'static>>();
+    let no_items = std::iter::empty::<&cdxj::ConformingEntry<'static>>();
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_index("index.cdx", no_items.clone())?;
     let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
 
     let mut reader = WaczReader::new(Cursor::new(wacz))?;
-    assert!(
+    assert_eq!(
         reader
             .index("indexes/index.cdx")?
-            .collect::<Result<Vec<_>, _>>()?
-            .is_empty()
+            .collect::<Result<Vec<_>, _>>()?,
+        []
     );
     assert!(reader.verify_fixity()?.is_success());
 
@@ -979,11 +979,11 @@ fn empty_indexes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
     // The data file still contains a valid empty gzip stream.
     let mut reader = WaczReader::new(Cursor::new(&wacz))?;
-    assert!(
+    assert_eq!(
         reader
             .index("indexes/index.cdx.gz")?
-            .collect::<Result<Vec<_>, _>>()?
-            .is_empty()
+            .collect::<Result<Vec<_>, _>>()?,
+        []
     );
     assert!(reader.verify_fixity()?.is_success());
 
@@ -998,7 +998,7 @@ fn zipnum_summary_prefixes_survive_braces_in_keys() -> Result<(), Box<dyn std::e
 
     let config = WriterConfig::default().index_format(IndexFormat::zipnum());
     let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
-    writer.add_index("index.cdx", [&cdxj::ConformingItem::try_from(&item)?])?;
+    writer.add_index("index.cdx", [&cdxj::ConformingEntry::try_from(&item)?])?;
     let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
 
     let mut archive = zip::ZipArchive::new(Cursor::new(&wacz))?;
@@ -1137,7 +1137,7 @@ fn add_warc_from_path_requires_a_usable_file_name() {
 fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_warc("data.warc", &b""[..])?;
-    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
 
     assert!(matches!(
         writer.add_warc("data.warc", &b""[..]),
@@ -1339,7 +1339,7 @@ fn index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Er
     let mut item = item_for(URL)?;
     // Pre-rendered index files are held to the same requirements as typed items.
     item.fields.digest = None;
-    assert!(cdxj::ConformingItem::try_from(&item).is_err());
+    assert!(cdxj::ConformingEntry::try_from(&item).is_err());
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
@@ -1419,7 +1419,7 @@ fn verify_fixity_reports_corrupt_members() -> Result<(), Box<dyn std::error::Err
 
     assert!(!fixity.is_success());
     assert_eq!(fixity.mismatched, vec!["archive/data.warc"]);
-    assert!(fixity.missing.is_empty());
+    assert_eq!(fixity.missing, Vec::<String>::new());
 
     Ok(())
 }
@@ -1494,8 +1494,8 @@ fn validate_passes_for_conforming_archives() -> Result<(), Box<dyn std::error::E
     let report = reader.validate(validate::ValidationOptions::all())?;
 
     assert!(report.is_conformant());
-    assert!(report.layout.is_empty());
-    assert!(report.manifest.is_empty());
+    assert_eq!(report.layout, []);
+    assert_eq!(report.manifest, []);
     assert_eq!(report.signature, validate::SignatureStatus::Unsigned);
     assert_eq!(report.content, Some(Vec::new()));
     assert_eq!(report.index, Some(Vec::new()));
@@ -1540,7 +1540,7 @@ fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error:
         report.layout.first(),
         Some(&validate::LayoutProblem::MissingDataPackage)
     );
-    assert!(report.manifest.is_empty());
+    assert_eq!(report.manifest, []);
     assert_eq!(report.fixity, None);
 
     Ok(())
@@ -1984,7 +1984,7 @@ fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>>
 /// as a block prefix or the plain writer can emit an index rejected by content validation.
 #[test]
 fn sorted_indexes_reject_blank_lines_before_writing() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
     for index_format in [
         IndexFormat::Plain,
         IndexFormat::zipnum_with_lines(nonzero(1)),
@@ -2014,7 +2014,7 @@ fn sorted_indexes_reject_blank_lines_before_writing() -> Result<(), Box<dyn std:
 /// CDXJ. Rewinding to zero would emit unvalidated bytes or panic when encoding a `ZipNum` block.
 #[test]
 fn sorted_indexes_start_at_the_readers_position() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingItem::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
     for index_format in [
         IndexFormat::Plain,
         IndexFormat::zipnum_with_lines(nonzero(1)),

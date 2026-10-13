@@ -5,7 +5,7 @@ use std::ops::{Range, RangeBounds};
 
 #[cfg(test)]
 use archivindex_cdx::format::cdxj;
-use archivindex_cdx::format::cdxj::{Fields, Item};
+use archivindex_cdx::format::cdxj::{Entry, Fields};
 use archivindex_cdx::timestamp::Timestamp;
 use archivindex_lines::{LineContext, Lines};
 use archivindex_surt::Surt;
@@ -28,7 +28,7 @@ pub struct Capture {
     /// The plain CDXJ index or `ZipNum` summary that produced this result.
     pub index_path: String,
     /// The matching CDXJ item.
-    pub item: Item<'static>,
+    pub item: Entry<'static>,
 }
 
 /// One independently compressed block described by a `ZipNum` summary.
@@ -282,7 +282,7 @@ impl<R: Read + Seek> WaczReader<R> {
                     break;
                 }
 
-                let item = Item::parse(line)
+                let item = Entry::parse(line)
                     .map_err(cdxj_io::Error::from)?
                     .into_owned();
                 if time_range.contains(&item.timestamp) {
@@ -347,7 +347,7 @@ impl<R: Read + Seek> WaczReader<R> {
             for line in text.lines().filter(|line| !line.is_empty()) {
                 if line_key(line).is_some_and(|found| keys.iter().any(|key| key.as_str() == found))
                 {
-                    let item = Item::parse(line)
+                    let item = Entry::parse(line)
                         .map_err(cdxj_io::Error::from)?
                         .into_owned();
                     if time_range.contains(&item.timestamp) {
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn plain_indexes_are_decoded_once_per_reader() {
-        let item = cdxj::Item {
+        let item = cdxj::Entry {
             key: Cow::Borrowed("com,example)/"),
             timestamp: archivindex_cdx::timestamp::Timestamp::new(
                 Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),

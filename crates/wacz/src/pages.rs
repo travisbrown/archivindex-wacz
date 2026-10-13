@@ -367,7 +367,7 @@ impl<R: BufRead> PageListReader<R> {
 
     /// Create a reader carrying a member path or source name for diagnostics.
     pub fn with_source(reader: R, source: impl Into<String>) -> Result<Self, Error> {
-        RawPageListReader::from_lines(Lines::with_source(reader, source).rejecting_blank_lines())
+        RawPageListReader::from_lines(Lines::with_source(reader, source).reject_blank_lines())
             .map(|raw| Self { raw })
     }
 

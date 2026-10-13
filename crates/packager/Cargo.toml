@@ -20,9 +20,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 archivindex-cdx.workspace = true
+archivindex-http.workspace = true
 archivindex-surt.workspace = true
 archivindex-wacz.workspace = true
-archivindex-warc = { workspace = true, features = ["gzip", "http"] }
+archivindex-warc = { workspace = true, features = ["gzip"] }
 chrono.workspace = true
 redb.workspace = true
 serde.workspace = true

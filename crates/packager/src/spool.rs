@@ -146,7 +146,7 @@ impl<'txn> ConversionSpool<'txn> {
     /// Record an indexed capture and the page it may become.
     pub fn add_capture(
         &mut self,
-        item: &cdxj::ConformingItem<'_>,
+        item: &cdxj::ConformingEntry<'_>,
         page: &PageDraft,
     ) -> Result<(), Error> {
         self.index.push(item)?;

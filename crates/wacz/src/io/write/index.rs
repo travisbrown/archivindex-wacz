@@ -28,7 +28,7 @@ impl<W: Write + Seek> WaczWriter<W> {
     ///
     /// Returns [`Error::InvalidIndexName`] if the name is not a direct `.cdx` member name, and
     /// [`Error::Io`] if the index cannot be written.
-    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingItem<'a>>>(
+    pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingEntry<'a>>>(
         &mut self,
         name: &str,
         items: I,
@@ -215,7 +215,7 @@ impl IndexSpool {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if a run cannot be written.
-    pub fn push(&mut self, item: &cdxj::ConformingItem<'_>) -> Result<(), Error> {
+    pub fn push(&mut self, item: &cdxj::ConformingEntry<'_>) -> Result<(), Error> {
         Ok(self.push_line(format!("{item}\n"))?)
     }
 

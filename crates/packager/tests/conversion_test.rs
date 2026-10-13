@@ -13,6 +13,7 @@ use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::metadata::MetadataBody;
 use archivindex_warc::record::fields::warcinfo::WarcinfoBody;
 use archivindex_warc::record::header::RevisitProfile;
+use archivindex_warc::record::header::protocol::Protocol;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
@@ -108,7 +109,7 @@ fn ipv6_captures_are_indexed_and_found() -> Result<(), Box<dyn std::error::Error
             .index_format(format)
             .run()?;
         assert_eq!(summary.captures, 1);
-        assert!(summary.warnings.is_empty());
+        assert_eq!(summary.warnings, []);
 
         let mut reader = WaczReader::open(&output)?;
         let validation = reader.validate(ValidationOptions::all())?;
@@ -351,7 +352,7 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
         .body(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\npng".to_vec())?;
     let unknown = Record::<NoExtension>::response("https://example.com/unknown", date)?
         .body(b"HTTP/1.1 404 Not Found\r\ncontent-length: 4\r\n\r\ngone".to_vec())?;
-    // A truncated response never receives a payload digest from the WARC writer.
+    // The index digest covers the retained payload of a truncated response.
     let truncated = Record::<NoExtension>::response("https://example.com/truncated", date)?
         .truncated(TruncatedType::Length)
         .body(
@@ -381,7 +382,7 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
     let summary = WarcToWacz::new(&input, &output).run()?;
 
     assert_eq!(summary.captures, 5);
-    assert!(summary.warnings.is_empty());
+    assert_eq!(summary.warnings, []);
     let mut reader = WaczReader::open(&output)?;
     let validation = reader.validate(ValidationOptions::all())?;
     assert!(validation.is_conformant(), "{validation:#?}");
@@ -404,7 +405,7 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
         .index("indexes/index.cdx")?
         .collect::<Result<Vec<_>, _>>()?;
     for item in &items {
-        assert!(archivindex_cdx::format::cdxj::ConformingItem::try_from(item).is_ok());
+        assert!(archivindex_cdx::format::cdxj::ConformingEntry::try_from(item).is_ok());
     }
     let fields = |path: &str| {
         let url = format!("https://example.com/{path}");
@@ -436,6 +437,72 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
         fields("revisit").digest.as_deref(),
         Some(html_digest.to_string().as_str())
     );
+
+    Ok(())
+}
+
+/// Shared HTTP parsing must retain WARC's tolerance for already decoded chunks and missing
+/// trailers. Protocol fields describe the original connection, even for a stored HTTP/1 message.
+#[test]
+fn stored_http_messages_keep_warc_framing_tolerance() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let date = WarcDate::from(Utc::now());
+    let url = "https://example.com/";
+    let digest = LabelledDigest::compute(Algorithm::Sha256, b"hello")
+        .expect("sha256 is enabled")
+        .to_string();
+
+    for (name, body) in [
+        ("chunked", "5\r\nhello\r\n0\r\n\r\n"),
+        ("missing-trailers", "5\r\nhello\r\n0\r\n"),
+        ("already-decoded", "hello"),
+    ] {
+        let input = directory.path().join(format!("{name}.warc"));
+        let output = directory.path().join(format!("{name}.wacz"));
+        let message = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type:\r\n text/plain; charset=utf-8\r\n\
+             Transfer-Encoding: chunked\r\n\r\n{body}"
+        );
+        let record = Record::<NoExtension>::response(url, date)?
+            .protocol(Protocol::H2)
+            .protocol(Protocol::TLS_1_3)
+            .body(message.into_bytes())?;
+        write_source(&input, vec![record], false)?;
+
+        let summary = WarcToWacz::new(&input, &output)
+            .title_generator(PayloadTitle)
+            .run()?;
+        assert_eq!(summary.captures, 1, "{name}");
+        assert_eq!(summary.warnings, [], "{name}");
+        let mut reader = WaczReader::open(&output)?;
+        assert_eq!(
+            reader.member_bytes("archive/data.warc")?,
+            std::fs::read(&input)?,
+            "{name}"
+        );
+        let captures = reader.lookup(url, ..)?;
+        assert_eq!(captures.len(), 1, "{name}");
+        assert_eq!(captures[0].item.fields.status, Some(200), "{name}");
+        assert_eq!(
+            captures[0].item.fields.mime.as_deref(),
+            Some("text/plain"),
+            "{name}"
+        );
+        assert_eq!(
+            captures[0].item.fields.digest.as_deref(),
+            Some(digest.as_str()),
+            "{name}"
+        );
+        let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(pages.len(), 1, "{name}");
+        assert_eq!(
+            pages[0].title.as_deref(),
+            Some("Generated: hello"),
+            "{name}"
+        );
+        let validation = reader.validate(ValidationOptions::all())?;
+        assert!(validation.is_conformant(), "{name}: {validation:#?}");
+    }
 
     Ok(())
 }
@@ -508,7 +575,7 @@ fn records_are_copied_verbatim() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(summary.records, 3);
     assert_eq!(summary.captures, 1);
-    assert!(summary.warnings.is_empty());
+    assert_eq!(summary.warnings, []);
     let mut reader = WaczReader::open(&output)?;
     assert_eq!(reader.member_bytes("archive/data.warc")?, source);
     let items = reader
@@ -538,7 +605,7 @@ fn a_warc_with_no_captures_becomes_an_empty_collection() -> Result<(), Box<dyn s
     assert_eq!(summary.records, 1);
     assert_eq!(summary.captures, 0);
     assert_eq!(summary.pages, 0);
-    assert!(summary.warnings.is_empty());
+    assert_eq!(summary.warnings, []);
 
     // The collection is still written and internally consistent.
     let mut reader = WaczReader::open(&output)?;

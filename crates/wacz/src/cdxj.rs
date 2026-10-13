@@ -6,7 +6,7 @@
 
 use std::io::BufRead;
 
-use archivindex_cdx::format::cdxj::{Error as ParseError, Item};
+use archivindex_cdx::format::cdxj::{Entry, Error as ParseError};
 use archivindex_lines::{LineContext, Lines};
 
 /// A CDXJ stream cannot be read or contains an invalid line.
@@ -64,22 +64,24 @@ impl<R: BufRead> IndexReader<R> {
     #[must_use]
     pub fn rejecting_blank_lines(self) -> Self {
         Self {
-            lines: self.lines.rejecting_blank_lines(),
+            lines: self.lines.reject_blank_lines(),
         }
     }
 }
 
 impl<R: BufRead> Iterator for IndexReader<R> {
-    type Item = Result<Item<'static>, Error>;
+    type Item = Result<Entry<'static>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.lines.next_content() {
-            Ok(Some(context)) => Some(Item::parse(context.content).map(Item::into_owned).map_err(
-                |source| Error::InvalidLine {
-                    context: context.into_owned(),
-                    source: InvalidLineSource::Item(source),
-                },
-            )),
+            Ok(Some(context)) => Some(
+                Entry::parse(context.content)
+                    .map(Entry::into_owned)
+                    .map_err(|source| Error::InvalidLine {
+                        context: context.into_owned(),
+                        source: InvalidLineSource::Item(source),
+                    }),
+            ),
             Ok(None) => None,
             Err(error) => Some(Err(Error::InvalidLine {
                 context: error.context().clone(),

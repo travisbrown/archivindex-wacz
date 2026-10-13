@@ -6,6 +6,7 @@
 [![license][license-badge]][gpl-3.0]
 
 Rust libraries and a command-line tool for packaging WARC captures as WACZ files and reading them.
+Requires Rust 1.98 or later.
 
 ## Crates
 
@@ -16,8 +17,8 @@ Rust libraries and a command-line tool for packaging WARC captures as WACZ files
 | [`archivindex-packager-cli`](tools/packager-cli/) | The `archivindex-packager` command-line tool                                |
 
 Git dependencies come from two repositories: [`archivindex`][archivindex] provides SURT, CDX,
-and shared utilities; [`archivindex-warc`][archivindex-warc] provides WARC reading and writing
-and the archiver used in integration tests.
+HTTP parsing, and shared utilities; [`archivindex-warc`][archivindex-warc] provides WARC reading and
+writing and the archiver used in integration tests.
 
 ## Usage
 

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use archivindex_cdx::format::cdxj;
 use archivindex_cdx::timestamp::Timestamp;
+use archivindex_http::message::ResponseMetadata;
 use archivindex_surt::url::Canonicalizer;
 use archivindex_wacz::digest::Sha256Digest;
 use archivindex_wacz::frictionless::DataPackageBuilder;
@@ -22,7 +23,6 @@ use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::record::fields::dcmi::DcmiTerm;
 use archivindex_warc::record::fields::metadata::MetadataField;
 use archivindex_warc::record::fields::warcinfo::WarcinfoField;
-use archivindex_warc::record::http::ResponseMetadata;
 use archivindex_warc::record::record_type::RecordType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{Algorithm, LabelledDigest};
@@ -449,7 +449,7 @@ fn capture_parts(
     generator: Option<&mut (dyn PageTitleGenerator + '_)>,
     warc_name: &str,
     written: &Written,
-) -> Result<Option<(cdxj::ConformingItem<'static>, PageDraft)>, SkipReason> {
+) -> Result<Option<(cdxj::ConformingEntry<'static>, PageDraft)>, SkipReason> {
     let (message, revisit) = match record {
         Record::Response { body, .. } => (body.as_slice(), false),
         Record::Revisit { body, .. } => (body.as_slice(), true),
@@ -514,7 +514,7 @@ fn capture_parts(
         date,
         generated_title,
     );
-    let item = cdxj::Item {
+    let item = cdxj::Entry {
         key: Cow::from(canonical.surt()),
         timestamp: Timestamp::new_with_milliseconds(date)
             .map_err(|_| SkipReason::UnrepresentableTimestamp)?,
@@ -538,7 +538,7 @@ fn capture_parts(
 }
 
 /// The `type/subtype` of the response's `Content-Type`, without its parameters.
-fn content_type_essence(head: &ResponseMetadata) -> Option<&str> {
+fn content_type_essence<'a>(head: &'a ResponseMetadata<'_>) -> Option<&'a str> {
     head.header("content-type")
         .and_then(|value| std::str::from_utf8(value).ok())
         .and_then(|value| value.split(';').next())

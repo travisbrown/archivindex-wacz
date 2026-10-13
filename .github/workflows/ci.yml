@@ -143,13 +143,13 @@ jobs:
         run: cargo test --locked --workspace --all-features
 
   msrv:
-    name: Rust 1.97 compatibility
+    name: Rust 1.98 compatibility
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.0
+          toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Check workspace
         run: cargo check --locked --workspace --all-targets --all-features
