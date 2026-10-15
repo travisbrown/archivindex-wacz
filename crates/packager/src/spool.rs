@@ -1,10 +1,11 @@
 //! Disk-backed intermediate state for WARC-to-WACZ conversion.
 //!
-//! Metadata may precede or follow a capture. A temporary redb database stores page drafts in
-//! capture order and annotations by record ID, then joins them after the source has been read.
+//! Metadata may precede or follow a capture. A temporary file stores page drafts in capture
+//! order, and a redb database stores annotations by record ID. They are joined after the source
+//! has been read.
 
 use std::borrow::Cow;
-use std::io::Seek;
+use std::io::{BufReader, BufWriter, Seek, Write};
 
 use archivindex_cdx::format::cdxj;
 use archivindex_cdx::properties::ExtraProperties;
@@ -12,7 +13,6 @@ use archivindex_wacz::io::write::index::IndexSpool;
 use archivindex_wacz::pages::{Page, PageListHeader, PageListWriter};
 use redb::{ReadableTable as _, Table, TableDefinition, WriteTransaction};
 
-const PAGES: TableDefinition<'static, u64, &[u8]> = TableDefinition::new("pages");
 const ANNOTATIONS: TableDefinition<'static, &str, &[u8]> = TableDefinition::new("annotations");
 
 /// A failure of the temporary conversion state.
@@ -86,7 +86,7 @@ impl Annotation {
     }
 }
 
-/// The private database holding a conversion's page drafts and annotations.
+/// The private database holding a conversion's annotations.
 ///
 /// Its temporary directory is removed when the store is dropped.
 pub struct SpoolStore {
@@ -113,12 +113,12 @@ impl SpoolStore {
 
 /// The index lines, page drafts and annotations gathered while a source is read.
 ///
-/// Its tables remain open for the duration of the conversion.
+/// Its temporary page file and annotation table remain open for the duration of the conversion.
 pub struct ConversionSpool<'txn> {
-    pages: Table<'txn, u64, &'static [u8]>,
+    pages: BufWriter<std::fs::File>,
     annotations: Table<'txn, &'static str, &'static [u8]>,
     index: IndexSpool,
-    captures: u64,
+    captures: usize,
 }
 
 /// The members and counts a finished spool contributes to the package.
@@ -133,10 +133,10 @@ pub struct SpoolOutputs {
 }
 
 impl<'txn> ConversionSpool<'txn> {
-    /// Open the spool's tables in `transaction`.
+    /// Create a temporary page file and open the annotation table in `transaction`.
     pub fn new(transaction: &'txn WriteTransaction) -> Result<Self, Error> {
         Ok(Self {
-            pages: transaction.open_table(PAGES).spool()?,
+            pages: BufWriter::new(tempfile::tempfile()?),
             annotations: transaction.open_table(ANNOTATIONS).spool()?,
             index: IndexSpool::new(),
             captures: 0,
@@ -150,8 +150,8 @@ impl<'txn> ConversionSpool<'txn> {
         page: &PageDraft,
     ) -> Result<(), Error> {
         self.index.push(item)?;
-        let bytes = serde_json::to_vec(page)?;
-        self.pages.insert(self.captures, bytes.as_slice()).spool()?;
+        serde_json::to_writer(&mut self.pages, page)?;
+        self.pages.write_all(b"\n")?;
         self.captures += 1;
         Ok(())
     }
@@ -188,6 +188,12 @@ impl<'txn> ConversionSpool<'txn> {
             index,
             captures,
         } = self;
+        let mut stored_pages = stored_pages
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?;
+        stored_pages.rewind()?;
+        let drafts = serde_json::Deserializer::from_reader(BufReader::new(stored_pages))
+            .into_iter::<PageDraft>();
         let mut pages = tempfile::tempfile()?;
         let mut extra_page_file = tempfile::tempfile()?;
         let mut pages_count = 0;
@@ -202,9 +208,8 @@ impl<'txn> ConversionSpool<'txn> {
             };
             let mut page_writer = PageListWriter::new(&mut pages, &PageListHeader::default())?;
             let mut extra_page_writer = PageListWriter::new(&mut extra_page_file, &extra_header)?;
-            for entry in stored_pages.iter().spool()? {
-                let (_, value) = entry.spool()?;
-                let draft: PageDraft = serde_json::from_slice(value.value())?;
+            for draft in drafts {
+                let draft = draft?;
                 let annotation = annotations
                     .get(draft.record_id.as_str())
                     .spool()?
@@ -246,7 +251,7 @@ impl<'txn> ConversionSpool<'txn> {
             index,
             pages,
             extra_page_file,
-            captures: usize::try_from(captures).expect("capture count fits in usize"),
+            captures,
             pages_count,
             extra_pages,
             main_page,
@@ -270,6 +275,21 @@ mod tests {
 
     use super::*;
     use crate::strategies;
+
+    /// Buffered writes can appear to succeed even when the file is unwritable. Finishing the
+    /// spool must surface the flush failure before attempting to read the drafts.
+    #[test]
+    fn finishing_propagates_page_flush_errors() -> Result<(), Error> {
+        let store = SpoolStore::new()?;
+        let transaction = store.begin()?;
+        let mut spool = ConversionSpool::new(&transaction)?;
+        let file = tempfile::NamedTempFile::new()?;
+        spool.pages = BufWriter::new(std::fs::File::open(file.path())?);
+        spool.pages.write_all(b"{}\n")?;
+
+        assert!(matches!(spool.finish(false), Err(Error::Io(_))));
+        Ok(())
+    }
 
     #[proptest::property_test]
     fn annotations_merge_to_the_last_present_values(

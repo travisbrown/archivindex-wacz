@@ -641,3 +641,77 @@ fn metadata_annotates_its_page_in_any_order() -> Result<(), Box<dyn std::error::
     assert_eq!(extra_pages[0].title.as_deref(), Some("Early title"));
     Ok(())
 }
+
+/// Drafts cross buffer boundaries and contain escaped JSON characters. Their order and duplicates
+/// must survive spooling, including when metadata changes their URLs or excludes other captures.
+#[test]
+fn page_drafts_preserve_order_and_content() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let date = WarcDate::from(Utc::now());
+    let body = "quoted \"text\", backslash \\, newline\n日本語\n".repeat(512);
+    let first = response("https://example.com/z", &body, date);
+    let extra = response("https://example.com/a", "extra", date);
+    let last = response("https://example.com/m", "last", date);
+    let early = metadata(
+        &extra,
+        b"via: https://example.com/\r\ntitle: Early\r\n",
+        date,
+    );
+    let late = metadata(&first, b"pageUrl: https://example.com/renamed\r\n", date);
+    let extra_update = metadata(
+        &extra,
+        b"pageUrl: https://example.com/extra\r\ntitle: Final\r\n",
+        date,
+    );
+
+    for metadata_only in [false, true] {
+        let output = directory.path().join(format!("{metadata_only}.wacz"));
+        let fields = if metadata_only {
+            b"pageList: metadata\r\n".as_slice()
+        } else {
+            b"".as_slice()
+        };
+        write_source(
+            &input,
+            vec![
+                warcinfo(fields, date),
+                early.clone(),
+                first.clone(),
+                extra.clone(),
+                first.clone(),
+                last.clone(),
+                late.clone(),
+                extra_update.clone(),
+            ],
+            false,
+        )?;
+        let summary = WarcToWacz::new(&input, &output)
+            .title_generator(PayloadTitle)
+            .run()?;
+        assert_eq!(summary.captures, 4);
+        assert_eq!(summary.pages, if metadata_only { 3 } else { 4 });
+        let mut reader = WaczReader::open(&output)?;
+        let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(pages.len(), if metadata_only { 2 } else { 3 });
+        for page in &pages[..2] {
+            assert_eq!(page.url, "https://example.com/renamed");
+            assert_eq!(
+                page.title.as_deref(),
+                Some(format!("Generated: {body}").as_str())
+            );
+        }
+        if !metadata_only {
+            assert_eq!(pages[2].url, "https://example.com/m");
+            assert_eq!(pages[2].title.as_deref(), Some("Generated: last"));
+        }
+        let extra_pages = reader
+            .page_list("pages/extraPages.jsonl")?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(extra_pages.len(), 1);
+        assert_eq!(extra_pages[0].url, "https://example.com/extra");
+        assert_eq!(extra_pages[0].title.as_deref(), Some("Final"));
+        assert!(reader.verify_fixity()?.is_success());
+    }
+    Ok(())
+}
