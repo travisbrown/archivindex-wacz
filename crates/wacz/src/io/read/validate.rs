@@ -673,9 +673,7 @@ impl<R: Read + Seek> WaczReader<R> {
         for (index, item) in items.enumerate() {
             match item {
                 Ok(item) => {
-                    if let Err(error) =
-                        archivindex_cdx::format::cdxj::ConformingFields::try_from(&item.fields)
-                    {
+                    if let Err(error) = item.validate() {
                         return Some(ContentProblem::new(
                             path,
                             ContentKind::IndexFields,

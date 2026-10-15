@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
-          tool: rumdl@0.2.73
+          tool: rumdl@0.2.79
       - name: Check formatting
         run: rumdl check .
 

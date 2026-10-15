@@ -8,6 +8,7 @@ use std::io::BufRead;
 
 use archivindex_cdx::format::cdxj::{Entry, Error as ParseError};
 use archivindex_lines::{LineContext, Lines};
+use bounded_static::IntoBoundedStatic as _;
 
 /// A CDXJ stream cannot be read or contains an invalid line.
 #[derive(Debug, thiserror::Error)]
@@ -76,9 +77,9 @@ impl<R: BufRead> Iterator for IndexReader<R> {
         match self.lines.next_content() {
             Ok(Some(context)) => Some(
                 Entry::parse(context.content)
-                    .map(Entry::into_owned)
+                    .map(Entry::into_static)
                     .map_err(|source| Error::InvalidLine {
-                        context: context.into_owned(),
+                        context: context.into_excerpt(),
                         source: InvalidLineSource::Item(source),
                     }),
             ),

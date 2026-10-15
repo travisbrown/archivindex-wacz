@@ -14,6 +14,7 @@ use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::parse::raw;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
+use bounded_static::IntoBoundedStatic as _;
 use flate2::read::GzDecoder;
 use zip::CompressionMethod;
 
@@ -284,7 +285,7 @@ impl<R: Read + Seek> WaczReader<R> {
 
                 let item = Entry::parse(line)
                     .map_err(cdxj_io::Error::from)?
-                    .into_owned();
+                    .into_static();
                 if time_range.contains(&item.timestamp) {
                     captures.push(Capture {
                         index_path: path.to_owned(),
@@ -349,7 +350,7 @@ impl<R: Read + Seek> WaczReader<R> {
                 {
                     let item = Entry::parse(line)
                         .map_err(cdxj_io::Error::from)?
-                        .into_owned();
+                        .into_static();
                     if time_range.contains(&item.timestamp) {
                         captures.push(Capture {
                             index_path: summary.path.clone(),
@@ -431,20 +432,20 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
             )
         })?;
     let (header_key, header_json) = crate::cdxj::split_prefix(header_context.content)
-        .ok_or_else(|| zipnum_error(header_context.into_owned(), "malformed !meta header"))?;
+        .ok_or_else(|| zipnum_error(header_context.into_excerpt(), "malformed !meta header"))?;
 
     if header_key != "!meta 0" {
         return Err(zipnum_error(
-            header_context.into_owned(),
+            header_context.into_excerpt(),
             "expected !meta 0 header",
         ));
     }
 
     let header: SummaryHeader<'_> = serde_json::from_str(header_json)
-        .map_err(|error| zipnum_error(header_context.into_owned(), error.to_string()))?;
+        .map_err(|error| zipnum_error(header_context.into_excerpt(), error.to_string()))?;
     if header.format != FORMAT {
         return Err(zipnum_error(
-            header_context.into_owned(),
+            header_context.into_excerpt(),
             format!("unsupported format {}", header.format),
         ));
     }
@@ -457,15 +458,15 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
         .map_err(|error| zipnum_line_error(&error))?
     {
         let (prefix, json) = crate::cdxj::split_prefix(context.content)
-            .ok_or_else(|| zipnum_error(context.into_owned(), "malformed line"))?;
+            .ok_or_else(|| zipnum_error(context.into_excerpt(), "malformed line"))?;
         let (key, timestamp) = prefix
             .rsplit_once(' ')
-            .ok_or_else(|| zipnum_error(context.into_owned(), "malformed prefix"))?;
+            .ok_or_else(|| zipnum_error(context.into_excerpt(), "malformed prefix"))?;
         let entry: SummaryEntry = serde_json::from_str(json)
-            .map_err(|error| zipnum_error(context.into_owned(), error.to_string()))?;
+            .map_err(|error| zipnum_error(context.into_excerpt(), error.to_string()))?;
         let timestamp = timestamp
             .parse::<Timestamp>()
-            .map_err(|error| zipnum_error(context.into_owned(), error.to_string()))?;
+            .map_err(|error| zipnum_error(context.into_excerpt(), error.to_string()))?;
 
         let block = ZipNumBlock {
             key: key.to_owned(),
@@ -479,7 +480,7 @@ fn parse_summary(path: &str, text: &str) -> Result<ZipNumSummary, Error> {
             (previous.key.as_str(), previous.timestamp) > (block.key.as_str(), block.timestamp)
         }) {
             return Err(zipnum_error(
-                context.into_owned(),
+                context.into_excerpt(),
                 "block prefixes are not sorted",
             ));
         }

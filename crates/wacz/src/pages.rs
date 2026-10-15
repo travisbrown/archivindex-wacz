@@ -304,7 +304,7 @@ impl<R: BufRead> RawPageListReader<R> {
         let header =
             serde_json::from_str::<PageListHeader<'_>>(location.content).map_err(|source| {
                 Error::InvalidHeader {
-                    context: location.into_owned(),
+                    context: location.into_excerpt(),
                     source,
                 }
             })?;
@@ -332,7 +332,7 @@ impl<R: BufRead> RawPageListReader<R> {
                     .map(|page| (location, page.into_static()))
                     .map_err(|source| Error::InvalidEntry {
                         source,
-                        context: location.into_owned(),
+                        context: location.into_excerpt(),
                     }),
             ),
             Ok(None) => None,
@@ -385,7 +385,7 @@ impl<R: BufRead> Iterator for PageListReader<R> {
         Some(self.raw.next_located()?.and_then(|(context, page)| {
             Page::try_from(page).map_err(|source| Error::InvalidTimestamp {
                 source,
-                context: context.into_owned(),
+                context: context.into_excerpt(),
             })
         }))
     }

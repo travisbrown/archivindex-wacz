@@ -519,8 +519,8 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
     let required = required_items(&items)?;
     let mut lines = required
         .iter()
-        .map(|item| format!("{item}\n"))
-        .collect::<Vec<_>>();
+        .map(|item| item.to_line().map(|line| line + "\n"))
+        .collect::<Result<Vec<_>, _>>()?;
     lines.sort_unstable();
     writer.add_sorted_index_file("index.cdx", Cursor::new(lines.concat()))?;
     let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
@@ -899,8 +899,8 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
     let required = required_items(&items)?;
     let lines = required
         .iter()
-        .map(|item| format!("{item}\n"))
-        .collect::<Vec<_>>();
+        .map(|item| item.to_line().map(|line| line + "\n"))
+        .collect::<Result<Vec<_>, _>>()?;
 
     for index_format in [
         IndexFormat::Plain,
@@ -925,7 +925,7 @@ fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>>
 /// `ZipNum` blocks are gzip members encoded at the configured gzip compression level.
 #[test]
 fn zipnum_blocks_honor_gzip_compression_level() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(item_for(URL)?)?;
     for (level, expected_xfl) in [(1, 4), (9, 2)] {
         let config = WriterConfig::default()
             .index_format(IndexFormat::zipnum())
@@ -1137,7 +1137,7 @@ fn add_warc_from_path_requires_a_usable_file_name() {
 fn member_paths_are_validated() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     writer.add_warc("data.warc", &b""[..])?;
-    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(item_for(URL)?)?;
 
     assert!(matches!(
         writer.add_warc("data.warc", &b""[..]),
@@ -1343,10 +1343,42 @@ fn index_writing_requires_standard_fields() -> Result<(), Box<dyn std::error::Er
 
     let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
     assert!(matches!(
-        writer.add_sorted_index_file("index.cdx", Cursor::new(format!("{item}\n"))),
+        writer.add_sorted_index_file("index.cdx", Cursor::new(format!("{}\n", item.to_line()?))),
         Err(writer::Error::NonConformingIndex { line: 1, .. })
     ));
 
+    Ok(())
+}
+
+/// A conforming entry's key remains editable, so serialization must reject invalid edits before
+/// adding anything to the spool or reserving a ZIP member name.
+#[test]
+fn index_writing_rejects_invalid_keys_before_writing() -> Result<(), Box<dyn std::error::Error>> {
+    let valid = cdxj::ConformingEntry::try_from(item_for(URL)?)?;
+    for index_format in [IndexFormat::Plain, IndexFormat::zipnum()] {
+        let config = WriterConfig::default().index_format(index_format);
+        let mut writer = WaczWriter::with_config(Cursor::new(Vec::new()), config);
+        let mut spool = writer::index::IndexSpool::new();
+        for key in ["", "com,example)/bad key", "com,example)/bad\nkey"] {
+            let mut invalid = valid.clone();
+            invalid.key = Cow::Borrowed(key);
+            assert!(matches!(
+                spool.push(&invalid),
+                Err(writer::Error::IndexSerialization(cdxj::Error::InvalidKey(actual)))
+                    if actual == key
+            ));
+            assert!(matches!(
+                writer.add_index("index.cdx", [&invalid]),
+                Err(writer::Error::IndexSerialization(cdxj::Error::InvalidKey(actual)))
+                    if actual == key
+            ));
+        }
+        spool.push(&valid)?;
+        writer.add_spooled_index("index.cdx", spool)?;
+        let wacz = finish_fixture(writer, &[MemberClass::Index])?.into_inner();
+        let mut reader = WaczReader::new(Cursor::new(wacz))?;
+        assert_eq!(reader.lookup(URL, ..)?.len(), 1);
+    }
     Ok(())
 }
 
@@ -1700,11 +1732,11 @@ fn validate_reports_signature_status() -> Result<(), Box<dyn std::error::Error>>
 fn validate_reports_content_problems() -> Result<(), Box<dyn std::error::Error>> {
     let page0 = item_for("https://www.example.com/page0")?;
     let page1 = item_for("https://www.example.com/page1")?;
-    let unsorted_index = format!("{page1}\n{page0}\n");
+    let unsorted_index = format!("{}\n{}\n", page1.to_line()?, page0.to_line()?);
     let mut incomplete = item_for(URL)?;
     incomplete.fields.digest = None;
-    let incomplete_index = format!("{incomplete}\n");
-    let blank_line_index = format!("{page0}\n\n{page1}\n");
+    let incomplete_index = format!("{}\n", incomplete.to_line()?);
+    let blank_line_index = format!("{}\n\n{}\n", page0.to_line()?, page1.to_line()?);
     let zoneless_pages = "{\"format\": \"json-pages-1.0\"}\n        {\"url\": \"https://www.example.com/\", \"ts\": \"2020-10-07T21:22:36\"}\n";
 
     let bytes = stored_zip_of(&[
@@ -1769,7 +1801,12 @@ fn validate_resolves_index_entries_to_records() -> Result<(), Box<dyn std::error
     bad_digest.fields.record_digest = Some(Sha256Digest::compute(b"wrong").to_string().into());
     let out_of_bounds = resolvable_item("https://www.example.com/page2", "data.warc", length + 10)?;
 
-    let index = format!("{good}\n{bad_digest}\n{out_of_bounds}\n");
+    let index = format!(
+        "{}\n{}\n{}\n",
+        good.to_line()?,
+        bad_digest.to_line()?,
+        out_of_bounds.to_line()?
+    );
     let bytes = stored_zip_of(&[
         ("datapackage.json", EMPTY_MANIFEST.as_bytes()),
         ("archive/data.warc", &warc),
@@ -1848,8 +1885,8 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
     });
     let index = items
         .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
+        .map(cdxj::Entry::to_line)
+        .collect::<Result<Vec<_>, _>>()?
         .join("\n")
         + "\n";
     let bytes = stored_zip_of(&[
@@ -1955,8 +1992,8 @@ fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>>
     let required = required_items(&items)?;
     let mut lines = required
         .iter()
-        .map(|item| format!("{item}\n"))
-        .collect::<Vec<_>>();
+        .map(|item| item.to_line().map(|line| line + "\n"))
+        .collect::<Result<Vec<_>, _>>()?;
     lines.sort_unstable();
 
     for index_format in [
@@ -1984,7 +2021,7 @@ fn lookup_searches_both_key_families() -> Result<(), Box<dyn std::error::Error>>
 /// as a block prefix or the plain writer can emit an index rejected by content validation.
 #[test]
 fn sorted_indexes_reject_blank_lines_before_writing() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(item_for(URL)?)?.to_line()?;
     for index_format in [
         IndexFormat::Plain,
         IndexFormat::zipnum_with_lines(nonzero(1)),
@@ -2014,7 +2051,7 @@ fn sorted_indexes_reject_blank_lines_before_writing() -> Result<(), Box<dyn std:
 /// CDXJ. Rewinding to zero would emit unvalidated bytes or panic when encoding a `ZipNum` block.
 #[test]
 fn sorted_indexes_start_at_the_readers_position() -> Result<(), Box<dyn std::error::Error>> {
-    let item = cdxj::ConformingEntry::try_from(&item_for(URL)?)?;
+    let item = cdxj::ConformingEntry::try_from(item_for(URL)?)?.to_line()?;
     for index_format in [
         IndexFormat::Plain,
         IndexFormat::zipnum_with_lines(nonzero(1)),

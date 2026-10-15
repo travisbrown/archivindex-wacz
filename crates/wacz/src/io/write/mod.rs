@@ -144,6 +144,9 @@ pub enum Error {
     /// A pre-rendered CDXJ index is invalid.
     #[error("invalid CDXJ index")]
     InvalidIndex(#[source] crate::cdxj::Error),
+    /// A CDXJ item could not be serialized.
+    #[error("cannot serialize CDXJ item")]
+    IndexSerialization(#[source] archivindex_cdx::format::cdxj::Error),
     /// A pre-rendered CDXJ index is not sorted by search key and timestamp.
     #[error("CDXJ index line {line} sorts before the line preceding it")]
     UnsortedIndex {

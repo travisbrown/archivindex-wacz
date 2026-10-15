@@ -27,7 +27,8 @@ impl<W: Write + Seek> WaczWriter<W> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidIndexName`] if the name is not a direct `.cdx` member name, and
-    /// [`Error::Io`] if the index cannot be written.
+    /// [`Error::IndexSerialization`] if an item cannot be serialized, or [`Error::Io`] if the
+    /// index cannot be written.
     pub fn add_index<'a, I: IntoIterator<Item = &'a cdxj::ConformingEntry<'a>>>(
         &mut self,
         name: &str,
@@ -69,12 +70,11 @@ impl<W: Write + Seek> WaczWriter<W> {
             .enumerate()
         {
             let item = item.map_err(Error::InvalidIndex)?;
-            cdxj::ConformingFields::try_from(&item.fields).map_err(|source| {
-                Error::NonConformingIndex {
+            item.validate()
+                .map_err(|source| Error::NonConformingIndex {
                     line: index + 1,
                     source,
-                }
-            })?;
+                })?;
             // The reader yields owned keys, so `into_owned` moves rather than copies.
             let current = (item.key.into_owned(), item.timestamp);
             if previous.is_some_and(|previous| previous > current) {
@@ -214,9 +214,12 @@ impl IndexSpool {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if a run cannot be written.
+    /// Returns [`Error::IndexSerialization`] if the item cannot be serialized, or [`Error::Io`]
+    /// if a run cannot be written.
     pub fn push(&mut self, item: &cdxj::ConformingEntry<'_>) -> Result<(), Error> {
-        Ok(self.push_line(format!("{item}\n"))?)
+        let mut line = item.to_line().map_err(Error::IndexSerialization)?;
+        line.push('\n');
+        Ok(self.push_line(line)?)
     }
 
     fn push_line(&mut self, line: String) -> Result<(), std::io::Error> {
