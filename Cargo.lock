@@ -91,7 +91,7 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#5e1a02af171d660ae80a9494e470d436422c684b"
 dependencies = [
  "archivindex-http",
  "archivindex-http-client",
@@ -300,7 +300,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#5e1a02af171d660ae80a9494e470d436422c684b"
 dependencies = [
  "archivindex-http",
  "archivindex-warc-digest",
@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#5e1a02af171d660ae80a9494e470d436422c684b"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -331,7 +331,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-identifier"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#5e1a02af171d660ae80a9494e470d436422c684b"
 dependencies = [
  "archivindex-warc",
  "data-encoding",
@@ -343,7 +343,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#5e1a02af171d660ae80a9494e470d436422c684b"
 dependencies = [
  "archivindex-http",
  "archivindex-http-client",
@@ -2993,14 +2993,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
  "zopfli",
 ]
