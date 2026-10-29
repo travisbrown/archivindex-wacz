@@ -91,7 +91,7 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#0151e86dc0a6f0a4ec8bd515ebd94acc14df5b5f"
 dependencies = [
  "archivindex-http",
  "archivindex-http-client",
@@ -114,7 +114,7 @@ dependencies = [
 [[package]]
 name = "archivindex-cdx"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "archivindex-serde",
  "bounded-static",
@@ -127,7 +127,7 @@ dependencies = [
 [[package]]
 name = "archivindex-cli-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "clap",
  "ctrlc",
@@ -143,7 +143,7 @@ dependencies = [
 [[package]]
 name = "archivindex-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "data-encoding",
  "thiserror",
@@ -152,7 +152,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "thiserror",
 ]
@@ -160,7 +160,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http-client"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "archivindex-http",
  "chrono",
@@ -179,7 +179,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http-client-challenge"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "archivindex-http-client",
  "data-encoding",
@@ -194,7 +194,7 @@ dependencies = [
 [[package]]
 name = "archivindex-lines"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "thiserror",
 ]
@@ -236,7 +236,7 @@ dependencies = [
 [[package]]
 name = "archivindex-publication"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -245,7 +245,7 @@ dependencies = [
 [[package]]
 name = "archivindex-serde"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "serde",
 ]
@@ -253,7 +253,7 @@ dependencies = [
 [[package]]
 name = "archivindex-surt"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "bounded-static",
  "fluent-uri",
@@ -264,7 +264,7 @@ dependencies = [
 [[package]]
 name = "archivindex-test-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#e788abfd91c924d915175b32f3c453eba9ede4be"
+source = "git+https://github.com/travisbrown/archivindex#8e94d61c4b8409f9f70aa3b5164f89789665e0c2"
 dependencies = [
  "futures",
  "proptest",
@@ -300,7 +300,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#0151e86dc0a6f0a4ec8bd515ebd94acc14df5b5f"
 dependencies = [
  "archivindex-http",
  "archivindex-warc-digest",
@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#0151e86dc0a6f0a4ec8bd515ebd94acc14df5b5f"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -331,7 +331,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-identifier"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#0151e86dc0a6f0a4ec8bd515ebd94acc14df5b5f"
 dependencies = [
  "archivindex-warc",
  "data-encoding",
@@ -343,7 +343,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#2976cf4ac20e301da90864dcd795e9f60e8a299e"
+source = "git+https://github.com/travisbrown/archivindex-warc#0151e86dc0a6f0a4ec8bd515ebd94acc14df5b5f"
 dependencies = [
  "archivindex-http",
  "archivindex-http-client",
@@ -994,9 +994,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "rand_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1441,9 +1443,9 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -1838,9 +1840,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags",
  "fallible-iterator",
@@ -2479,9 +2481,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -2993,15 +2995,18 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
 dependencies = [
  "crc32fast",
  "flate2",
+ "getrandom 0.4.3",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
+ "windows-sys 0.61.2",
  "zopfli",
 ]
 
