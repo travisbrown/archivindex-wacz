@@ -1611,6 +1611,41 @@ fn validate_reports_missing_required_members() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// Layout checks use the central directory even when a member's local header cannot be read.
+#[test]
+fn compression_checks_do_not_require_readable_local_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = zip_of(&[("archive/data.warc", b"content")])?;
+    bytes[0] = 0;
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+
+    let metadata = reader.member_metadata("archive/data.warc")?;
+    assert_eq!(metadata.compression, zip::CompressionMethod::Deflated);
+    assert_eq!(metadata.size, 7);
+    assert!(reader.member("archive/data.warc").is_err());
+    assert!(matches!(
+        reader.member_metadata("absent"),
+        Err(reader::Error::MissingMember(path)) if path == "absent"
+    ));
+
+    let report = reader.validate(validate::ValidationOptions::default().check_content())?;
+    assert!(
+        report
+            .layout
+            .contains(&validate::LayoutProblem::RecompressedMember(
+                "archive/data.warc".to_owned()
+            ))
+    );
+    assert!(
+        report
+            .content
+            .unwrap()
+            .iter()
+            .any(|problem| problem.path == "archive/data.warc")
+    );
+    Ok(())
+}
+
 #[test]
 fn validate_reports_duplicate_zip_member_names() -> Result<(), Box<dyn std::error::Error>> {
     let first = b"duplicate-a.txt";

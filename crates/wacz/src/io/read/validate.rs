@@ -468,19 +468,14 @@ impl<R: Read + Seek> WaczReader<R> {
     }
 
     /// Members that the specification requires to be stored but that the container compressed.
-    ///
-    /// Unlike the other layout checks this one reads local file headers, so it is separated from
-    /// the name-based checks in [`Self::layout_problems`].
-    fn compression_problems(&mut self) -> Vec<LayoutProblem> {
+    fn compression_problems(&self) -> Vec<LayoutProblem> {
         let mut problems = Vec::new();
 
-        // Reading by index gives each member's name and compression method together, which a shared
-        // borrow of the central directory cannot provide.
         for (index, name) in self.member_names.iter().enumerate() {
-            // A member whose local header cannot be read is reported by the content layer.
-            let Ok(member) = self.archive.by_index(index) else {
-                continue;
-            };
+            let member = self
+                .archive
+                .by_index_data(index)
+                .expect("cached member names correspond to central-directory entries");
             if !name.ends_with('/')
                 && crate::paths::requires_stored(name)
                 && member.compression() != zip::CompressionMethod::Stored

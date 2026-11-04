@@ -204,12 +204,17 @@ impl<R: Read + Seek> WaczReader<R> {
             .file_names()
             .map(|name| name.map(std::borrow::Cow::into_owned))
             .collect::<Result<_, _>>()?;
-        let central_directory_start = archive.central_directory_start();
-        let mut reader = archive.into_inner();
-        let duplicate_members = duplicate_member_names(&mut reader, central_directory_start)?;
+        let (archive, duplicate_members) = if archive.has_duplicate_names() {
+            let central_directory_start = archive.central_directory_start();
+            let mut reader = archive.into_inner();
+            let duplicates = duplicate_member_names(&mut reader, central_directory_start)?;
+            (ZipArchive::new(reader)?, duplicates)
+        } else {
+            (archive, Vec::new())
+        };
 
         Ok(Self {
-            archive: ZipArchive::new(reader)?,
+            archive,
             member_names,
             duplicate_members,
             plain_indexes: HashMap::new(),
@@ -381,9 +386,9 @@ impl<R: Read + Seek> WaczReader<R> {
         }
     }
 
-    /// Return metadata for a member without reading its content.
-    pub fn member_metadata(&mut self, path: &str) -> Result<MemberMetadata, Error> {
-        let member = self.member(path)?;
+    /// Return a member's central-directory metadata without reading its local header or content.
+    pub fn member_metadata(&self, path: &str) -> Result<MemberMetadata, Error> {
+        let member = self.archive.by_index_data(self.member_index(path)?)?;
 
         Ok(MemberMetadata {
             path: path.to_owned(),
@@ -396,12 +401,15 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// Open the bytes physically stored for a ZIP member, without ZIP or gzip decompression.
     pub fn raw_member(&mut self, path: &str) -> Result<zip::read::ZipFile<'_, R>, Error> {
-        let index = self
-            .archive
-            .index_for_name(path)
-            .ok_or_else(|| Error::MissingMember(path.to_owned()))?;
+        let index = self.member_index(path)?;
 
         Ok(self.archive.by_index_raw(index)?)
+    }
+
+    fn member_index(&self, path: &str) -> Result<usize, Error> {
+        self.archive
+            .index_for_name(path)
+            .ok_or_else(|| Error::MissingMember(path.to_owned()))
     }
 
     /// Open a file by path as a buffered stream, decompressing files with a `.gz` extension.
