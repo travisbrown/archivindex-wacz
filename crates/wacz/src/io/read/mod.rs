@@ -184,6 +184,7 @@ pub(super) enum DigestFile {
 /// this reader mutably and only one file can be read at once.
 pub struct WaczReader<R> {
     archive: ZipArchive<R>,
+    member_names: Vec<String>,
     duplicate_members: Vec<String>,
     plain_indexes: HashMap<String, random::PlainIndex>,
 }
@@ -196,15 +197,20 @@ impl WaczReader<BufReader<File>> {
 }
 
 impl<R: Read + Seek> WaczReader<R> {
-    /// Create a new reader, parsing the ZIP central directory.
+    /// Create a new reader, parsing the ZIP central directory and decoding its member names.
     pub fn new(reader: R) -> Result<Self, Error> {
         let archive = ZipArchive::new(reader)?;
+        let member_names = archive
+            .file_names()
+            .map(|name| name.map(std::borrow::Cow::into_owned))
+            .collect::<Result<_, _>>()?;
         let central_directory_start = archive.central_directory_start();
         let mut reader = archive.into_inner();
         let duplicate_members = duplicate_member_names(&mut reader, central_directory_start)?;
 
         Ok(Self {
             archive: ZipArchive::new(reader)?,
+            member_names,
             duplicate_members,
             plain_indexes: HashMap::new(),
         })
@@ -264,16 +270,16 @@ impl<R: Read + Seek> WaczReader<R> {
 
     /// All file paths in the WACZ, in unspecified order and excluding ZIP directory entries.
     pub fn member_paths(&self) -> impl Iterator<Item = &str> {
-        self.archive
-            .file_names()
+        self.member_names
+            .iter()
+            .map(String::as_str)
             .filter(|name| !name.ends_with('/'))
     }
 
     /// File paths under a directory prefix, excluding ZIP directory entries.
     fn paths_under<'s>(&'s self, prefix: &'s str) -> impl Iterator<Item = &'s str> {
-        self.archive
-            .file_names()
-            .filter(move |name| name.starts_with(prefix) && !name.ends_with('/'))
+        self.member_paths()
+            .filter(move |name| name.starts_with(prefix))
     }
 
     /// Read a CDXJ index by path, decompressing files with a `.gz` extension.

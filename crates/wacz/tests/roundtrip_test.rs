@@ -1518,6 +1518,39 @@ fn directory_entries_are_not_member_paths() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// Filename decoding must retain both UTF-8 and legacy CP437 names for listing and lookup.
+#[test]
+fn decoded_member_names_remain_readable() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = zip_of(&[
+        ("archive/cafe.warc", b"legacy"),
+        ("notes/日本語.txt", b"utf8"),
+    ])?;
+    let name = b"archive/cafe.warc";
+    let positions = bytes
+        .windows(name.len())
+        .enumerate()
+        .filter_map(|(position, value)| (value == name).then_some(position))
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 2);
+    for position in positions {
+        // CP437 encodes é as one byte, so the local and central header sizes stay unchanged.
+        bytes[position + "archive/caf".len()] = 0x82;
+    }
+
+    let mut reader = WaczReader::new(Cursor::new(bytes))?;
+    let paths = reader.member_paths().collect::<Vec<_>>();
+    assert!(paths.contains(&"archive/café.warc"));
+    assert!(paths.contains(&"notes/日本語.txt"));
+    assert_eq!(
+        reader.warc_paths().collect::<Vec<_>>(),
+        ["archive/café.warc"]
+    );
+    assert_eq!(reader.member_bytes("archive/café.warc")?, b"legacy");
+    assert_eq!(reader.member_bytes("notes/日本語.txt")?, b"utf8");
+
+    Ok(())
+}
+
 /// A writer-produced WACZ passes every validation layer.
 #[test]
 fn validate_passes_for_conforming_archives() -> Result<(), Box<dyn std::error::Error>> {

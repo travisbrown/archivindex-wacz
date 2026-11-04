@@ -476,12 +476,11 @@ impl<R: Read + Seek> WaczReader<R> {
 
         // Reading by index gives each member's name and compression method together, which a shared
         // borrow of the central directory cannot provide.
-        for index in 0..self.archive.len() {
+        for (index, name) in self.member_names.iter().enumerate() {
             // A member whose local header cannot be read is reported by the content layer.
             let Ok(member) = self.archive.by_index(index) else {
                 continue;
             };
-            let name = member.name();
             if !name.ends_with('/')
                 && crate::paths::requires_stored(name)
                 && member.compression() != zip::CompressionMethod::Stored
