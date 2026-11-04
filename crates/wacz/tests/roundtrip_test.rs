@@ -421,6 +421,28 @@ fn gzip_capture_resolution() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// A range spanning two gzip members must not silently return only the first WARC record.
+#[test]
+fn gzip_capture_ranges_reject_multiple_records() -> Result<(), Box<dyn std::error::Error>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&warc_bytes()?)?;
+    let mut compressed = encoder.finish()?;
+    compressed.extend_from_within(..);
+    let wacz = build_wacz("data.warc.gz", &compressed)?;
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+    let capture = reader.lookup(URL, ..)?.into_iter().next().expect("capture");
+
+    assert!(matches!(
+        reader.read_capture_raw(&capture.item.fields),
+        Err(reader::Error::CaptureRecordCount(2))
+    ));
+    assert!(matches!(
+        reader.read_capture(&capture.item.fields),
+        Err(reader::Error::CaptureRecordCount(2))
+    ));
+    Ok(())
+}
+
 /// Pages written without an identifier receive a synthetic one of the configured length; explicitly
 /// supplied identifiers are preserved.
 #[test]

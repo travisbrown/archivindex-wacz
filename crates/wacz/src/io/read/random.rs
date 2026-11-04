@@ -15,7 +15,7 @@ use archivindex_warc::parse::raw;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use bounded_static::IntoBoundedStatic as _;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use zip::CompressionMethod;
 
 use super::{Error, MAX_DECOMPRESSED, MAX_PREALLOCATION, WaczReader};
@@ -538,12 +538,12 @@ fn archive_path(filename: &str) -> String {
     }
 }
 
-/// Expand a gzip member, refusing to produce more than `limit` bytes.
+/// Expand the complete gzip range, refusing to produce more than `limit` bytes across its members.
 fn decompress(path: &str, compressed: &[u8], limit: u64) -> Result<Vec<u8>, Error> {
     let mut decoded = Vec::new();
     // Reading one byte past the ceiling tells a member that exactly fits apart from one that was
     // cut short at it, which would otherwise be indistinguishable from valid content.
-    let read = GzDecoder::new(compressed)
+    let read = MultiGzDecoder::new(compressed)
         .take(limit + 1)
         .read_to_end(&mut decoded)?;
 
@@ -631,6 +631,31 @@ mod tests {
             past,
             Error::DecompressedTooLarge { path, limit }
                 if path == "indexes/index.cdx.gz" && limit == 4095
+        ));
+    }
+
+    #[test]
+    fn decompression_checks_every_member() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, b"abc").unwrap();
+        let mut compressed = encoder.finish().unwrap();
+        compressed.extend_from_within(..);
+
+        assert_eq!(
+            decompress("data.warc.gz", &compressed, 6).unwrap(),
+            b"abcabc"
+        );
+        assert!(matches!(
+            decompress("data.warc.gz", &compressed, 5),
+            Err(Error::DecompressedTooLarge { limit: 5, .. })
+        ));
+
+        // Corruption after the first gzip member must not go unnoticed.
+        let crc = compressed.len() - 8;
+        compressed[crc] ^= 1;
+        assert!(matches!(
+            decompress("data.warc.gz", &compressed, 6),
+            Err(Error::Io(_))
         ));
     }
 
