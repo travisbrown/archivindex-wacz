@@ -88,21 +88,18 @@ impl Annotation {
 
 /// The private database holding a conversion's annotations.
 ///
-/// Its temporary directory is removed when the store is dropped.
+/// Its anonymous temporary file is removed when the store is dropped.
 pub struct SpoolStore {
-    _directory: tempfile::TempDir,
     database: redb::Database,
 }
 
 impl SpoolStore {
-    /// Create the database in a fresh temporary directory.
+    /// Create the database in an anonymous temporary file.
     pub fn new() -> Result<Self, Error> {
-        let directory = tempfile::tempdir()?;
-        let database = redb::Database::create(directory.path().join("conversion.redb")).spool()?;
-        Ok(Self {
-            _directory: directory,
-            database,
-        })
+        let database = redb::Database::builder()
+            .create_file(tempfile::tempfile()?)
+            .spool()?;
+        Ok(Self { database })
     }
 
     /// Begin the uncommitted transaction used by a conversion spool.
@@ -188,14 +185,11 @@ impl<'txn> ConversionSpool<'txn> {
             index,
             captures,
         } = self;
-        let mut stored_pages = stored_pages
-            .into_inner()
-            .map_err(std::io::IntoInnerError::into_error)?;
-        stored_pages.rewind()?;
+        let stored_pages = finish_file(stored_pages)?;
         let drafts = serde_json::Deserializer::from_reader(BufReader::new(stored_pages))
             .into_iter::<PageDraft>();
-        let mut pages = tempfile::tempfile()?;
-        let mut extra_page_file = tempfile::tempfile()?;
+        let mut pages = BufWriter::new(tempfile::tempfile()?);
+        let mut extra_page_file = BufWriter::new(tempfile::tempfile()?);
         let mut pages_count = 0;
         let mut extra_pages = 0;
         let mut main_page = None;
@@ -245,18 +239,25 @@ impl<'txn> ConversionSpool<'txn> {
                 }
             }
         }
-        pages.rewind()?;
-        extra_page_file.rewind()?;
         Ok(SpoolOutputs {
             index,
-            pages,
-            extra_page_file,
+            pages: finish_file(pages)?,
+            extra_page_file: finish_file(extra_page_file)?,
             captures,
             pages_count,
             extra_pages,
             main_page,
         })
     }
+}
+
+/// Flush a temporary file and rewind it for reading, propagating any buffered write failure.
+fn finish_file(writer: BufWriter<std::fs::File>) -> Result<std::fs::File, std::io::Error> {
+    let mut file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
+    file.rewind()?;
+    Ok(file)
 }
 
 trait RedbResultExt<T> {
