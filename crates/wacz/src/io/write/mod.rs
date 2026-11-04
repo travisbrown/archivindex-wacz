@@ -1,7 +1,7 @@
 //! Assembling WACZ files and configuring compression and indexes.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -297,17 +297,18 @@ impl<W: Write + Seek> WaczWriter<W> {
         })
     }
 
-    /// Add a pre-rendered page-list file after validating it in a first pass.
+    /// Add a pre-rendered page list from the reader's current position after validating it.
     pub fn add_page_list_file<R: BufRead + Seek>(
         &mut self,
         name: &str,
         mut reader: R,
     ) -> Result<(), Error> {
+        let start = reader.stream_position()?;
         let mut parsed = pages::PageListReader::new(&mut reader)?;
         for page in &mut parsed {
             page?;
         }
-        reader.rewind()?;
+        reader.seek(SeekFrom::Start(start))?;
         let path = format!("{PAGES_PREFIX}{name}");
         self.add_typed_resource(&path, reader)
     }

@@ -2158,3 +2158,20 @@ fn sorted_indexes_start_at_the_readers_position() -> Result<(), Box<dyn std::err
     }
     Ok(())
 }
+
+/// The page-list writer must copy only the bytes its validation pass examined.
+#[test]
+fn page_lists_start_at_the_readers_position() -> Result<(), Box<dyn std::error::Error>> {
+    let prefix = "not a page list\n";
+    let pages = "{\"format\":\"json-pages-1.0\"}\n";
+    let mut input = Cursor::new(format!("{prefix}{pages}"));
+    input.set_position(prefix.len() as u64);
+    let mut writer = WaczWriter::new(Cursor::new(Vec::new()));
+    writer.add_page_list_file("pages.jsonl", input)?;
+    let wacz = finish_fixture(writer, &[MemberClass::Pages])?.into_inner();
+    let mut reader = WaczReader::new(Cursor::new(wacz))?;
+
+    assert_eq!(reader.member_bytes("pages/pages.jsonl")?, pages.as_bytes());
+    assert_eq!(reader.pages()?.count(), 0);
+    Ok(())
+}
