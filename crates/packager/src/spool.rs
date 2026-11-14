@@ -11,6 +11,7 @@ use archivindex_cdx::format::cdxj;
 use archivindex_cdx::properties::ExtraProperties;
 use archivindex_wacz::io::write::index::IndexSpool;
 use archivindex_wacz::pages::{Page, PageListHeader, PageListWriter};
+use redb::backends::FileBackend;
 use redb::{ReadableTable as _, Table, TableDefinition, WriteTransaction};
 
 const ANNOTATIONS: TableDefinition<'static, &str, &[u8]> = TableDefinition::new("annotations");
@@ -96,8 +97,9 @@ pub struct SpoolStore {
 impl SpoolStore {
     /// Create the database in an anonymous temporary file.
     pub fn new() -> Result<Self, Error> {
+        let backend = FileBackend::new(tempfile::tempfile()?).spool()?;
         let database = redb::Database::builder()
-            .create_file(tempfile::tempfile()?)
+            .create_with_backend(backend)
             .spool()?;
         Ok(Self { database })
     }
