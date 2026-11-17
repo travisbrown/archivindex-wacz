@@ -24,7 +24,7 @@ archivindex-http.workspace = true
 archivindex-surt.workspace = true
 archivindex-wacz.workspace = true
 archivindex-warc = { workspace = true, features = ["gzip"] }
-chrono.workspace = true
+jiff = { workspace = true, features = ["serde"] }
 redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true

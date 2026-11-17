@@ -27,10 +27,11 @@ archivindex-publication.workspace = true
 archivindex-serde.workspace = true
 archivindex-surt.workspace = true
 archivindex-warc = { workspace = true, features = ["gzip"] }
-bounded-static = { workspace = true, features = ["derive", "chrono"] }
-chrono = { workspace = true, features = ["serde"] }
+bounded-static = { workspace = true, features = ["derive"] }
+bounded-static-derive-more.workspace = true
 data-encoding.workspace = true
 flate2.workspace = true
+jiff = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

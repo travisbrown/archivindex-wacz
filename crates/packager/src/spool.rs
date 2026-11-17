@@ -36,7 +36,7 @@ pub enum Error {
 pub struct PageDraft {
     record_id: String,
     url: String,
-    date: chrono::DateTime<chrono::Utc>,
+    date: jiff::Timestamp,
     title: Option<String>,
 }
 
@@ -45,7 +45,7 @@ impl PageDraft {
     pub const fn new(
         record_id: String,
         url: String,
-        date: chrono::DateTime<chrono::Utc>,
+        date: jiff::Timestamp,
         title: Option<String>,
     ) -> Self {
         Self {
@@ -128,7 +128,7 @@ pub struct SpoolOutputs {
     pub captures: usize,
     pub pages_count: usize,
     pub extra_pages: usize,
-    pub main_page: Option<(String, chrono::DateTime<chrono::Utc>)>,
+    pub main_page: Option<(String, jiff::Timestamp)>,
 }
 
 impl<'txn> ConversionSpool<'txn> {

@@ -6,7 +6,6 @@
 use std::borrow::Cow;
 
 use bounded_static::IntoBoundedStatic;
-use chrono::SecondsFormat;
 
 use super::DataPackage;
 
@@ -53,8 +52,7 @@ pub fn parse_data_package(
                     property,
                     value: written.to_owned(),
                 });
-                *value =
-                    serde_json::Value::String(parsed.to_rfc3339_opts(SecondsFormat::AutoSi, true));
+                *value = serde_json::Value::String(parsed.to_string());
             }
         }
     }
@@ -73,7 +71,7 @@ pub fn parse_data_package(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
+    use jiff::Timestamp;
 
     use super::*;
 
@@ -92,9 +90,7 @@ mod tests {
 
         assert_eq!(
             package.created,
-            DateTime::parse_from_rfc3339("2020-10-07T21:22:36Z")
-                .ok()
-                .map(|value| value.with_timezone(&Utc))
+            "2020-10-07T21:22:36Z".parse::<Timestamp>().ok()
         );
         assert_eq!(non_conforming, Vec::new());
     }
@@ -107,9 +103,7 @@ mod tests {
 
         assert_eq!(
             package.created,
-            DateTime::parse_from_rfc3339("2020-10-07T21:22:36Z")
-                .ok()
-                .map(|value| value.with_timezone(&Utc))
+            "2020-10-07T21:22:36Z".parse::<Timestamp>().ok()
         );
         assert_eq!(
             non_conforming,

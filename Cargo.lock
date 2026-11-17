@@ -30,15 +30,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "android_system_properties"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -91,7 +82,7 @@ dependencies = [
 [[package]]
 name = "archivindex-archiver"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#f6297508fa3e3c38d3c275e2aade4745efdbebba"
+source = "git+https://github.com/travisbrown/archivindex-warc#9416e0a2a0e0ac60ac04416b7c6adbe59ad73117"
 dependencies = [
  "archivindex-http",
  "archivindex-http-client",
@@ -100,10 +91,10 @@ dependencies = [
  "archivindex-warc",
  "archivindex-warc-identifier",
  "archivindex-warc-revisit-index",
- "chrono",
  "fluent-uri",
  "http",
  "humantime-serde",
+ "jiff",
  "serde",
  "serde_json",
  "tempfile",
@@ -114,11 +105,11 @@ dependencies = [
 [[package]]
 name = "archivindex-cdx"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "archivindex-serde",
  "bounded-static",
- "chrono",
+ "jiff",
  "serde",
  "serde_json",
  "thiserror",
@@ -127,7 +118,7 @@ dependencies = [
 [[package]]
 name = "archivindex-cli-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "clap",
  "ctrlc",
@@ -143,7 +134,7 @@ dependencies = [
 [[package]]
 name = "archivindex-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "data-encoding",
  "thiserror",
@@ -152,7 +143,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "thiserror",
 ]
@@ -160,14 +151,14 @@ dependencies = [
 [[package]]
 name = "archivindex-http-client"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "archivindex-http",
- "chrono",
  "fluent-uri",
  "http",
  "http-body-util",
  "hyper",
+ "jiff",
  "reqwest",
  "rustls",
  "thiserror",
@@ -179,7 +170,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http-client-challenge"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "archivindex-http-client",
  "data-encoding",
@@ -194,7 +185,7 @@ dependencies = [
 [[package]]
 name = "archivindex-lines"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "thiserror",
 ]
@@ -210,9 +201,9 @@ dependencies = [
  "archivindex-test-support",
  "archivindex-wacz",
  "archivindex-warc",
- "chrono",
  "flate2",
  "fluent-uri",
+ "jiff",
  "proptest",
  "redb",
  "serde",
@@ -236,7 +227,7 @@ dependencies = [
 [[package]]
 name = "archivindex-publication"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -245,7 +236,7 @@ dependencies = [
 [[package]]
 name = "archivindex-serde"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "serde",
 ]
@@ -253,7 +244,7 @@ dependencies = [
 [[package]]
 name = "archivindex-surt"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "bounded-static",
  "fluent-uri",
@@ -264,7 +255,7 @@ dependencies = [
 [[package]]
 name = "archivindex-test-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#ca55e79248a94d68059c82f35530a0ca77c0411a"
+source = "git+https://github.com/travisbrown/archivindex#3fde786bce0a57764606d0be53b44bc536ee21fa"
 dependencies = [
  "futures",
  "proptest",
@@ -285,10 +276,11 @@ dependencies = [
  "archivindex-surt",
  "archivindex-warc",
  "bounded-static",
- "chrono",
+ "bounded-static-derive-more",
  "data-encoding",
  "flate2",
  "fluent-uri",
+ "jiff",
  "proptest",
  "serde",
  "serde_json",
@@ -300,14 +292,14 @@ dependencies = [
 [[package]]
 name = "archivindex-warc"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#f6297508fa3e3c38d3c275e2aade4745efdbebba"
+source = "git+https://github.com/travisbrown/archivindex-warc#9416e0a2a0e0ac60ac04416b7c6adbe59ad73117"
 dependencies = [
  "archivindex-http",
  "archivindex-warc-digest",
- "chrono",
  "file-format",
  "flate2",
  "fluent-uri",
+ "jiff",
  "memchr",
  "serde",
  "serde_json",
@@ -318,7 +310,7 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#f6297508fa3e3c38d3c275e2aade4745efdbebba"
+source = "git+https://github.com/travisbrown/archivindex-warc#9416e0a2a0e0ac60ac04416b7c6adbe59ad73117"
 dependencies = [
  "data-encoding",
  "md-5",
@@ -331,11 +323,12 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-identifier"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#f6297508fa3e3c38d3c275e2aade4745efdbebba"
+source = "git+https://github.com/travisbrown/archivindex-warc#9416e0a2a0e0ac60ac04416b7c6adbe59ad73117"
 dependencies = [
  "archivindex-warc",
  "data-encoding",
  "fluent-uri",
+ "jiff",
  "sha2",
  "thiserror",
 ]
@@ -343,12 +336,13 @@ dependencies = [
 [[package]]
 name = "archivindex-warc-revisit-index"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex-warc#f6297508fa3e3c38d3c275e2aade4745efdbebba"
+source = "git+https://github.com/travisbrown/archivindex-warc#9416e0a2a0e0ac60ac04416b7c6adbe59ad73117"
 dependencies = [
  "archivindex-http",
  "archivindex-http-client",
  "archivindex-warc",
  "fluent-uri",
+ "jiff",
  "rusqlite",
  "thiserror",
 ]
@@ -506,6 +500,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounded-static-derive-more"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b79d7fd23394d79ba37f85556a184dc2aeaec906a494b0b2a38e7136bf78ba87"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -558,12 +563,7 @@ version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
- "iana-time-zone",
- "js-sys",
  "num-traits",
- "serde",
- "wasm-bindgen",
- "windows-link",
 ]
 
 [[package]]
@@ -1191,30 +1191,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1358,6 +1334,41 @@ name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
+name = "jiff"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+dependencies = [
+ "jiff-core",
+ "jiff-static",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+]
+
+[[package]]
+name = "jiff-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+dependencies = [
+ "jiff-core",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
 
 [[package]]
 name = "jni"
@@ -1621,6 +1632,15 @@ name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "potential_utf"
@@ -2729,63 +2749,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement",
- "windows-interface",
- "windows-link",
- "windows-result",
- "windows-strings",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-
-[[package]]
-name = "windows-result"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
-dependencies = [
- "windows-link",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
-dependencies = [
- "windows-link",
-]
 
 [[package]]
 name = "windows-sys"

@@ -15,9 +15,11 @@ use archivindex_wacz::io::read::WaczReader;
 use archivindex_wacz::io::read::validate::ValidationOptions;
 use archivindex_warc::io::read::WarcReader;
 use archivindex_warc::record::extension::NoExtension;
-use chrono::SubsecRound as _;
 use flate2::read::GzDecoder;
 use fluent_uri::Uri;
+use jiff::RoundMode::Floor;
+use jiff::Unit::Millisecond;
+use jiff::civil::DateTimeRound;
 use wiremock::{Request, ResponseTemplate};
 
 /// The eight-byte PNG signature followed by a minimal IHDR prefix.
@@ -366,12 +368,13 @@ fn packages_archived_captures_with_a_random_access_index() -> Result<(), Box<dyn
             .expect("every capture is indexed")
             .fields
     };
+    let rounding = DateTimeRound::new().smallest(Millisecond).mode(Floor);
     assert_eq!(
         items
             .iter()
             .find(|item| item.fields.url == urls[0])
             .map(|item| item.timestamp.datetime()),
-        Some(home.core().date.date_time().trunc_subsecs(3))
+        Some(home.core().date.date_time().round(rounding)?)
     );
     assert_eq!(fields(&urls[0]).mime.as_deref(), Some("text/html"));
     assert_eq!(fields(&urls[2]).status, Some(404));

@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::ops::RangeInclusive;
 
 use archivindex_cdx::properties::ExtraProperties;
-use chrono::{DateTime, FixedOffset, Utc};
+use jiff::Timestamp;
+use jiff::tz::Offset;
 use proptest::prelude::*;
 use proptest::sample::select;
 
@@ -94,17 +95,17 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 /// An instant from 1970 through 2099, with nanosecond precision.
-pub fn datetime() -> impl Strategy<Value = DateTime<Utc>> {
-    (0..=4_102_444_799_i64, 0..1_000_000_000_u32).prop_map(|(seconds, nanoseconds)| {
-        DateTime::from_timestamp(seconds, nanoseconds)
+pub fn datetime() -> impl Strategy<Value = Timestamp> {
+    (0..=4_102_444_799_i64, 0..1_000_000_000_i32).prop_map(|(seconds, nanoseconds)| {
+        Timestamp::new(seconds, nanoseconds)
             .expect("invariant violation: a generated instant is in range")
     })
 }
 
 /// A time zone offset in 15-minute increments, from UTC−12 to UTC+14.
-pub fn time_zone_offset() -> impl Strategy<Value = FixedOffset> {
+pub fn time_zone_offset() -> impl Strategy<Value = Offset> {
     (-48..=56_i32).prop_map(|quarter_hours| {
-        FixedOffset::east_opt(quarter_hours * 900)
+        Offset::from_seconds(quarter_hours * 900)
             .expect("invariant violation: a generated offset is in range")
     })
 }

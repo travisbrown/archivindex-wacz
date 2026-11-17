@@ -17,7 +17,7 @@ use archivindex_lines::{LineContext, LineContextRef, Lines};
 use archivindex_warc::value::Supported as _;
 use archivindex_warc::value::marker::Sha256;
 use bounded_static::{IntoBoundedStatic, ToStatic};
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::Timestamp;
 
 /// The format identifier required in the header line of a page list.
 pub const FORMAT: &str = "json-pages-1.0";
@@ -140,14 +140,22 @@ impl Default for PageListHeader<'static> {
 }
 
 /// A single page entry in a page list.
-#[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    bounded_static_derive_more::ToStatic,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 pub struct Page<'a> {
     /// The URL of the archived page.
     #[serde(borrow)]
     pub url: Cow<'a, str>,
     /// When the page was captured.
     #[serde(deserialize_with = "crate::attributes::rfc_3339_datetime")]
-    pub ts: DateTime<Utc>,
+    pub ts: Timestamp,
     /// An arbitrary identifier for the page.
     #[serde(
         default,
@@ -248,10 +256,7 @@ impl<'a> RawPage<'a> {
     }
 
     /// Interpret the timestamp with `parse`, moving the other properties across unchanged.
-    fn into_page(
-        self,
-        parse: fn(&str) -> Option<DateTime<Utc>>,
-    ) -> Result<Page<'a>, InvalidTimestamp> {
+    fn into_page(self, parse: fn(&str) -> Option<Timestamp>) -> Result<Page<'a>, InvalidTimestamp> {
         let ts = parse(&self.ts).ok_or_else(|| InvalidTimestamp(self.ts.into_owned()))?;
 
         Ok(Page {
@@ -394,12 +399,13 @@ impl<R: BufRead> Iterator for PageListReader<R> {
 /// The synthetic identifier for a page: a truncated SHA-256 hash of its timestamp and URL.
 ///
 /// The hash input is the concatenation of the timestamp in RFC 3339 format (UTC, `Z` suffix,
-/// exactly as it is serialized in the page entry) and the URL; the identifier is the first `length`
-/// characters of the lowercase hexadecimal digest. Lengths above 64 yield the full digest.
+/// no trailing fractional zeros, exactly as it is serialized in the page entry) and the URL;
+/// the identifier is the first `length` characters of the lowercase hexadecimal digest. Lengths
+/// above 64 yield the full digest.
 #[must_use]
-pub fn synthetic_id(ts: &DateTime<Utc>, url: &str, length: usize) -> String {
+pub fn synthetic_id(ts: &Timestamp, url: &str, length: usize) -> String {
     let mut hasher = Sha256::hasher();
-    hasher.update(ts.to_rfc3339_opts(SecondsFormat::AutoSi, true).as_bytes());
+    hasher.update(ts.to_string().as_bytes());
     hasher.update(url.as_bytes());
 
     let mut id = data_encoding::HEXLOWER.encode(&hasher.finalize());
@@ -559,7 +565,7 @@ mod tests {
 
     #[proptest::property_test]
     fn synthetic_identifiers_are_hexadecimal_of_the_requested_length(
-        #[strategy = strategies::datetime()] ts: DateTime<Utc>,
+        #[strategy = strategies::datetime()] ts: Timestamp,
         #[strategy = ".*"] url: String,
         #[strategy = 0..=80_usize] length: usize,
     ) {
@@ -637,8 +643,8 @@ mod tests {
         );
         assert_eq!(
             raw.into_page_compatible().map(|page| page.ts),
-            DateTime::parse_from_rfc3339("2020-10-07T21:22:36Z")
-                .map(|value| value.with_timezone(&Utc))
+            "2020-10-07T21:22:36Z"
+                .parse::<Timestamp>()
                 .map_err(|_| InvalidTimestamp(String::new()))
         );
     }
@@ -696,7 +702,7 @@ mod tests {
         let header = PageListHeader::default();
         let mut page = Page {
             url: "https://example.com/".into(),
-            ts: Utc::now(),
+            ts: Timestamp::now(),
             id: None,
             title: None,
             text: None,
@@ -781,15 +787,31 @@ mod tests {
         // Externally computed: sha256("2020-10-07T21:22:36Zhttps://www.example.com/page").
         const DIGEST: &str = "f5ca709e5e9363c834323853295995cc0df353276b4811df37034f2bab360bbd";
 
-        let ts = DateTime::parse_from_rfc3339("2020-10-07T21:22:36Z")
-            .expect("valid timestamp")
-            .to_utc();
+        let ts = "2020-10-07T21:22:36Z"
+            .parse::<Timestamp>()
+            .expect("valid timestamp");
         let url = "https://www.example.com/page";
 
         assert_eq!(synthetic_id(&ts, url, 10), DIGEST[..10]);
         assert_eq!(synthetic_id(&ts, url, 64), DIGEST);
         // Lengths above the digest length yield the full digest.
         assert_eq!(synthetic_id(&ts, url, 100), DIGEST);
+    }
+
+    /// The ID must hash the same fraction that readers see in the serialized page timestamp.
+    #[test]
+    fn synthetic_ids_use_serialized_fractional_timestamps() {
+        for fraction in ["1", "123", "1234", "123456", "1234567", "123456789"] {
+            let written = format!("1969-12-31T23:59:59.{fraction}Z");
+            let ts: Timestamp = written.parse().unwrap();
+            let url = "https://www.example.com/page";
+            let json = serde_json::to_value(ts).unwrap();
+            assert_eq!(json.as_str(), Some(written.as_str()));
+
+            let expected =
+                crate::digest::Sha256Digest::compute(format!("{written}{url}").as_bytes());
+            assert_eq!(synthetic_id(&ts, url, 64), expected.to_string()[7..]);
+        }
     }
 
     #[test]

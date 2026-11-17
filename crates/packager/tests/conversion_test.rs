@@ -17,9 +17,9 @@ use archivindex_warc::record::header::protocol::Protocol;
 use archivindex_warc::record::header::truncated_type::TruncatedType;
 use archivindex_warc::record::{FieldsBlock, Record};
 use archivindex_warc::value::{Algorithm, LabelledDigest, MediaType, WarcDate};
-use chrono::Utc;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use jiff::Timestamp;
 
 struct PayloadTitle;
 
@@ -88,6 +88,70 @@ fn write_source(path: &std::path::Path, records: Vec<Record>, gzip: bool) -> std
     Ok(())
 }
 
+/// Page timestamps retain the capture's nanoseconds while CDX timestamps truncate to milliseconds,
+/// including for captures before the Unix epoch.
+#[test]
+fn fractional_capture_dates_preserve_page_precision() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let instant: Timestamp = "1969-12-31T23:59:59.123456789Z".parse()?;
+    let url = "https://example.com/";
+    write_source(
+        &input,
+        vec![response(url, "capture", instant.into())],
+        false,
+    )?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+    assert_eq!(summary.captures, 1);
+    assert_eq!(summary.warnings, []);
+
+    let mut reader = WaczReader::open(&output)?;
+    let pages = reader.pages()?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(pages[0].ts, instant);
+    let captures = reader.lookup(url, ..)?;
+    assert_eq!(captures[0].item.timestamp.to_string(), "19691231235959123");
+    assert!(reader.validate(ValidationOptions::all())?.is_conformant());
+    Ok(())
+}
+
+/// WARC and CDX civil datetimes extend beyond Jiff's instant range. Preserve such records in the
+/// WARC, but report that they cannot be included in the page list and index.
+#[test]
+fn captures_outside_the_page_timestamp_range_are_reported() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let input = directory.path().join("input.warc");
+    let output = directory.path().join("output.wacz");
+    let date = jiff::civil::date(9999, 12, 31).at(23, 59, 59, 0);
+    let record = response("https://example.com/", "capture", date.into());
+    let record_id = record.core().record_id.as_str().to_owned();
+    write_source(&input, vec![record], false)?;
+
+    let summary = WarcToWacz::new(&input, &output).run()?;
+    assert_eq!(summary.captures, 0);
+    assert_eq!(
+        summary.warnings,
+        vec![ConversionWarning::CaptureNotIndexed {
+            record_id,
+            reason: SkipReason::UnrepresentableTimestamp,
+        }]
+    );
+    let mut reader = WaczReader::open(&output)?;
+    assert_eq!(reader.pages()?.count(), 0);
+    assert_eq!(
+        reader
+            .warc("archive/data.warc")?
+            .iter_records::<NoExtension>()
+            .records()
+            .collect::<Result<Vec<_>, _>>()?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
 /// IPv6 capture keys must use the same rendering as URL lookup and validation.
 #[test]
 fn ipv6_captures_are_indexed_and_found() -> Result<(), Box<dyn std::error::Error>> {
@@ -96,7 +160,11 @@ fn ipv6_captures_are_indexed_and_found() -> Result<(), Box<dyn std::error::Error
     let url = "https://[2001:db8::1]:8080/Page";
     write_source(
         &input,
-        vec![response(url, "IPv6 capture", WarcDate::from(Utc::now()))],
+        vec![response(
+            url,
+            "IPv6 capture",
+            WarcDate::from(Timestamp::now()),
+        )],
         false,
     )?;
 
@@ -136,7 +204,7 @@ fn conversion_fixture(
     };
     let input = directory.path().join(input_name);
     let output = directory.path().join("output.wacz");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let first_warcinfo = warcinfo(
         b"title: First collection\r\ndescription: First description\r\n",
         date,
@@ -293,7 +361,10 @@ fn rejects_an_invalid_gzip_compression_level() -> Result<(), Box<dyn std::error:
     let output = directory.path().join("output.wacz");
     write_source(
         &input,
-        vec![warcinfo(b"title: Test\r\n", WarcDate::from(Utc::now()))],
+        vec![warcinfo(
+            b"title: Test\r\n",
+            WarcDate::from(Timestamp::now()),
+        )],
         false,
     )?;
 
@@ -318,7 +389,10 @@ fn rejects_an_invalid_zip_compression_level() -> Result<(), Box<dyn std::error::
     let output = directory.path().join("output.wacz");
     write_source(
         &input,
-        vec![warcinfo(b"title: Test\r\n", WarcDate::from(Utc::now()))],
+        vec![warcinfo(
+            b"title: Test\r\n",
+            WarcDate::from(Timestamp::now()),
+        )],
         false,
     )?;
 
@@ -340,7 +414,7 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");
     let output = directory.path().join("output.wacz");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let html = Record::<NoExtension>::response("https://example.com/html", date)?.body(
         b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 4\r\n\r\nhtml"
             .to_vec(),
@@ -446,7 +520,7 @@ fn index_fields_follow_cdxj_conventions() -> Result<(), Box<dyn std::error::Erro
 #[test]
 fn stored_http_messages_keep_warc_framing_tolerance() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let url = "https://example.com/";
     let digest = LabelledDigest::compute(Algorithm::Sha256, b"hello")
         .expect("sha256 is enabled")
@@ -512,7 +586,7 @@ fn unparsable_http_message_is_copied_but_not_indexed() -> Result<(), Box<dyn std
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");
     let output = directory.path().join("output.wacz");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let good = response("https://example.com/", "root", date);
     let bad = Record::<NoExtension>::response("https://example.com/bad", date)?
         .body(b"not an HTTP message".to_vec())?;
@@ -553,7 +627,7 @@ fn records_are_copied_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");
     let output = directory.path().join("output.wacz");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let mut request = Record::<NoExtension>::request("https://example.com/", date)?
         .body(b"GET / HTTP/1.1\r\n\r\n".to_vec())?
         .into_raw()?;
@@ -594,7 +668,7 @@ fn a_warc_with_no_captures_becomes_an_empty_collection() -> Result<(), Box<dyn s
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");
     let output = directory.path().join("output.wacz");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     write_source(
         &input,
         vec![warcinfo(b"title: Nothing captured\r\n", date)],
@@ -620,7 +694,7 @@ fn metadata_annotates_its_page_in_any_order() -> Result<(), Box<dyn std::error::
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");
     let output = directory.path().join("output.wacz");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let root = response("https://example.com/", "root", date);
     // One metadata record precedes the capture and another follows it; their properties merge.
     let title = metadata(&root, b"title: Early title\r\n", date);
@@ -648,7 +722,7 @@ fn metadata_annotates_its_page_in_any_order() -> Result<(), Box<dyn std::error::
 fn page_drafts_preserve_order_and_content() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.warc");
-    let date = WarcDate::from(Utc::now());
+    let date = WarcDate::from(Timestamp::now());
     let body = "quoted \"text\", backslash \\, newline\n日本語\n".repeat(512);
     let first = response("https://example.com/z", &body, date);
     let extra = response("https://example.com/a", "extra", date);

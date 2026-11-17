@@ -16,7 +16,7 @@ use std::borrow::Cow;
 
 use archivindex_cdx::properties::ExtraProperties;
 use bounded_static::ToStatic;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::digest::Sha256Digest;
 
@@ -320,7 +320,15 @@ fn constraint_errors(
 }
 
 /// A WACZ `datapackage.json` manifest.
-#[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    bounded_static_derive_more::ToStatic,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 pub struct DataPackage<'a> {
     /// The data package profile identifier; WACZ requires [`PROFILE`].
     #[serde(borrow)]
@@ -404,14 +412,14 @@ pub struct DataPackage<'a> {
         deserialize_with = "crate::attributes::optional_rfc_3339_datetime",
         skip_serializing_if = "Option::is_none"
     )]
-    pub created: Option<DateTime<Utc>>,
+    pub created: Option<Timestamp>,
     /// When the WACZ file was last modified.
     #[serde(
         default,
         deserialize_with = "crate::attributes::optional_rfc_3339_datetime",
         skip_serializing_if = "Option::is_none"
     )]
-    pub modified: Option<DateTime<Utc>>,
+    pub modified: Option<Timestamp>,
     /// A description of the software that created the WACZ file.
     #[serde(
         default,
@@ -435,7 +443,7 @@ pub struct DataPackage<'a> {
         deserialize_with = "crate::attributes::optional_rfc_3339_datetime",
         skip_serializing_if = "Option::is_none"
     )]
-    pub main_page_date: Option<DateTime<Utc>>,
+    pub main_page_date: Option<Timestamp>,
     /// Additional properties, preserved verbatim for round-tripping.
     #[serde(flatten)]
     pub extra: ExtraProperties,
@@ -483,11 +491,11 @@ pub struct DataPackageBuilder {
     sources: Vec<SourceMetadata>,
     licenses: Vec<LicenseMetadata>,
     contributors: Vec<ContributorMetadata>,
-    created: Option<DateTime<Utc>>,
-    modified: Option<DateTime<Utc>>,
+    created: Option<Timestamp>,
+    modified: Option<Timestamp>,
     software: Option<Cow<'static, str>>,
     main_page_url: Option<Cow<'static, str>>,
-    main_page_date: Option<DateTime<Utc>>,
+    main_page_date: Option<Timestamp>,
     extra: ExtraProperties,
 }
 
@@ -570,21 +578,21 @@ impl DataPackageBuilder {
 
     /// Set the package creation time instead of using the writer's current-time default.
     #[must_use]
-    pub const fn created(mut self, value: DateTime<Utc>) -> Self {
+    pub const fn created(mut self, value: Timestamp) -> Self {
         self.created = Some(value);
         self
     }
 
     /// Set the package modification time.
     #[must_use]
-    pub const fn modified(mut self, value: DateTime<Utc>) -> Self {
+    pub const fn modified(mut self, value: Timestamp) -> Self {
         self.modified = Some(value);
         self
     }
 
     /// Set the capture date for the primary replay URL.
     #[must_use]
-    pub const fn main_page_date(mut self, value: DateTime<Utc>) -> Self {
+    pub const fn main_page_date(mut self, value: Timestamp) -> Self {
         self.main_page_date = Some(value);
         self
     }

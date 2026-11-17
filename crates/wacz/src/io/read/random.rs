@@ -574,8 +574,6 @@ fn verify_digest(path: &str, bytes: &[u8], expected: Sha256Digest) -> Result<(),
 mod tests {
     use std::borrow::Cow;
 
-    use chrono::{TimeZone, Utc};
-
     use super::*;
 
     #[test]
@@ -583,7 +581,7 @@ mod tests {
         let item = cdxj::Entry {
             key: Cow::Borrowed("com,example)/"),
             timestamp: archivindex_cdx::timestamp::Timestamp::new(
-                Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
+                jiff::civil::date(2024, 1, 1).at(0, 0, 0, 0),
             )
             .unwrap(),
             fields: cdxj::ConformingFields::new(

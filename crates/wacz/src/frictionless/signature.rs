@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use bounded_static::ToStatic;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::digest::Sha256Digest;
 
@@ -40,7 +40,7 @@ impl SignatureData<'_> {
 
     /// When the signature was created.
     #[must_use]
-    pub const fn created(&self) -> &DateTime<Utc> {
+    pub const fn created(&self) -> &Timestamp {
         match self {
             Self::DomainIdentity(signature) => &signature.created,
             Self::Anonymous(signature) => &signature.created,
@@ -76,13 +76,22 @@ impl SignatureData<'_> {
 }
 
 /// An anonymous signature with a public key for external verification.
-#[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    bounded_static_derive_more::ToStatic,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnonymousSignature<'a> {
     /// The SHA-256 digest of `datapackage.json` that was signed.
     pub hash: Sha256Digest,
     /// When the signature was created.
-    pub created: DateTime<Utc>,
+    #[serde(deserialize_with = "crate::attributes::rfc_3339_datetime")]
+    pub created: Timestamp,
     /// The software that created the signature.
     #[serde(borrow)]
     pub software: Cow<'a, str>,
@@ -101,13 +110,22 @@ pub struct AnonymousSignature<'a> {
 ///
 /// The envelope includes a TLS certificate for [`domain`](Self::domain) and an RFC 3161
 /// countersignature for the creation time. Parsing does not verify either signature.
-#[derive(Clone, Debug, Eq, PartialEq, ToStatic, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    bounded_static_derive_more::ToStatic,
+    serde::Deserialize,
+    serde::Serialize,
+)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DomainIdentitySignature<'a> {
     /// The SHA-256 digest of `datapackage.json` that was signed.
     pub hash: Sha256Digest,
     /// When the signature was created.
-    pub created: DateTime<Utc>,
+    #[serde(deserialize_with = "crate::attributes::rfc_3339_datetime")]
+    pub created: Timestamp,
     /// The software that created the signature.
     #[serde(borrow)]
     pub software: Cow<'a, str>,

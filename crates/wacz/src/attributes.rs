@@ -2,7 +2,9 @@
 
 use std::fmt;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use jiff::Timestamp;
+use jiff::civil::{Date, DateTime};
+use jiff::tz::Offset;
 use serde::de::{Deserializer, Unexpected, Visitor};
 
 /// The zone-less date-time layouts accepted by the compatibility parser, interpreted as UTC.
@@ -12,35 +14,75 @@ const NAIVE_DATETIME_LAYOUTS: [&str; 2] = ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:
 const DATE_LAYOUT: &str = "%Y-%m-%d";
 
 /// Parse an RFC 3339 date-time, the only form the specification permits, normalizing to UTC.
-pub fn parse_rfc_3339(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|datetime| datetime.with_timezone(&Utc))
-        .ok()
+///
+/// Leap seconds and fractions longer than nine digits are rejected to avoid losing precision.
+pub fn parse_rfc_3339(value: &str) -> Option<Timestamp> {
+    // Jiff also accepts Temporal syntax, including annotations and abbreviated offsets.
+    // Check the RFC 3339 layout before delegating calendar and offset validation to Jiff.
+    let bytes = value.as_bytes();
+    let prefix = bytes.get(..19)?;
+    if !prefix.iter().enumerate().all(|(index, byte)| match index {
+        4 | 7 => *byte == b'-',
+        10 => matches!(byte, b'T' | b't' | b' '),
+        13 | 16 => *byte == b':',
+        _ => byte.is_ascii_digit(),
+    }) {
+        return None;
+    }
+    // Leap seconds cannot be represented losslessly by Jiff.
+    if &prefix[17..19] == b"60" {
+        return None;
+    }
+    let suffix = &bytes[19..];
+    let zone = if let Some(fraction) = suffix.strip_prefix(b".") {
+        let digits = fraction
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if !(1..=9).contains(&digits) {
+            return None;
+        }
+        &fraction[digits..]
+    } else {
+        suffix
+    };
+    let valid_zone = matches!(zone, b"Z" | b"z")
+        || (zone.len() == 6
+            && matches!(zone[0], b'+' | b'-')
+            && zone[3] == b':'
+            && zone[1..3].iter().chain(&zone[4..]).all(u8::is_ascii_digit)
+            && &zone[1..3] < b"24".as_slice());
+
+    valid_zone.then(|| value.parse().ok()).flatten()
 }
 
 /// Parse RFC 3339 or a nonstandard date-time form produced by WACZ tools.
 ///
 /// Zone-less date-times are interpreted as UTC and bare dates as midnight UTC.
-pub fn parse_compatible_datetime(value: &str) -> Option<DateTime<Utc>> {
-    parse_rfc_3339(value)
-        .or_else(|| {
-            NAIVE_DATETIME_LAYOUTS
-                .iter()
-                .find_map(|layout| NaiveDateTime::parse_from_str(value, layout).ok())
-                .map(|datetime| datetime.and_utc())
-        })
-        .or_else(|| {
-            NaiveDate::parse_from_str(value, DATE_LAYOUT)
-                .ok()
-                .map(|date| date.and_time(NaiveTime::MIN).and_utc())
-        })
+pub fn parse_compatible_datetime(value: &str) -> Option<Timestamp> {
+    if value.as_bytes().get(17..19) == Some(b"60") {
+        None
+    } else {
+        parse_rfc_3339(value)
+            .or_else(|| {
+                NAIVE_DATETIME_LAYOUTS
+                    .iter()
+                    .find_map(|layout| DateTime::strptime(layout, value).ok())
+                    .and_then(|datetime| Offset::UTC.to_timestamp(datetime).ok())
+            })
+            .or_else(|| {
+                Date::strptime(DATE_LAYOUT, value)
+                    .ok()
+                    .and_then(|date| Offset::UTC.to_timestamp(date.at(0, 0, 0, 0)).ok())
+            })
+    }
 }
 
 /// A visitor that accepts only the RFC 3339 form required by the specification.
 struct DateTimeVisitor;
 
 impl Visitor<'_> for DateTimeVisitor {
-    type Value = DateTime<Utc>;
+    type Value = Timestamp;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("an RFC 3339 date-time")
@@ -58,7 +100,7 @@ impl Visitor<'_> for DateTimeVisitor {
 /// Returns the deserializer's error if the value is not an RFC 3339 date-time string.
 pub fn rfc_3339_datetime<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<DateTime<Utc>, D::Error> {
+) -> Result<Timestamp, D::Error> {
     deserializer.deserialize_str(DateTimeVisitor)
 }
 
@@ -69,11 +111,11 @@ pub fn rfc_3339_datetime<'de, D: Deserializer<'de>>(
 /// Returns the deserializer's error if a present value is not an RFC 3339 date-time string.
 pub fn optional_rfc_3339_datetime<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<Option<DateTime<Utc>>, D::Error> {
+) -> Result<Option<Timestamp>, D::Error> {
     struct OptionVisitor;
 
     impl<'de> Visitor<'de> for OptionVisitor {
-        type Value = Option<DateTime<Utc>>;
+        type Value = Option<Timestamp>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("optional RFC 3339 date-time")
@@ -106,52 +148,54 @@ mod tests {
     use crate::strategies;
 
     #[proptest::property_test]
-    fn rfc_3339_dates_round_trip(#[strategy = strategies::datetime()] datetime: DateTime<Utc>) {
+    fn rfc_3339_dates_round_trip(#[strategy = strategies::datetime()] datetime: Timestamp) {
         prop_assert_eq!(
-            parse_compatible_datetime(&datetime.to_rfc3339()),
+            parse_compatible_datetime(&datetime.to_string()),
             Some(datetime)
         );
     }
 
     #[proptest::property_test]
     fn zone_offsets_name_the_same_instant(
-        #[strategy = strategies::datetime()] datetime: DateTime<Utc>,
-        #[strategy = strategies::time_zone_offset()] offset: chrono::FixedOffset,
+        #[strategy = strategies::datetime()] datetime: Timestamp,
+        #[strategy = strategies::time_zone_offset()] offset: Offset,
     ) {
-        let elsewhere = datetime.with_timezone(&offset).to_rfc3339();
+        let elsewhere = jiff::fmt::temporal::DateTimePrinter::new()
+            .timestamp_with_offset_to_string(&datetime, offset);
 
         prop_assert_eq!(parse_compatible_datetime(&elsewhere), Some(datetime));
     }
 
     #[proptest::property_test]
     fn zoneless_date_times_are_read_as_utc(
-        #[strategy = strategies::datetime()] datetime: DateTime<Utc>,
+        #[strategy = strategies::datetime()] datetime: Timestamp,
     ) {
         // `%.f` prints nothing at all for a whole second, so both layouts are exercised.
-        let written = datetime.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
+        let written = datetime.strftime("%Y-%m-%dT%H:%M:%S%.f").to_string();
 
         prop_assert_eq!(parse_compatible_datetime(&written), Some(datetime));
     }
 
     #[proptest::property_test]
     fn bare_dates_are_read_as_midnight_utc(
-        #[strategy = strategies::datetime()] datetime: DateTime<Utc>,
+        #[strategy = strategies::datetime()] datetime: Timestamp,
     ) {
-        let written = datetime.format("%Y-%m-%d").to_string();
+        let written = datetime.strftime("%Y-%m-%d").to_string();
         let parsed = parse_compatible_datetime(&written);
 
         prop_assert_eq!(
-            parsed.map(|parsed| parsed.date_naive()),
-            Some(datetime.date_naive())
+            parsed.map(|parsed| Offset::UTC.to_datetime(parsed).date()),
+            Some(Offset::UTC.to_datetime(datetime).date())
         );
-        prop_assert_eq!(parsed.map(|parsed| parsed.time()), Some(NaiveTime::MIN));
+        prop_assert_eq!(
+            parsed.map(|parsed| Offset::UTC.to_datetime(parsed).time()),
+            Some(jiff::civil::Time::midnight())
+        );
     }
 
     #[test]
     fn dates_parse_in_every_accepted_form() {
-        let expected = DateTime::parse_from_rfc3339("2020-10-07T21:22:36Z")
-            .map(|datetime| datetime.with_timezone(&Utc))
-            .ok();
+        let expected = "2020-10-07T21:22:36Z".parse::<Timestamp>().ok();
 
         assert_eq!(parse_compatible_datetime("2020-10-07T21:22:36Z"), expected);
         assert_eq!(
@@ -165,11 +209,11 @@ mod tests {
         );
         assert_eq!(
             parse_compatible_datetime("2020-10-07T21:22"),
-            expected.map(|datetime| datetime - chrono::Duration::seconds(36))
+            expected.map(|datetime| datetime - jiff::SignedDuration::from_secs(36))
         );
         assert_eq!(
-            parse_compatible_datetime("2020-10-07").map(|datetime| datetime.to_rfc3339()),
-            Some("2020-10-07T00:00:00+00:00".to_owned())
+            parse_compatible_datetime("2020-10-07").map(|datetime| datetime.to_string()),
+            Some("2020-10-07T00:00:00Z".to_owned())
         );
         assert_eq!(parse_compatible_datetime("October 7, 2020"), None);
         assert_eq!(parse_compatible_datetime(""), None);
@@ -185,6 +229,46 @@ mod tests {
         ] {
             assert!(parse_compatible_datetime(value).is_some());
             assert_eq!(parse_rfc_3339(value), None);
+        }
+    }
+
+    #[test]
+    fn strict_dates_reject_temporal_extensions_and_precision_loss() {
+        for value in [
+            "20201007T212236Z",
+            "2020-10-07T21:22Z",
+            "2020-10-07T21:22:36+02",
+            "2020-10-07T21:22:36+0200",
+            "2020-10-07T21:22:36+02:00:01",
+            "2020-10-07T21:22:36+24:00",
+            "2020-10-07T21:22:36Z[UTC]",
+            "2020-10-07T21:22:36Z[u-ca=iso8601]",
+            "2020-10-07T21:22:36,123Z",
+            "2020-10-07T21:22:36.Z",
+            "2020-10-07T21:22:36.1234567891Z",
+            "2016-12-31T23:59:60Z",
+            "2016-12-31T23:59:60",
+            "2020-02-30T21:22:36Z",
+            "2020-10-07T21:22:36Z trailing",
+            "日2020-10-07T21:22:36Z",
+        ] {
+            assert_eq!(parse_rfc_3339(value), None, "accepted {value}");
+            assert_eq!(parse_compatible_datetime(value), None, "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn strict_dates_preserve_nanoseconds_and_normalize_offsets() {
+        let expected = "1969-12-31T23:59:59.123456789Z".parse().unwrap();
+        for value in [
+            "1969-12-31T23:59:59.123456789Z",
+            "1969-12-31t23:59:59.123456789z",
+            "1969-12-31 23:59:59.123456789Z",
+            "1970-01-01T01:59:59.123456789+02:00",
+            "1969-12-31T18:59:59.123456789-05:00",
+            "1969-12-31T23:59:59.123456789-00:00",
+        ] {
+            assert_eq!(parse_rfc_3339(value), Some(expected), "rejected {value}");
         }
     }
 

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Seek, Write};
 
-use chrono::{SubsecRound as _, Utc};
+use jiff::{RoundMode, Timestamp, TimestampRound, Unit};
 
 use super::resource::options_for;
 use super::{Error, WaczWriter};
@@ -18,6 +18,10 @@ impl<W: Write + Seek> WaczWriter<W> {
     ///
     /// This does not publish a filesystem path; [`super::WaczFileWriter::finish`] adds that
     /// operation for file outputs.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "truncating the current time to milliseconds stays in range"
+    )]
     pub fn finish(self, metadata: DataPackageBuilder) -> Result<W, Error> {
         if self.poisoned {
             return Err(Error::Poisoned);
@@ -54,9 +58,15 @@ impl<W: Write + Seek> WaczWriter<W> {
             poisoned: _,
         } = self;
         let mut package = metadata.into_data_package(resources);
-        let created = *package
-            .created
-            .get_or_insert_with(|| Utc::now().trunc_subsecs(3));
+        let created = *package.created.get_or_insert_with(|| {
+            Timestamp::now()
+                .round(
+                    TimestampRound::new()
+                        .smallest(Unit::Millisecond)
+                        .mode(RoundMode::Floor),
+                )
+                .expect("invariant violation: truncating the current time stays in range")
+        });
         package.modified.get_or_insert(created);
         package.software.get_or_insert(Cow::Borrowed(SOFTWARE));
 

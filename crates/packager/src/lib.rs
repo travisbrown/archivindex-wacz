@@ -115,7 +115,7 @@ pub enum SkipReason {
     UnparsableHttpMessage,
     /// No payload digest is declared and none could be computed from the block.
     UndeterminedPayload,
-    /// The capture date cannot be represented by a CDX timestamp.
+    /// The capture date cannot be represented by a CDX or page timestamp.
     UnrepresentableTimestamp,
 }
 
@@ -123,7 +123,9 @@ impl std::fmt::Display for SkipReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::UnparsableHttpMessage => "its block is not a parseable HTTP message",
-            Self::UnrepresentableTimestamp => "its date cannot be represented in a CDX index",
+            Self::UnrepresentableTimestamp => {
+                "its date cannot be represented in a CDX index or page list"
+            }
             Self::UndeterminedPayload => "its payload digest is neither declared nor computable",
         })
     }
@@ -511,7 +513,9 @@ fn capture_parts(
     let page = PageDraft::new(
         record.core().record_id.as_str().to_owned(),
         url.clone(),
-        date,
+        jiff::tz::Offset::UTC
+            .to_timestamp(date)
+            .map_err(|_| SkipReason::UnrepresentableTimestamp)?,
         generated_title,
     );
     let item = cdxj::Entry {

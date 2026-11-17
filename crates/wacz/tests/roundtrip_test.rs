@@ -18,7 +18,6 @@ use archivindex_warc::io::write::WarcWriter;
 use archivindex_warc::record::Record;
 use archivindex_warc::record::extension::NoExtension;
 use archivindex_warc::value::marker::Sha256;
-use chrono::{TimeZone, Utc};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::{DeflateEncoder, GzEncoder};
@@ -45,8 +44,8 @@ fn warc_bytes() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 }
 
 /// The conventional capture time used by index and page fixtures.
-fn capture_time() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2020, 10, 7, 21, 22, 36).unwrap()
+const fn capture_time() -> jiff::civil::DateTime {
+    jiff::civil::date(2020, 10, 7).at(21, 22, 36, 0)
 }
 
 /// Build a minimal CDXJ item for a URL captured at [`capture_time`].
@@ -104,7 +103,7 @@ fn finish_fixture<W: Write + Seek>(
 /// Build a searchable item at a particular time without requiring a corresponding WARC record.
 fn item_at(
     url: &str,
-    timestamp: chrono::DateTime<Utc>,
+    timestamp: jiff::civil::DateTime,
 ) -> Result<cdxj::Entry<'static>, archivindex_surt::url::Error> {
     let mut item = item_for(url)?;
     item.timestamp = Timestamp::new(timestamp).unwrap();
@@ -195,7 +194,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
 
     let page = Page {
         url: Cow::Borrowed(URL),
-        ts: capture_time,
+        ts: jiff::tz::Offset::UTC.to_timestamp(capture_time)?,
         id: Some(Cow::Borrowed("1db0ef709a")),
         title: Some(Cow::Borrowed("Example Domain")),
         text: None,
@@ -208,7 +207,7 @@ fn build_wacz(warc_name: &str, warc_data: &[u8]) -> Result<Vec<u8>, Box<dyn std:
     let metadata = DataPackageBuilder::new()
         .title("Test collection")
         .main_page_url(URL)
-        .main_page_date(capture_time);
+        .main_page_date(jiff::tz::Offset::UTC.to_timestamp(capture_time)?);
 
     Ok(writer.finish(metadata)?.into_inner())
 }
@@ -447,7 +446,7 @@ fn gzip_capture_ranges_reject_multiple_records() -> Result<(), Box<dyn std::erro
 /// supplied identifiers are preserved.
 #[test]
 fn synthetic_page_ids() -> Result<(), Box<dyn std::error::Error>> {
-    let capture_time = capture_time();
+    let capture_time = jiff::tz::Offset::UTC.to_timestamp(capture_time())?;
     let with_id = Page {
         url: Cow::Borrowed(URL),
         ts: capture_time,
@@ -640,8 +639,8 @@ fn zipnum_index() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn lookup_orders_and_filters_captures_chronologically() -> Result<(), Box<dyn std::error::Error>> {
     let first = capture_time();
-    let second = first + chrono::TimeDelta::milliseconds(500);
-    let third = first + chrono::TimeDelta::seconds(1);
+    let second = first + jiff::SignedDuration::from_millis(500);
+    let third = first + jiff::SignedDuration::from_secs(1);
     let mut items = [
         item_at(URL, third)?,
         item_at(URL, first)?,
@@ -911,8 +910,8 @@ fn plain_index_is_sorted_and_deduplicated() -> Result<(), Box<dyn std::error::Er
 /// both formats, and the writer remains usable for a correctly ordered file.
 #[test]
 fn unsorted_index_files_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let earlier = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap();
-    let later = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).single().unwrap();
+    let earlier = jiff::civil::date(2024, 1, 1).at(0, 0, 0, 0);
+    let later = jiff::civil::date(2024, 1, 2).at(0, 0, 0, 0);
     let items = [
         item_at("https://www.example.com/page0", later)?,
         item_at("https://www.example.com/page0", earlier)?,
@@ -1058,7 +1057,7 @@ fn zipnum_default_block_size() {
 fn named_page_lists_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let page = Page {
         url: Cow::Borrowed(URL),
-        ts: capture_time(),
+        ts: jiff::tz::Offset::UTC.to_timestamp(capture_time())?,
         id: Some(Cow::Borrowed("extra-page-id")),
         title: None,
         text: None,
@@ -1097,7 +1096,7 @@ fn synthetic_ids_preserve_extra_properties() -> Result<(), Box<dyn std::error::E
 
     let page = Page {
         url: Cow::Borrowed(URL),
-        ts: capture_time(),
+        ts: jiff::tz::Offset::UTC.to_timestamp(capture_time())?,
         id: None,
         title: None,
         text: None,
@@ -1948,7 +1947,8 @@ fn validate_correlates_index_metadata_with_records() -> Result<(), Box<dyn std::
 
     let mut bad_timestamp = good.clone();
     bad_timestamp.timestamp =
-        Timestamp::new_with_milliseconds(capture_time() + chrono::TimeDelta::seconds(1)).unwrap();
+        Timestamp::new_with_milliseconds(capture_time() + jiff::SignedDuration::from_secs(1))
+            .unwrap();
 
     let mut bad_status = good.clone();
     bad_status.fields.status = Some(404);

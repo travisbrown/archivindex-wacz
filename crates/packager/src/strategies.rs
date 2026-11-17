@@ -23,7 +23,7 @@ pub fn page_draft() -> impl Strategy<Value = PageDraft> {
         proptest::option::of("[a-z ]{0,8}"),
     )
         .prop_map(|(record_id, url, seconds, title)| {
-            let date = chrono::DateTime::from_timestamp(seconds, 0)
+            let date = jiff::Timestamp::from_second(seconds)
                 .expect("invariant violation: a generated instant is in range");
 
             PageDraft::new(record_id, url, date, title)
