@@ -43,7 +43,7 @@ fn warc_to_wacz(
     let summary = conversion.run()?;
 
     for warning in &summary.warnings {
-        log::warn!("{warning}");
+        tracing::warn!("{warning}");
     }
     if !quiet {
         println!(

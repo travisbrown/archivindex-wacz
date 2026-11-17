@@ -22,4 +22,4 @@ archivindex-cli-support.workspace = true
 archivindex-packager = { version = "0.1.0", path = "../../crates/packager" }
 archivindex-wacz.workspace = true
 clap.workspace = true
-log.workspace = true
+tracing.workspace = true
