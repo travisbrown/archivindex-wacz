@@ -104,7 +104,7 @@ dependencies = [
 [[package]]
 name = "archivindex-cdx"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "archivindex-serde",
  "bounded-static",
@@ -117,7 +117,7 @@ dependencies = [
 [[package]]
 name = "archivindex-cli-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "clap",
  "ctrlc",
@@ -133,7 +133,7 @@ dependencies = [
 [[package]]
 name = "archivindex-digest"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "data-encoding",
  "thiserror",
@@ -142,7 +142,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "thiserror",
 ]
@@ -150,7 +150,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http-client"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "archivindex-http",
  "fluent-uri",
@@ -169,7 +169,7 @@ dependencies = [
 [[package]]
 name = "archivindex-http-client-challenge"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "archivindex-http-client",
  "data-encoding",
@@ -184,7 +184,7 @@ dependencies = [
 [[package]]
 name = "archivindex-lines"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "thiserror",
 ]
@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "archivindex-publication"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "archivindex-serde"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "serde",
 ]
@@ -243,7 +243,7 @@ dependencies = [
 [[package]]
 name = "archivindex-surt"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "bounded-static",
  "fluent-uri",
@@ -254,7 +254,7 @@ dependencies = [
 [[package]]
 name = "archivindex-test-support"
 version = "0.1.0"
-source = "git+https://github.com/travisbrown/archivindex#3e23f91f1d635851b8e036723527fc6a4801fb2e"
+source = "git+https://github.com/travisbrown/archivindex#3affc4fc4f9f3ee6c6f0ea01382f70ace20d3a4b"
 dependencies = [
  "futures",
  "proptest",
